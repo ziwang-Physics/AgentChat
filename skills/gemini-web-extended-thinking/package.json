@@ -1,16 +1,24 @@
 {
-  "name": "gemini-web-extended-thinking",
-  "version": "1.0.0",
-  "description": "Playwright/CDP script to interact with Gemini Web (Pro Extended Thinking mode)",
+  "name": "gemini-extended-bridge",
+  "version": "2.0.0",
+  "description": "Playwright/CDP bridge for Gemini Web Pro Extended Thinking",
   "main": "index.js",
+  "bin": {
+    "gemini-bridge": "index.js"
+  },
   "scripts": {
-    "test": "node index.js 'Hello, this is a test.'"
+    "test": "node index.js --smoke",
+    "doctor": "node index.js --doctor"
   },
   "dependencies": {
-    "playwright": "^1.52.0"
+    "playwright-core": "^1.52.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=18.0.0"
   },
+  "files": [
+    "index.js",
+    "SKILL.md"
+  ],
   "license": "MIT"
 }
