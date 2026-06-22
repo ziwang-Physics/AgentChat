@@ -1,6 +1,6 @@
-# My Claude Code Skills
+# Gemini Extended Thinking for Claude
 
-Collection of skills for [Claude Code](https://claude.ai/code) to automate complex workflows.
+Bridge [Claude Code](https://claude.ai/code) with [Gemini Web](https://gemini.google.com)'s Pro Extended Thinking mode — enabling deep, multi-step reasoning for complex research and engineering workflows.
 
 ## Prerequisites
 
@@ -31,11 +31,11 @@ Chrome profile is stored in `~/.chrome-debug-profile` — login state persists a
 
 ```bash
 # Clone the repo
-git clone git@github.com:HelloZi/my-claude-skills.git
+git clone git@github.com:ziwang-Physics/gemini-extended-thinking.git
 
-# Symlink skills into Claude Code
+# Symlink the skill into Claude Code
 mkdir -p ~/.claude/skills
-ln -s $(pwd)/my-claude-skills/skills/* ~/.claude/skills/
+ln -s $(pwd)/gemini-extended-thinking/skills/* ~/.claude/skills/
 ```
 
 ## License
