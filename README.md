@@ -1,4 +1,4 @@
-# My Claude Code Skills
+# Let Your Agent Chat With Gemini
 
 Collection of skills for [Claude Code](https://claude.ai/code) to automate complex workflows.
 
