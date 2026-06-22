@@ -25,7 +25,7 @@
  *   --doctor     — check Chrome CDP connectivity only
  */
 
-const { chromium } = require('playwright');
+const { chromium } = require('playwright-core');
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const CDP_URL           = 'http://127.0.0.1:9222';
@@ -411,8 +411,15 @@ async function submitToGemini(page, message, options = {}) {
                 );
             }
 
-            // Clear existing text cleanly
-            await editorLocator.fill('');
+            // Clear existing text (keyboard fallback for custom elements like <rich-textarea>)
+            try {
+                await editorLocator.fill('');
+            } catch {
+                // Custom element (rich-textarea) doesn't support fill() — use keyboard
+                await editorLocator.click();
+                await page.keyboard.press('ControlOrMeta+a');
+                await page.keyboard.press('Backspace');
+            }
             await page.waitForTimeout(100);
 
             // ── 3. Type prompt with payload integrity check ──
@@ -545,10 +552,14 @@ async function submitToGemini(page, message, options = {}) {
                         await stopBtn.waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
                     }
 
-                    // 2. Clean editor with Playwright's native fill
+                    // 2. Clean editor
                     const editorLocator = page.locator('.ql-editor, [contenteditable="true"], rich-textarea').first();
                     if (await editorLocator.isVisible({ timeout: 2000 }).catch(() => false)) {
-                        await editorLocator.fill('');
+                        try { await editorLocator.fill(''); } catch {
+                            await editorLocator.click();
+                            await page.keyboard.press('ControlOrMeta+a');
+                            await page.keyboard.press('Backspace');
+                        }
                     }
                 } catch (softErr) {
                     // 3. Escalate to hard recovery — but don't swallow target crashes (Round 10)
