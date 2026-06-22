@@ -31,11 +31,11 @@ Chrome profile is stored in `~/.chrome-debug-profile` — login state persists a
 
 ```bash
 # Clone the repo
-git clone git@github.com:ziwang-Physics/gemini-extended-thinking.git
+git clone git@github.com:ziwang-Physics/Gemini-Extended-Thinking.git
 
 # Symlink the skill into Claude Code
 mkdir -p ~/.claude/skills
-ln -s $(pwd)/gemini-extended-thinking/skills/* ~/.claude/skills/
+ln -s $(pwd)/Gemini-Extended-Thinking/skills/* ~/.claude/skills/
 ```
 
 ## License
