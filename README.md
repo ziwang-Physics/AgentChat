@@ -1,43 +1,22 @@
-# Gemini Extended Thinking for Claude
+# AgentChat — Gemini Web Automation
 
-Bridge [Claude Code](https://claude.ai/code) with [Gemini Web](https://gemini.google.com)'s Pro Extended Thinking mode — enabling deep, multi-step reasoning for complex research and engineering workflows.
+Chrome CDP + Playwright 驱动的 Gemini Web 自动化交互系统。
 
-## Prerequisites
+## 目录结构
 
-### Chrome Debug Mode (for Gemini skills)
-
-Skills interacting with `gemini.google.com` require Chrome running in debug mode on port 9222.
-
-```bash
-# One-time setup: install Playwright in a shared location
-cd /tmp && npm install playwright
-
-# Start Chrome in debug mode
-./scripts/start-chrome-debug.sh
-
-# Connect to Gemini (opens a tab with persistent login)
-./scripts/connect-gemini.sh
+```
+skills/
+  gemini-web-extended-thinking/   ← Gemini Web Extended Thinking skill
+  five-agent-gemini-cli/          ← GemiNode Swarm 5-Agent 架构
+scripts/
+  start-chrome-debug.sh           ← Chrome daemon 启动 (idempotent)
+  start-chrome-debug.py           ← Playwright daemon (Chrome 生命周期)
+  connect-gemini.sh               ← 一键连接 Gemini
 ```
 
-Chrome profile is stored in `~/.chrome-debug-profile` — login state persists across restarts.
+## 关键更新 (2026-06-25)
 
-## Skills
+经过 8 小时深度诊断，确认并修复了 Chrome 在中国网络环境下无法导航的根因：
+**3 层级联故障 (SSL → 安全组件 → fail-safe 阻断)**
 
-| Skill | Description |
-|-------|-------------|
-| [gemini-web-extended-thinking](skills/gemini-web-extended-thinking/) | Interact with Gemini Web via Playwright/CDP, enabling Pro Extended Thinking mode for complex reasoning |
-
-## Installation
-
-```bash
-# Clone the repo
-git clone git@github.com:ziwang-Physics/Gemini-Extended-Thinking.git
-
-# Symlink the skill into Claude Code
-mkdir -p ~/.claude/skills
-ln -s $(pwd)/Gemini-Extended-Thinking/skills/* ~/.claude/skills/
-```
-
-## License
-
-MIT
+详见 `skills/gemini-web-extended-thinking/SKILL.md` 中的 "Chrome 启动架构" 章节。
