@@ -3,3 +3,5 @@ node_modules/
 gemini-telemetry.jsonl
 .env
 /tmp/
+
+*.jsonl

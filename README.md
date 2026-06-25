@@ -105,6 +105,29 @@ Optimization Guide) 初始化失败 → 进入 **fail-safe 模式** → 所有�
 
 详见 `skills/gemini-web-extended-thinking/SKILL.md` → "Chrome 启动架构" 章节。
 
+### Chrome 关键 Flags
+
+```
+--disable-features=OptimizationHints,Translate,HttpsUpgrades
+--disable-background-networking
+--disable-client-side-phishing-detection
+--disable-field-trial-config
+--disable-component-update
+--disable-sync
+--ozone-platform=headless
+--use-angle=swiftshader-webgl
+--ignore-certificate-errors
+```
+
+### 常见故障
+
+| 症状 | 原因 | 修复 |
+|------|------|------|
+| Gemini tab `about:blank` | 3-layer fail-safe | `pkill -9 chrome && bash scripts/start-chrome-debug.sh` |
+| `ERR_BLOCKED_BY_CLIENT` | Safe Browsing | 检查 flags 含 `--disable-features=OptimizationHints` |
+| SSL `net_error -100` | GFW RST 或 Reality TLS 冲突 | 使用 HTTP/SOCKS5 代理，不要用 VLESS Reality |
+| 输入文字后发送按钮不出现 | Angular 变更检测未触发 | 先键入逗号→粘贴→删逗号→发送 |
+
 ## 手动管理
 
 ```bash
