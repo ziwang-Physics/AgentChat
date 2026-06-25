@@ -16,6 +16,16 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# ---- Auto-load .env from project root ----
+if [ -f "$PROJECT_DIR/.env" ]; then
+    set -a
+    source "$PROJECT_DIR/.env"
+    set +a
+fi
+
+# ---- Config (env vars override defaults) ----
 CDP_PORT="${CDP_PORT:-9222}"
 GEMINI_URL="${GEMINI_URL:-https://gemini.google.com/u/0/app}"
 START_SCRIPT="$SCRIPT_DIR/start-chrome-debug.sh"
