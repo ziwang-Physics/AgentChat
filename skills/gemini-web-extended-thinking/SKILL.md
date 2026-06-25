@@ -1,5 +1,7 @@
 # Gemini Web Extended Thinking
 
+> **最后更新**: 2026-06-25 — 完整诊断 Chrome 导航失败的根因并修复
+
 ## Trigger
 
 Use this skill when the user asks to:
@@ -9,17 +11,93 @@ Use this skill when the user asks to:
 
 Do NOT use for: simple Q&A, quick lookups, or when the user hasn't explicitly asked for Gemini Web.
 
+---
+
+## Chrome 启动架构 (v3 — 2026-06-25 修复)
+
+### 为什么之前的方案会失败 (3 层级联故障)
+
+经过 8 小时深度诊断，确认 Chrome 无法导航到任何网页（含 Gemini）的根因：
+
+```
+Layer 1: SSL 握手失败
+  Chrome 启动 → 向 Google 云端发起 10+ HTTPS 初始化请求
+    ├─ 无代理：GFW DPI → RST 注入 → net_error -100 (ERR_CONNECTION_CLOSED)
+    └─ 有代理(mihomo VLESS Reality)：TLS spoofing(servername=python.org)
+       与 Chrome BoringSSL 冲突 → 同样 SSL 失败
+
+Layer 2: 安全组件初始化失败
+  Safe Browsing / Component Updater / Data Protection DLP / Optimization Guide
+  全部依赖 Google 云端后端 → 因 Layer 1 全部无法初始化
+
+Layer 3: 防失效(fail-safe)阻断所有导航
+  DataProtectionNavigationObserver: "URL to scan: https://xxx"
+    → 云端不可达 → 阻断所有出站导航
+    → HTTP:  ERR_BLOCKED_BY_CLIENT
+    → HTTPS: 静默挂死 (无超时, 无错误码)
+```
+
+### 为什么 Playwright 能工作而原始 raw CDP 不能
+
+Playwright 在启动 Chromium 时注入了关键 Feature Flag，切断了 Chrome 对 Google 云端的依赖链：
+
+| 关键 Flag | 效果 |
+|-----------|------|
+| `--disable-features=OptimizationHints` | 禁用 Optimization Guide，阻止 AI 模型下载 |
+| `--disable-features=HttpsUpgrades` | 禁用 HTTPS 自动升级，防止死锁 |
+| `--disable-features=Translate` | 禁用翻译服务，减少 Google 后端依赖 |
+| `--disable-background-networking` | 阻断所有后台网络请求 |
+| `--disable-field-trial-config` | 禁用 Finch 实验，不连接 Google 配置服务 |
+| `--disable-client-side-phishing-detection` | 禁用客户端钓鱼检测 |
+| `--ozone-platform=headless` | 使用 headless 渲染平台 |
+
+**核心逻辑**: 这些 flag 在 Chrome 启动时就切断了 Google 云端的依赖。
+Layer 1 的请求根本不会发出 → Layer 2 不会失败 → Layer 3 的 fail-safe 不触发。
+
+### 浏览器选择
+
+| 浏览器 | 可用性 | 说明 |
+|--------|--------|------|
+| ~~Chrome for Testing (CfT) v150~~ | ❌ 不推荐 | 网络栈精简，TLS 处理与标准版巨大差异 |
+| ~~标准 Chrome v149 (dpkg 提取)~~ | ⚠️ 可用但不稳定 | 无 GUI 时需 `--headless=new`，raw CDP 导航不可靠 |
+| **Playwright Chromium v149** | ✅ 推荐 | `/home/user/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome` |
+| Playwright Python API | ✅ 最稳定 | `launch()` 或 `launch_persistent_context()` 管理生命周期 |
+
+### 脚本架构
+
+```
+~/start-chrome-debug.sh   ← Shell 入口 (idempotent)
+    └─ ~/start-chrome-debug.py  ← Playwright daemon (Chrome 生命周期管理)
+~/connect-gemini.sh       ← 验证/创建 Gemini tab (Playwright connect_over_cdp + raw CDP 回退)
+~/open-chrome-gui.py      ← 可见窗口模式 (X11 forwarding)
+```
+
 ## Prerequisites (verify before execution)
 
 ```bash
-# 1. Chrome debug must be running on port 9222
-pgrep -f "chrome.*9222" || bash ~/start-chrome-debug.sh
+# 1. Chrome debug 必须在端口 9222 运行 (Playwright daemon 管理)
+pgrep -f "start-chrome-debug" || bash ~/start-chrome-debug.sh
 
-# 2. playwright-core must be installed (NOT the full playwright — saves ~300MB)
+# 2. 确认 CDP 可用
+curl -s http://127.0.0.1:9222/json/version | python3 -c "import json,sys; print(json.load(sys.stdin).get('Browser','FAIL'))"
+
+# 3. 确认 Gemini tab 已加载 (title != about:blank)
+curl -s http://127.0.0.1:9222/json/list | python3 -c "
+import json,sys
+pages=json.load(sys.stdin)
+for p in pages:
+    if 'gemini' in p.get('url','').lower() and p.get('title','') not in ('','about:blank'):
+        print(f'✅ Gemini: {p[\"title\"]}')
+        break
+else:
+    print('❌ Gemini not loaded')
+"
+
+# 4. playwright-core (npm) — CDP 连接用 (~3MB, 不需要浏览器二进制)
 [ -d /tmp/node_modules/playwright-core ] || (cd /tmp && npm install playwright-core)
 
-# 3. Ensure user is logged into Gemini in Chrome
-bash ~/connect-gemini.sh
+# 5. playwright (pip) — Chrome daemon 启动用 (~60MB, 管理浏览器生命周期)
+python3 -c "from playwright.sync_api import sync_playwright" 2>/dev/null || pip3 install playwright
 ```
 
 ## Invocation
@@ -62,18 +140,107 @@ node index.js --doctor     # check Chrome CDP connectivity only
 | 5 | `ERR_RATE_LIMITED` | Editor locked — quota exceeded | Orchestrator should `sleep 3600` before retrying |
 | 6 | `ERR_SESSION_EXPIRED` | Google auth expired mid-generation | Re-authenticate in Chrome, then retry |
 | 7 | `ERR_TARGET_CRASHED` | Chrome tab crashed (OOM?) | Restart Chrome, increase resource limits |
+| 8 | `ERR_BLANK_PAGE` | Gemini tab URL 正确但 title=about:blank | Chrome 导航失败 (3层 fail-safe)。Kill Chrome → 重启 daemon |
 | 10 | `ERR_TIMEOUT` | Max timeout reached — response incomplete | Partial output discarded; retry or increase `--timeout` |
+
+### Err 8 诊断流程 (Gemini tab about:blank)
+
+当 `/json/list` 显示的 Gemini tab URL 正确但 `window.location.href === "about:blank"`：
+
+```bash
+# 1. 确认症状
+curl -s http://127.0.0.1:9222/json/list | python3 -c "
+import json,sys
+pages=json.load(sys.stdin)
+for p in pages:
+    if 'gemini' in p.get('url','').lower():
+        print(f'URL={p[\"url\"]} title={p[\"title\"]}')
+        # 如果 title=about:blank → 确认问题
+"
+
+# 2. 重启 Chrome daemon
+pkill -9 chrome
+sleep 2
+bash ~/start-chrome-debug.sh
+
+# 3. 验证修复 (title 应为 "Google Gemini")
+bash ~/connect-gemini.sh
+```
+
+### Chrome Daemon 手动管理
+
+```bash
+# 查看 daemon 状态
+cat /tmp/chrome-debug.pid 2>/dev/null && echo "Daemon PID: $(cat /tmp/chrome-debug.pid)"
+pgrep -c chrome && echo "Chrome 进程运行中"
+
+# 查看日志
+cat /tmp/chrome-debug.log
+
+# 重启 daemon
+pkill -9 -f "start-chrome-debug.py"
+pkill -9 chrome
+sleep 2
+bash ~/start-chrome-debug.sh
+```
 
 ## Key Architecture Decisions
 
+- **Playwright daemon over raw Chrome launch** — raw CDP `Page.navigate`/`Target.createTarget` 在 Chrome 安全组件 fail-safe 下不可靠。Playwright 的 `page.goto()` 通过注入关键 feature flags 和正确的浏览器生命周期管理可靠导航。
+- **Critical Chrome flags** — `--disable-features=OptimizationHints,Translate,HttpsUpgrades` + `--disable-background-networking` + `--disable-client-side-phishing-detection` 必须在 Chrome 启动时注入，否则 Google 云端依赖链会导致 3 层 fail-safe。
+- **Playwright Chromium over Chrome for Testing** — CfT 的网络栈精简导致 TLS 处理差异；Playwright 自带的 Chromium (v149) 是标准构建，与 Playwright API 的兼容性最好。
 - **Action Toolbar as completion anchor** — avoids false truncation when Extended Thinking pauses >6s mid-reasoning.
 - **Tab isolation over page reuse** — prevents concurrent runs from corrupting each other's input.
 - **Escape-to-dismiss** — more reliable than `body.click()` for Angular CDK overlays.
 - **Partial state handling** — `ensureProExtended` checks if Extended is already visible before toggling accordion.
-- **playwright-core** — ~3MB vs ~300MB for full `playwright`. No bundled browser binaries needed (CDP only).
+- **playwright-core (npm)** — CDP 连接 (index.js) 只需 ~3MB 的 playwright-core，不需要完整 playwright (~300MB)。
+- **playwright (pip)** — Chrome daemon 启动 (start-chrome-debug.py) 需要 Python playwright 包管理浏览器生命周期。
 
 ## Code Location
 
 - `index.js` — Playwright/CDP implementation (~550 lines, commented DOM selectors)
 - `SKILL.md` — this file (AI-facing operational guide)
 - `package.json` — npm package manifest with `playwright-core` dependency
+
+## Chrome Launch Flags — 完整参考
+
+以下 flags 经 2026-06-25 诊断验证，是 Chrome 在中国网络环境下可靠工作的**最小必要集**：
+
+```bash
+# === 这些 flag 绝对不能省略 (否则触发 3 层 fail-safe) ===
+--disable-features=OptimizationHints,Translate,HttpsUpgrades
+--disable-background-networking
+--disable-client-side-phishing-detection
+--disable-field-trial-config
+--disable-component-update
+--disable-sync
+
+# === 这些 flag 保证 headless 环境稳定 ===
+--ozone-platform=headless
+--use-angle=swiftshader-webgl
+--no-sandbox
+--disable-gpu
+--ignore-certificate-errors
+--disable-dev-shm-usage
+
+# === 这些 flag 减少非必要后台活动 ===
+--disable-extensions
+--disable-default-apps
+--disable-breakpad
+--disable-hang-monitor
+--disable-popup-blocking
+--disable-renderer-backgrounding
+--no-first-run
+--no-default-browser-check
+--noerrdialogs
+--no-startup-window
+--hide-scrollbars
+--mute-audio
+```
+
+### 关于代理
+
+- **必须使用标准 HTTP/SOCKS5 代理**，不要用 VLESS Reality 协议做浏览器代理
+- VLESS Reality 的 TLS spoofing (servername=www.python.org) 与 Chrome BoringSSL 冲突
+- Clash Verge (mihomo) 的 mixed-port 同时支持 HTTP 和 SOCKS5，均可用
+- mihomo 日志可验证连接是否到达: `tail -f ~/.local/share/io.github.clash-verge-rev.clash-verge-rev/logs/sidecar/sidecar_latest.log`
