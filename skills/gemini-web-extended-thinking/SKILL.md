@@ -60,7 +60,7 @@ Layer 1 的请求根本不会发出 → Layer 2 不会失败 → Layer 3 的 fai
 |--------|--------|------|
 | ~~Chrome for Testing (CfT) v150~~ | ❌ 不推荐 | 网络栈精简，TLS 处理与标准版巨大差异 |
 | ~~标准 Chrome v149 (dpkg 提取)~~ | ⚠️ 可用但不稳定 | 无 GUI 时需 `--headless=new`，raw CDP 导航不可靠 |
-| **Playwright Chromium v149** | ✅ 推荐 | `/home/wangzi/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome` |
+| **Playwright Chromium v149** | ✅ 推荐 | 自动检测 (`~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome`) |
 | Playwright Python API | ✅ 最稳定 | `launch()` 或 `launch_persistent_context()` 管理生命周期 |
 
 ### 脚本架构

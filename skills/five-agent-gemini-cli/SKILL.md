@@ -638,7 +638,7 @@ grep "handshake failed" /tmp/chrome-debug.log
 pgrep -f "start-chrome-debug.py" || bash ~/start-chrome-debug.sh
 
 # 2. 如果仍失败，检查 Chrome 二进制
-# 必须使用 Playwright Chromium: /home/wangzi/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome
+# 必须使用 Playwright Chromium: ~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome
 # 不能用 Chrome for Testing (CfT)
 
 # 3. 验证代理可用
@@ -688,7 +688,7 @@ bash ~/start-chrome-debug.sh
 | Python 3.12+ | `python3 --version` | 运行 watchdog.py |
 | NFS 挂载 | `test -d /mnt/data` | Agent↔Master 通信基础 |
 
-> ⚠️ **Chrome 二进制**: 必须使用 Playwright 自带的 Chromium (`/home/wangzi/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome`)，不能用 Chrome for Testing (CfT)。详见下方 "Chrome 导航失败诊断" 章节。
+> ⚠️ **Chrome 二进制**: 必须使用 Playwright 自带的 Chromium (`~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome`)，不能用 Chrome for Testing (CfT)。详见下方 "Chrome 导航失败诊断" 章节。
 
 ### 8.1.1 Chrome 启动 — 关键 Flags (2026-06-25 验证)
 
@@ -722,7 +722,7 @@ bash ~/start-chrome-debug.sh
 
 ```bash
 # 1. 复制代码到 NFS
-cp -r /home/wangzi/GemiNode-Swarm /mnt/data/
+cp -r ~/GemiNode-Swarm /mnt/data/
 
 # 2. 安装依赖
 pip install websockets pyyaml playwright
@@ -854,5 +854,5 @@ done
 > **设计基准日期**：2026-06-22
 > **审查来源**：与 Gemini Pro 延長 5 轮深度技术讨论 (Check 1→5)
 > **系统定位**：参谋部 (Gemini Web) + 前线指挥官 (Python Master) + 5 名士兵 (Agent CLI)
-> **工程目录**：`/home/wangzi/GemiNode-Swarm/`
-> **AI 知识库**：`~/.claude/projects/-home-wangzi/memory/`
+> **工程目录**：`~/GemiNode-Swarm/`
+> **AI 知识库**：`~/.claude/projects/-home/memory/`
