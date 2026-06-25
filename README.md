@@ -2,6 +2,40 @@
 
 Chrome CDP + Playwright 驱动的 Gemini Web 自动化交互系统。
 
+## 为什么用这个？
+
+### 1. DeepSeek 的需求力 × Gemini 的回答力
+
+DeepSeek 擅长理解意图、拆解任务、规划步骤，但在专业领域（如计算化学、材料科学）
+的知识深度不如 Gemini Pro。Gemini 擅长长链条推理和深度思考，但缺乏主动规划和执行能力。
+
+**AgentChat 将两者桥接**：DeepSeek（或 Claude Code）作为 Planner 制定策略 →
+通过 CDP 将组合好的 prompt 注入 Gemini Web → 取回 Gemini 的思考结果。
+这是 **"思考者 + 执行者"的协同模式**，单独使用任何一个都无法达到。
+
+### 2. 赋予 DeepSeek 多模态能力
+
+DeepSeek 纯文本模型缺乏图像理解、网页浏览、复杂 UI 操作等多模态能力。
+AgentChat 通过 Chrome CDP 让任何 LLM 都能：
+
+- 📸 **截图分析** — `Page.captureScreenshot` → base64 → 传给 Gemini 做 OCR/图表分析
+- 🌐 **网页浏览** — 让 Gemini 阅读在线文档、论文、代码仓库
+- 🖱️ **UI 操作** — 点击、输入、文件上传等完整的浏览器交互
+- 📄 **文件处理** — CSV 图表、分子结构图、PDF 截图 → Gemini 解读
+
+### 3. 抛砖引玉：不止于 Gemini
+
+这个架构的本质是 **"用 CDP 桥接任何 LLM 到任何 Web 应用"**。同样的思路可以：
+
+- 接入 **ChatGPT Web**（同样的 CDP 输入/读取模式）
+- 接入 **Claude Web**（claude.ai 的 Artifact 和 Project 功能）
+- 批量操作 Google Scholar、PubMed、arXiv 等学术网站
+- 自动化 ACS、RSC 等期刊的文献检索和下载
+- 构建多模型协作工作流（Gemini 负责推理 → Claude 负责写代码 → DeepSeek 负责审阅）
+
+AgentChat 提供了最难的第一个环节 — 在中国网络环境下可靠地驱动 Chrome + Gemini Web。
+其余 Web 应用的接入只需修改 DOM 选择器即可复用全部基础设施。
+
 ## 🚀 快速开始 (新机器, 5 分钟)
 
 ```bash
