@@ -60,7 +60,7 @@ Layer 1 的请求根本不会发出 → Layer 2 不会失败 → Layer 3 的 fai
 |--------|--------|------|
 | ~~Chrome for Testing (CfT) v150~~ | ❌ 不推荐 | 网络栈精简，TLS 处理与标准版巨大差异 |
 | ~~标准 Chrome v149 (dpkg 提取)~~ | ⚠️ 可用但不稳定 | 无 GUI 时需 `--headless=new`，raw CDP 导航不可靠 |
-| **Playwright Chromium v149** | ✅ 推荐 | 自动检测 (`~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome`) |
+| **Playwright Chromium v149** | ✅ 推荐 | `/home/wangzi/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome` |
 | Playwright Python API | ✅ 最稳定 | `launch()` 或 `launch_persistent_context()` 管理生命周期 |
 
 ### 脚本架构
@@ -99,6 +99,78 @@ else:
 # 5. playwright (pip) — Chrome daemon 启动用 (~60MB, 管理浏览器生命周期)
 python3 -c "from playwright.sync_api import sync_playwright" 2>/dev/null || pip3 install playwright
 ```
+
+## Pro Extended 模型切换 (每次对话前必须执行)
+
+Gemini 默认使用 Flash 模型。复杂任务必须切换到 **Pro 延長** 模式。
+以下代码经 2026-06-25 实战验证，适用于 Gemini 当前 UI (3.1 版本菜单)。
+
+```python
+from playwright.sync_api import sync_playwright
+import time
+
+def ensure_pro_extended(page):
+    """激活 Pro 延長 模式。idempotent — 如已激活则跳过。"""
+    
+    # 1. 检查当前状态
+    label = page.locator('button[aria-label*="開啟模式挑選器"]').first
+    current = label.get_attribute('aria-label') or ''
+    if '延長' in current:
+        return  # 已经激活，跳过
+    
+    # 2. 打开模型选择器
+    label.click()
+    time.sleep(1.5)
+    
+    # 3. 确保选中 Pro (非 Flash/Flash-Lite)
+    items = page.evaluate("""() => [...document.querySelectorAll('gem-menu-item')]
+        .map((el,i) => ({i, text: el.innerText?.trim()}))""")
+    
+    for item in items:
+        if 'Pro' in item['text'] and '進階' in item['text']:
+            page.locator('gem-menu-item').nth(item['i']).click()
+            time.sleep(1)
+            break
+    
+    # 4. 展开思考程度子菜单
+    time.sleep(0.5)
+    items = page.evaluate("""() => [...document.querySelectorAll('gem-menu-item')]
+        .map((el,i) => ({i, text: el.innerText?.trim()}))""")
+    
+    for item in items:
+        if '思考程度' in item['text'] or 'Thinking' in item['text']:
+            page.locator('gem-menu-item').nth(item['i']).click()
+            time.sleep(1.5)
+            break
+    
+    # 5. 选择「延長」
+    items = page.evaluate("""() => [...document.querySelectorAll('gem-menu-item')]
+        .map((el,i) => ({i, text: el.innerText?.trim()}))""")
+    
+    for item in items:
+        if '延長' in item['text'] and '標準' not in item['text']:
+            page.locator('gem-menu-item').nth(item['i']).click()
+            time.sleep(1)
+            break
+    
+    # 6. 关闭菜单 + 验证
+    page.keyboard.press("Escape")
+    time.sleep(1)
+    
+    label = page.locator('button[aria-label*="開啟模式挑選器"]').first
+    current = label.get_attribute('aria-label') or ''
+    assert '延長' in current, f"Pro Extended activation FAILED. Current: {current}"
+```
+
+### 消息发送注意事项
+
+**Angular 变更检测陷阱**：Gemini 输入框是 Angular rich-textarea。`Input.insertText` 和
+`page.fill()` 对大文本（>5K chars）有时不触发 Angular zone.js，导致发送按钮不出现。
+
+**可靠方案**（按优先级）：
+1. ≤5K chars: `page.fill()` + `page.keyboard.press("Enter")` — 最可靠
+2. >5K chars: 用 clipboard 粘贴法 — `keyboard.type(',')` 触发 Angular → `navigator.clipboard.writeText()` → `Ctrl+v` → `Backspace` 删逗号
+3. 发送前验证：检查 `button[aria-label="发送"]` 是否可见且 `disabled=false`
 
 ## Invocation
 
