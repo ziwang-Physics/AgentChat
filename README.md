@@ -23,7 +23,18 @@ AgentChat 通过 Chrome CDP 让任何 LLM 都能：
 - 🖱️ **UI 操作** — 点击、输入、文件上传等完整的浏览器交互
 - 📄 **文件处理** — CSV 图表、分子结构图、PDF 截图 → Gemini 解读
 
-### 3. 抛砖引玉：不止于 Gemini
+### 3. 极致的 Token 节省
+
+网页版 Gemini 对用户**免费**，生成的思考 token 不占用任何 API 费用。
+而 DeepSeek 生成问题的 token 消耗极低（通常仅几十到几百 token 用于 prompt 拼接和规划）。
+
+对比传统全 API 方案：
+- **API 方案**：每轮对话的输入 + 输出 token 全部计费，长链条推理成本指数级增长
+- **AgentChat 方案**：DeepSeek 只消耗少量规划 token → Gemini Web 免费生成 → 近乎零成本的深度推理
+
+**这就是"免费大脑"模式**：用最便宜的模型做规划，用最强大的免费 Web 端做推理。
+
+### 4. 抛砖引玉：不止于 Gemini
 
 这个架构的本质是 **"用 CDP 桥接任何 LLM 到任何 Web 应用"**。同样的思路可以：
 
