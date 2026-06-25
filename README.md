@@ -43,10 +43,14 @@ bash scripts/connect-gemini.sh       # 一键连接
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `CDP_PORT` | `9222` | Chrome DevTools Protocol 端口 |
-| `PROXY_SERVER` | `http://127.0.0.1:7897` | 代理地址 (中国大陆必需) |
+| `PROXY_SERVER` | `http://127.0.0.1:7897` | 代理地址 (中国大陆用户**必须**) |
 | `GEMINI_URL` | `https://gemini.google.com/u/0/app` | Gemini 目标 URL |
-| `CHROME_PROFILE` | `~/.chrome-debug-profile` | Chrome 持久化 Profile |
-| `CHROMIUM_PATH` | 自动检测 | 手动指定 Chromium 路径 |
+| `CHROME_PROFILE` | `~/.chrome-debug-profile` | Chrome 持久化 Profile (保存 Google 登录) |
+| `CHROMIUM_PATH` | 自动检测 | 手动指定 Chromium 路径 (一般无需设置) |
+| `LOG_FILE` | `/tmp/chrome-debug.log` | 诊断日志输出路径 |
+
+脚本启动时会**自动加载**项目根目录的 `.env` 文件，无需手动 `source`。
+只需 `cp .env.example .env` → 编辑 `.env` → 直接运行脚本。
 
 ## 目录结构
 

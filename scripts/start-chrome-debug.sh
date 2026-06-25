@@ -21,7 +21,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# ---- Config ----
+# ---- Auto-load .env from project root ----
+if [ -f "$PROJECT_DIR/.env" ]; then
+    set -a  # auto-export all variables
+    source "$PROJECT_DIR/.env"
+    set +a
+fi
+
+# ---- Config (env vars override defaults) ----
 CDP_PORT="${CDP_PORT:-9222}"
 PROXY="${PROXY_SERVER:-http://127.0.0.1:7897}"
 LOG_FILE="${LOG_FILE:-/tmp/chrome-debug.log}"
