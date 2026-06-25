@@ -38,9 +38,20 @@ def auto_detect_chromium():
                     if "chrome" in files and "linux" in root:
                         candidates.append(os.path.join(root, "chrome"))
 
-    # System Chrome
-    for p in ["google-chrome-stable", "google-chrome", "chromium", "chromium-browser"]:
-        candidates.append(f"/usr/bin/{p}")
+    # System Chrome — platform-aware
+    import platform
+    system = platform.system()
+    if system == "Darwin":
+        candidates.append("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+    elif system == "Windows":
+        candidates.extend([
+            os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
+        ])
+    else:  # Linux
+        for p in ["google-chrome-stable", "google-chrome", "chromium", "chromium-browser"]:
+            candidates.append(f"/usr/bin/{p}")
 
     for c in candidates:
         if os.path.isfile(c) and os.access(c, os.X_OK):
@@ -131,6 +142,7 @@ def main():
                 "--mute-audio",
                 "--ozone-platform=headless",
                 "--use-angle=swiftshader-webgl",
+                "--proxy-bypass-list=<-loopback>",  # defense-in-depth
             ],
         )
 
