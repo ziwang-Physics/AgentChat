@@ -47,6 +47,58 @@ AgentChat 通过 Chrome CDP 让任何 LLM 都能：
 AgentChat 提供了最难的第一个环节 — 在中国网络环境下可靠地驱动 Chrome + Gemini Web。
 其余 Web 应用的接入只需修改 DOM 选择器即可复用全部基础设施。
 
+## 🔐 登录 Google 账号（重要）
+
+Gemini Web 需要 Google 账号才能使用 Pro Extended Thinking。免登录模式仅支持基础 Flash 模型。
+
+### 一次配置，永久有效
+
+Chrome 的登录状态保存在 `CHROME_PROFILE` 目录（默认 `~/.chrome-debug-profile`），只需登录一次：
+
+**方法 1：本机 GUI 登录（推荐）**
+```bash
+# 启动带窗口的 Chrome（正常显示登录页面）
+python3 -c "
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    ctx = p.chromium.launch_persistent_context(
+        user_data_dir='$HOME/.chrome-debug-profile',
+        headless=False,
+        proxy={'server': 'http://127.0.0.1:7897'},
+        args=['--no-sandbox','--disable-gpu']
+    )
+    ctx.pages[0].goto('https://gemini.google.com/u/0/app')
+    input('登录完成后按 Enter 关闭浏览器...')
+    ctx.close()
+"
+```
+
+**方法 2：SSH X11 转发（远程服务器）**
+```bash
+# 先在本机开启 X11 forwarding: ssh -X user@server
+# 然后运行可见 Chrome（X11 转发到本机屏幕）
+python3 ~/open-chrome-gui.py &
+```
+
+**验证登录状态**
+```bash
+curl -s http://127.0.0.1:9222/json/list | python3 -c "
+import json,sys
+for p in json.load(sys.stdin):
+    if 'gemini' in p.get('url',''): print(p['title'])
+"
+# 成功 → Google Gemini   失败 → 显示「登录」字样
+```
+
+### 切换到 Pro Extended 模式
+
+登录后可切换模型获取更强的推理能力（已内置在 skill 中自动处理）：
+
+```python
+# Gemini UI: 开启模式挑選器 → 思考程度 → 延長
+# 详见 skills/gemini-web-extended-thinking/SKILL.md
+```
+
 ## 🚀 快速开始 (新机器, 5 分钟)
 
 ```bash
