@@ -172,6 +172,46 @@ def ensure_pro_extended(page):
 2. >5K chars: 用 clipboard 粘贴法 — `keyboard.type(',')` 触发 Angular → `navigator.clipboard.writeText()` → `Ctrl+v` → `Backspace` 删逗号
 3. 发送前验证：检查 `button[aria-label="发送"]` 是否可见且 `disabled=false`
 
+### 会话管理 (多轮交互最佳实践)
+
+**绝对不要每次交互都开新对话**。频繁创建新标签页会：
+- 丢失上下文（历史对话中的代码、决策、约定）
+- 触发 Google 的安全验证
+- 浪费 token（每次都要重新描述背景）
+
+**正确做法**：
+
+1. **复用已有标签页**：用 `connect_over_cdp` 找到现有 Gemini tab，在同一对话中继续
+   ```python
+   for ctx in browser.contexts:
+       for pg in ctx.pages:
+           if 'gemini' in pg.url and pg.title() != 'about:blank':
+               page = pg; break  # 复用已有对话
+   ```
+
+2. **遇到问题时刷新页面，不要新建**：
+   ```python
+   # 页面卡住、输入无响应 → reload 而非 new_page()
+   page.reload()
+   page.wait_for_selector('[role="textbox"]', timeout=15000)
+   ```
+
+3. **只有在以下情况才开新对话**：
+   - 对话历史超过 25 轮（Session Rotation）
+   - 页面崩溃（`page.is_closed()` 或 `TargetClosedError`）
+   - 主题完全切换，旧上下文会干扰新任务
+
+4. **发送前验证**：每次发送前检查发送按钮状态
+   ```python
+   send = page.locator('button[aria-label="发送"]')
+   if send.count() == 0 or not send.is_enabled():
+       # Angular 检测未触发 → 重新聚焦 + 键入逗号触发
+       page.locator('[role="textbox"]').click()
+       page.keyboard.type(',')
+       page.keyboard.press('Backspace')
+       time.sleep(0.5)
+   ```
+
 ## Invocation
 
 ```bash
