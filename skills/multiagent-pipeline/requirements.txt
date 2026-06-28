@@ -1,1 +1,10 @@
+# MultiAgent Pipeline — Python dependencies
+# Requires Python ≥ 3.10 (for asyncio.Condition, type hints)
+
+# Browser automation (Phase 2 + Phase 4)
 playwright>=1.45
+
+# Playwright ships its own Chromium; install with:
+#   python3 -m playwright install chromium
+
+# No other runtime dependencies — stdlib only beyond Playwright.

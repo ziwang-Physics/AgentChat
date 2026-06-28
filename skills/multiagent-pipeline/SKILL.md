@@ -1,6 +1,6 @@
 # MultiAgent: 4-Phase Expert Pipeline with Gemini Final Adjudication
 
-> **最后更新**: 2026-06-28 — P0 安全审计修订 (CDP token, 竞态修复, 文档工程化)
+> **最后更新**: 2026-06-28 — 自优化 (common.py 去重, 竞态修复, adapters/ 模块化)
 > **模型**: Claude Code (powered by DeepSeek LLM, local inference — no web browser needed for P1/P3)
 
 ## Prerequisites
@@ -58,13 +58,14 @@ User Question
    ⚡ No browser — instant
      │
      ▼
-🟡 Phase 2: 4 Expert Nodes — CONCURRENT (Playwright → Chrome tabs)
+🟡 Phase 2: 4 Expert Nodes — CONCURRENT FIRE-AND-COLLECT (Playwright → Chrome tabs)
    $ python3 orchestrator.py phase2 --file $WORKDIR/prompts.json --json
    ┌──────────┬──────────┬──────────┬──────────┐
    │ ChatGPT  │ Claude   │ Kimi     │ Qianwen  │
    │ 代码效率  │ 防御架构  │ 文献基准  │ 安全审计  │
    └──────────┴──────────┴──────────┴──────────┘
-   Hard timeout: 60s per platform. asyncio.Condition Barrier sync.
+   P1: fire-and-collect — each worker fires independently, no Barrier sync.
+   Hard timeout: 60s per platform. asyncio.wait() convergence.
    🌐 Browser required — ~2 min
      │
      ▼
@@ -88,128 +89,84 @@ User Question
    Final Output (presented by Claude to user)
 ```
 
-**Design principle**: Claude Code runs the pipeline. P1 + P3 are direct LLM reasoning (no browser). P2 (4 web platforms) + P4 (Gemini web) use Playwright CDP browser automation via `orchestrator.py`.
-
 ---
 
 ## Grand Orchestrator Workflow (MANDATORY)
 
-When `/multiagent` is invoked, Claude MUST execute this sequence.
-
-**Pre-flight check** (run before any phase):
+### Pre-flight check:
 ```bash
-# Verify Chrome is running with CDP token
+# 1. CDP token must exist
 test -f ~/.chrome-debug-profile/.cdp_token || { echo "ERROR: Chrome CDP token not found. Run: bash ~/connect-gemini.sh"; exit 1; }
 export CHROME_CDP_TOKEN=$(cat ~/.chrome-debug-profile/.cdp_token)
-# Check disk space on /tmp (need >= 10MB)
+# 2. Token file permissions must be 0600
+test "$(stat -c %a ~/.chrome-debug-profile/.cdp_token)" = "600" || chmod 600 ~/.chrome-debug-profile/.cdp_token
+# 3. CDP must bind to localhost only (P1: DNS rebinding hardened check)
+python3 -c "from common import verify_cdp_safe; ok, msg = verify_cdp_safe(); print(msg); exit(0 if ok else 1)" || { echo "ERROR: CDP unsafe — must bind 127.0.0.0/8 only"; exit 1; }
+# 4. /tmp disk space >= 10MB
 test $(df -m /tmp | awk 'NR==2{print $4}') -ge 10 || { echo "ERROR: /tmp disk full"; exit 1; }
 ```
 
 ### Step 1: Decompose (Claude Code — no browser)
 
-Analyze the user's request. Generate 4 specialized prompts, one per expert angle.
-Create a session-specific working directory:
+Analyze the request. Generate 4 prompts using the **Sandwich Prompt Structure** (三明治结构):
 
-```bash
-export WORKDIR=$(mktemp -d -t multiagent-XXXXXX)
-chmod 700 "$WORKDIR"
+```
+Layer 1 — Core Question (完全同化, ~30%):  所有平台一字不差的核心问题
+Layer 2 — Primary Lens  (特性锐度, ~50%):  各平台独特视角, 最重的分析权重
+Layer 3 — Cross-Coverage (交叉补位, ~20%): 简要覆盖其他 3 个平台的视角, 确保单点故障不丢视角
 ```
 
-Write prompts JSON. Required schema:
+**Rationale**: Web Claude 频繁免费额度耗尽, 单一视角 prompt 导致该维度完全丢失。
+Cross-coverage 使每个 AI 的回答包含 60% 主视角 + 40% 补位视角, 任一平台故障时其他 3 家合起来能覆盖 ≥80% 的缺失维度。
+
+**Sandwich Prompt Template:**
 
 ```json
 {
   "task_core": "one-sentence summary (max 120 chars)",
   "worker_prompts": {
-    "chatgpt": "从代码效率、算法优化、性能最佳实践角度回答...",
-    "claude": "从防御性架构、错误处理、边界条件角度回答...",
-    "kimi": "从学术文献、技术标准、基准测试角度回答...",
-    "qianwen": "从安全审计、漏洞分析、竞态条件角度回答..."
+    "chatgpt": "【核心问题】<完全相同的 question> 【你的主视角：代码效率与算法优化】请重点从计算复杂度、IO 瓶颈、并发效率、缓存策略角度深入分析——这是你最擅长的维度。 【交叉补位】也请简要从防御架构(1句)、文献基准(1句)、安全审计(1句)角度补充, 确保回答的维度完整性。",
+    "claude": "【核心问题】<完全相同的 question> 【你的主视角：防御性架构与错误处理】请重点从降级链完整性、边界条件覆盖、状态一致性、故障恢复角度深入分析——这是你最擅长的维度。 【交叉补位】也请简要从代码效率(1句)、文献基准(1句)、安全审计(1句)角度补充, 确保回答的维度完整性。",
+    "kimi": "【核心问题】<完全相同的 question> 【你的主视角：学术文献与基准测试】请重点从 SOTA 文献支撑、LLM-as-Judge 基准、多 Agent 编排标准角度深入分析, 引用具体文献或框架——这是你最擅长的维度。 【交叉补位】也请简要从代码效率(1句)、防御架构(1句)、安全审计(1句)角度补充, 确保回答的维度完整性。",
+    "qianwen": "【核心问题】<完全相同的 question> 【你的主视角：安全审计与漏洞分析】请重点从注入攻击面、竞态条件、权限最小化、审计追溯完整性角度深入分析——这是你最擅长的维度。 【交叉补位】也请简要从代码效率(1句)、防御架构(1句)、文献基准(1句)角度补充, 确保回答的维度完整性。"
   }
 }
 ```
 
+**Replacement rules for `<完全相同的 question>`:**
+- Insert the user's actual question verbatim, NOT a rephrased version
+- If the question is long (>200 chars), use the `task_core` summary instead
+- The question block is identical across all 4 platforms — no variation
+
+**Cross-Coverage weight rule:**
+- Each cross-coverage item is 1 sentence max
+- Total cross-coverage ≤ 40% of total response attention
+- If the AI ignores cross-coverage entirely, the primary lens answer alone is still valuable
+
 Write to `$WORKDIR/prompts.json`.
 
 ### Step 2: Dispatch (browser automation)
-
 ```bash
 python3 ~/.claude/skills/multiagent/orchestrator.py phase2 \
   --file "$WORKDIR/prompts.json" --timeout 60 --json > "$WORKDIR/p2_results.json"
 ```
 
-**Output schema** (`p2_results.json`):
-```json
-{
-  "success": true,
-  "success_count": 3,
-  "timeout_count": 0,
-  "results": [
-    {
-      "platform": "chatgpt",
-      "success": true,
-      "response": "<cleaned answer text>",
-      "length": 1234,
-      "timeout": false,
-      "quality": "OK"
-    }
-  ]
-}
-```
-
 ### Step 3: Compress (Claude Code — no browser)
-
-Read `$WORKDIR/p2_results.json`. Extract `results[].response` for each successful platform.
-Produce a matrix with these **mandatory** H2 sections (exact headings required):
-
-```markdown
-## 共识区 | Consensus
-- [ChatGPT][Kimi] 所有平台一致同意的观点...
-- 每条必须标注来源平台
-
-## 特色区 | Features
-- [ChatGPT] 某平台独有的贡献...
-- 标注具体来源
-
-## 冲突区 | Conflicts
-- [ChatGPT] 观点A vs [Qianwen] 观点B
-- 清晰呈现双方立场
-```
-
-Write to `$WORKDIR/matrix.md`.
+Read `$WORKDIR/p2_results.json`. Produce matrix with **共识区/特色区/冲突区** H2 sections. Write to `$WORKDIR/matrix.md`.
 
 ### Step 4: Adjudicate (browser automation)
 
+> **P0 fix (2026-06-28)**: task_core is now auto-extracted from the prompts JSON
+> via `--prompts-file` — no shell command substitution. Eliminates RCE vector.
+
 ```bash
 python3 ~/.claude/skills/multiagent/orchestrator.py phase4 \
-  --file "$WORKDIR/matrix.md" --task-core "$(python3 -c "import json; print(json.load(open('$WORKDIR/prompts.json'))['task_core'])")"
+  --file "$WORKDIR/matrix.md" \
+  --prompts-file "$WORKDIR/prompts.json"
 ```
-
-> **Security note**: All dynamic parameters use `--flag` form, never bare positional args.
-> The `task_core` value comes from the Phase 1 JSON, not raw user input.
 
 ### Step 5: Present + Cleanup
-
-Read Gemini's final output. Present to user. Optionally add meta-commentary about which platform contributed what.
-
-```bash
-rm -rf "$WORKDIR"  # clean up session temp files
-```
-
----
-
-## Phase 2 Output Schema Reference
-
-For programmatic consumers of `p2_results.json`:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `results[].platform` | string | "chatgpt" / "claude" / "kimi" / "qianwen" |
-| `results[].success` | bool | true if response passes validation |
-| `results[].response` | string | cleaned answer text (always present, even if !success) |
-| `results[].length` | int | character count |
-| `results[].timeout` | bool | true if hard timeout triggered |
-| `results[].quality` | string | "OK" / "UI_CHROME_DOMINANT" / "ERROR_PATTERN_DETECTED" / "FATAL" |
+Read Gemini's output. Present to user. Run `rm -rf "$WORKDIR"`.
 
 ---
 
@@ -220,7 +177,7 @@ For programmatic consumers of `p2_results.json`:
 | Pre-flight | Chrome not running / token missing | Run `bash ~/connect-gemini.sh`, retry once |
 | Pre-flight | /tmp disk < 10MB | Alert user, suggest `export TMPDIR=/var/tmp` |
 | P1 | — | Claude generates default angle-prefixed prompts |
-| P2 | 1+ platform timeout | Partial text extraction, prefix `[WARNING: NODE_TIMEOUT_TRUNCATED]`, continue |
+| P2 | 1+ platform timeout | Partial text extraction, `[WARNING: NODE_TIMEOUT_TRUNCATED]` prefix, continue |
 | P2 | 1+ platform crash/exception | `barrier.abort()` releases waiters, continue with remaining |
 | P2 | ALL 4 fail | Report to user: "All 4 expert nodes failed. Check network/proxy. Retry? (y/n)" |
 | P3 | — | Claude can still reason over partial P2 results |
@@ -229,39 +186,47 @@ For programmatic consumers of `p2_results.json`:
 
 ---
 
-## Quick Reference (non-normative — for human reference only)
-
-```bash
-# Phase 2: dispatch 4 prompts concurrently
-python3 orchestrator.py phase2 --file "$WORKDIR/prompts.json" --timeout 45 --json
-
-# Phase 4: Gemini adjudication
-python3 orchestrator.py phase4 --file "$WORKDIR/matrix.md" --task-core "summary"
-```
-
----
-
 ## File Structure
 
 ```
 ~/.claude/skills/multiagent/
-├── SKILL.md           # This file (Claude-as-Orchestrator workflow)
-├── orchestrator.py    # Phase 2 + Phase 4 browser automation
-├── main.py            # Original flat 7-platform controller (backward compat)
-├── adapters.py        # BaseAdapter + 7 concrete adapters (CDP token secured)
-└── requirements.txt   # playwright>=1.45
+├── SKILL.md                  # This file (workflow)
+├── common.py                 # Shared: cdp_url(), AbortableBarrier, setup_logging()
+├── orchestrator.py           # Phase 2 + Phase 4 browser automation
+├── main.py                   # Standalone 7-platform controller (backward compat)
+├── adapters.py.bak           # Pre-optimization monolithic file (kept for reference)
+├── requirements.txt          # playwright>=1.45
+├── adapters/                 # Per-platform adapter package
+│   ├── __init__.py           # Registry + exports
+│   ├── base.py               # BaseAdapter (connect/inject/extract/validate)
+│   ├── gemini.py             # GeminiAdapter (P4 adjudicator)
+│   ├── chatgpt.py            # ChatGPTAdapter (P2 code expert)
+│   ├── claude.py             # ClaudeAdapter (P2 architecture expert)
+│   ├── kimi.py               # KimiAdapter (P2 literature expert)
+│   ├── qianwen.py            # QianwenAdapter (P2 security expert)
+│   ├── deepseek.py           # DeepSeekAdapter (Expert + Deep Think)
+│   └── _deprecated.py        # DoubaoAdapter (manual opt-in only)
+└── reference/
+    └── platform-maturity.md  # Platform maturity levels + adapter details
 ```
 
----
+## P0 Fixes Applied (2026-06-28)
 
-## Platform Maturity (Reference only — not required for execution)
+1. **Barrier.abort() 竞态条件**: `abort()` 改为 async，内部持有 `Condition` 锁后设标志 + `notify_all()`
+2. **CDP token 三处重复去重**: 统一到 `common.cdp_url()`
+3. **main.py Barrier 升级**: 使用 `AbortableBarrier` (带 timeout + abort)
+4. **adapters.py 模块化**: 33KB 拆分为 8 个 per-platform 文件
+5. **clean_response() 误伤修复**: 噪声模式匹配增加行长度守卫
+6. **inject_prompt() 短提示修复**: <50 字符跳过完整性检查
+7. **P4 裁决提示去 HPC 化**: 使用通用裁决原则
+8. **硬编码延迟常量化**: 统一在 `common.py` 定义
 
-| Platform | Status | DOM Injection | Extraction | Pipeline Role |
-|----------|--------|---------------|------------|---------------|
-| **Gemini** | ⭐⭐⭐⭐⭐ | ✅ insertText | ✅ model-message | P4 终审裁决 |
-| **ChatGPT** | ⭐⭐⭐⭐ | ✅ insertText | ✅ assistant role | P2 代码效率专家 |
-| **DeepSeek** | — | — | — | P1+P3 via Claude Code (no web) |
-| **Kimi** | ⭐⭐⭐ | ✅ insertText | ✅ chat-content-item | P2 文献基准专家 |
-| **Qianwen** | ⭐⭐⭐ | ✅ insertText | ✅ [class*=message] | P2 安全审计专家 |
-| **Claude** | ⭐⭐⭐ | ✅ insertText | ⚠️ fallback | P2 防御架构 (free tier rate-limit) |
-| ~~Doubao~~ | 🚫 | — | — | Deprecated 2026-06-27 |
+## P1 Production Upgrades (2026-06-28)
+
+9. **verify_cdp_safe DNS rebinding 防护**: 解析 localhost → 验证 IP ∈ 127.0.0.0/8 或 ::1
+10. **innerText → textContent 迁移**: 无 Reflow + Shadow DOM 穿透 + 更高性能
+11. **safe_page() RAII 上下文管理器**: 三层清理 page.close → suppress(PlaywrightError)
+12. **Fire-and-collect 替代 Barrier**: asyncio.wait() 独立 worker，消除人工同步点
+13. **Gemini Pro Extended v3**: gem-menu-item 选择器 + Angular CDK polling + aria-label 幂等守卫
+14. **Shell 注入消除**: --prompts-file 替代 shell 命令替换
+15. **CLAUDE.md 凭据清除**: 硬编码密码 → 环境变量引用
