@@ -55,11 +55,33 @@ class GeminiAdapter(BaseAdapter):
         "Gemini 是 AI，有時可能會出錯",
     ]
 
+    # During Extended Thinking the stop button disappears but the model
+    # is still reasoning.  The toolbar won't appear until thinking finishes.
+    THINKING_SELECTOR = (
+        'gemini-thinking-indicator, [class*="thinking-indicator"], '
+        'mat-spinner, [class*="spinner"]'
+    )
+
     # Model selector button aria-label pattern (2026-06-28 probe)
     MODEL_SELECTOR_SEL = (
         'button[aria-label*="模式"], button[aria-label*="Model"], '
         'button[aria-label*="model"]'
     )
+
+    # ── Thinking mode hook (delegates to ensure_pro_extended) ─────────────
+
+    async def ensure_thinking_mode(self, page) -> bool:
+        """Override BaseAdapter no-op → enable Pro Extended Thinking.
+
+        Called by orchestrator P2 _p2_worker for ALL platforms.  Gemini is the
+        only platform where the thinking toggle is a complex multi-step Angular
+        CDK menu interaction (not a simple aria-pressed toggle).
+        """
+        try:
+            return await self.ensure_pro_extended(page)
+        except Exception as e:
+            log.warning("[Gemini] ensure_thinking_mode failed: %s", e)
+            return False
 
     # ── Fresh conversation ────────────────────────────────────────────────
 

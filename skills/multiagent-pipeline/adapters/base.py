@@ -68,6 +68,10 @@ class BaseAdapter:
     # Platform-specific error / rate-limit patterns appended by subclasses.
     ERROR_PATTERNS: list[str] = []
 
+    # CSS selector for "still thinking/loading" indicator (spinner, dots, etc.).
+    # Used by stability fallback to avoid extracting mid-generation.
+    THINKING_SELECTOR: str = ""
+
     def __init__(self, cdp_port: str = "9222"):
         self.cdp_port = cdp_port
 
@@ -174,6 +178,17 @@ class BaseAdapter:
         except Exception:
             pass
         await page.wait_for_timeout(SPA_WAKE_WAIT_MS)
+
+    async def ensure_thinking_mode(self, page) -> bool:
+        """Enable the platform's deep-thinking / reasoning mode.
+
+        Default: no-op (most platforms don't have a toggle).
+        Override in platform adapters that have a thinking toggle
+        (Qianwen: 思考 button, Gemini: Pro Extended via ensure_pro_extended).
+
+        Returns True on success, False on failure (non-fatal).
+        """
+        return True
 
     # ── Input pipeline ─────────────────────────────────────────────────────
 
@@ -286,6 +301,21 @@ class BaseAdapter:
                     break
                 try:
                     await page.wait_for_timeout(STABILITY_POLL_MS)
+
+                    # ── Fix 2026-06-28: check thinking indicator before extracting ──
+                    # If the platform still shows a "thinking/loading/spinner" element,
+                    # reset the stability timer — the real answer hasn't started yet.
+                    # This prevents extracting search queries or intermediate thinking
+                    # text as the final response (Kimi/Qianwen session bleed).
+                    if self.THINKING_SELECTOR:
+                        try:
+                            thinking_el = page.locator(self.THINKING_SELECTOR).first
+                            if await thinking_el.is_visible():
+                                last_change = time.time()
+                                continue
+                        except Exception:
+                            pass  # selector not present → proceed normally
+
                     current = await self.extract_response(page)
                     if len(current) > last_len:
                         last_len = len(current)

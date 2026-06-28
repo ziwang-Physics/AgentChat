@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-MultiAgent Pipeline — Browser Automation Tool.
+MultiAgent Pipeline — Browser Automation + API Orchestrator.
 
-Handles the two phases that require Playwright/Chrome:
-  phase2  — concurrent dispatch to 4 web platforms
-  phase4  — Gemini 3.1 Pro Extended Thinking final adjudication
+Handles the three phases that require external execution:
+  phase2  — concurrent dispatch to 5 web platforms (incl. Gemini Pro Extended)
+  phase4  — DeepSeek V4 Pro API final adjudication (no browser, direct API)
 
 Phases 1 & 3 are done by Claude Code itself (running on DeepSeek backend)
-— no browser needed. This tool ONLY does the browser-heavy phases.
+— no browser needed. This tool ONLY does the browser-heavy + API phases.
 
 Usage:
   python3 orchestrator.py phase2 --file prompts.json --json
-  python3 orchestrator.py phase4 --file matrix.md --task-core "SUMMARY"
+  python3 orchestrator.py phase4 --file matrix.md --prompts-file prompts.json
 """
 
 import argparse, asyncio, json, logging, os, sys, time
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
 
 from playwright.async_api import async_playwright
 
@@ -33,10 +35,21 @@ P2_DEFAULT_TIMEOUT = 60
 
 P2_CLASSES = {
     "chatgpt": ChatGPTAdapter,
-    "claude":  ClaudeAdapter,
     "kimi":    KimiAdapter,
+    "gemini":  GeminiAdapter,
+}
+# ClaudeAdapter + QianwenAdapter kept as spares — see SKILL.md #20
+_P2_SPARE = {
+    "claude":  ClaudeAdapter,
     "qianwen": QianwenAdapter,
 }
+
+# ── DeepSeek API configuration (P4 adjudicator) ──────────────────────────
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_API_URL = "https://api.deepseek.com/anthropic/v1/messages"
+DEEPSEEK_MODEL = "deepseek-v4-pro"
+DEEPSEEK_MAX_TOKENS = 4096
+DEEPSEEK_TIMEOUT_S = 120  # API HTTP timeout (not reasoning timeout)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -71,6 +84,13 @@ async def _p2_worker(adapter, prompt: str, results: dict,
     try:
         page = await adapter.connect(context=shared_context)
         await adapter.ensure_fresh_conversation(page)
+
+        # Enable deep-thinking mode (no-op on most platforms, toggle on Qianwen)
+        try:
+            await adapter.ensure_thinking_mode(page)
+        except Exception as e:
+            log.warning("[P2:%s] Thinking mode toggle failed (non-fatal): %s", name, e)
+
         await adapter.ensure_ready(page)
 
         await adapter.clear_input(page)
@@ -132,7 +152,7 @@ async def _p2_worker(adapter, prompt: str, results: dict,
 
 async def phase2_dispatch(prompts: dict,
                           timeout_s: int = P2_DEFAULT_TIMEOUT) -> dict:
-    """Send 4 different prompts to GPT/Claude/Kimi/Qianwen concurrently.
+    """Send prompts to GPT/Claude/Kimi/Qianwen/Gemini concurrently (5 platforms).
 
     P1 change: fire-and-collect replaces Barrier.  Each worker sends as soon
     as its page is ready — no artificial sync point.  Uses asyncio.wait() with
@@ -211,65 +231,93 @@ async def phase2_dispatch(prompts: dict,
         }
 
 
-# ── Phase 4: Adjudicate ──────────────────────────────────────────────────────
+# ── Phase 4: Adjudicate (DeepSeek V4 Pro API) ──────────────────────────────
 
 async def phase4_adjudicate(matrix: str, task_core: str) -> str:
-    """Send compressed matrix to Gemini 3.1 Pro Extended Thinking."""
-    log.info("🔴 Phase 4: Adjudicate — sending matrix to Gemini")
-    gm = GeminiAdapter()
+    """Send compressed matrix to DeepSeek V4 Pro API for final adjudication.
 
-    async with async_playwright() as pw:
-        browser = await pw.chromium.connect_over_cdp(cdp_url(SHARED_CDP_PORT))
-        context = browser.contexts[0]
-        page = await gm.connect(context=context)
+    Replaces the previous Gemini Web CDP path (2026-06-28) with a direct API
+    call — zero DOM dependency, zero automation failure risk, second-level
+    latency.  Uses the Anthropic-compatible Messages endpoint.
 
+    Returns the adjudication text, or empty string on failure.
+    """
+    log.info("🔴 Phase 4: Adjudicate — sending matrix to DeepSeek V4 Pro API")
+
+    if not DEEPSEEK_API_KEY:
+        log.error("[P4] DEEPSEEK_API_KEY not set — cannot adjudicate")
+        return ""
+
+    prompt = (
+        "你现在是拥有长链条推理能力的终审法官。"
+        "请审视以下专家分析矩阵，给出最终裁决。\n\n"
+        f"## 原始问题\n{task_core}\n\n"
+        f"## 专家分析矩阵\n{matrix}\n\n"
+        "请按以下结构输出：\n\n"
+        "## 综合结论\n"
+        "基于共识区和特色区，给出最可靠全面的回答。"
+        "技术问题请输出可直接执行的方案。\n\n"
+        "## 争议裁决\n"
+        "逐条裁决冲突区。"
+        "权衡原则：可靠性优先、证据驱动、不确定性明确指出。\n\n"
+        "## 缝合方案\n"
+        "将特色区的优化、基准参数、防坑逻辑整合进共识区核心方案。\n\n"
+        "## 可信度评估\n"
+        "评估可信度（高/中/低），标注需进一步验证的内容。\n\n"
+        "## 补充说明\n"
+        "未解决的问题、建议的后续行动。\n\n"
+        "原则：优先共识、冲突必裁、技术细节不简化、"
+        "信息不足时明确指出、用中文回答。"
+    )
+
+    body = json.dumps({
+        "model": DEEPSEEK_MODEL,
+        "max_tokens": DEEPSEEK_MAX_TOKENS,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode("utf-8")
+
+    req = Request(DEEPSEEK_API_URL, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("x-api-key", DEEPSEEK_API_KEY)
+    req.add_header("anthropic-version", "2023-06-01")
+
+    try:
+        resp = urlopen(req, timeout=DEEPSEEK_TIMEOUT_S)
+        raw = resp.read().decode("utf-8")
+        data = json.loads(raw)
+
+        # Anthropic Messages format: content is a list of blocks
+        content_blocks = data.get("content", [])
+        text = "".join(
+            block.get("text", "") for block in content_blocks
+            if block.get("type") == "text"
+        )
+
+        # Fallback: try OpenAI-compatible format (choices[0].message.content)
+        if not text and "choices" in data:
+            text = data["choices"][0].get("message", {}).get("content", "")
+
+        if text:
+            log.info("[P4] DeepSeek API returned %d chars", len(text))
+            return text.strip()
+        else:
+            log.warning("[P4] DeepSeek API returned empty content")
+            return ""
+
+    except HTTPError as e:
+        body_snippet = ""
         try:
-            await gm.ensure_fresh_conversation(page)
-
-            # Pro Extended — non-fatal
-            try:
-                await gm.ensure_pro_extended(page)
-            except Exception as e:
-                log.warning("[P4] Pro Extended unavailable: %s", e)
-
-            await gm.ensure_ready(page)
-
-            # Generic adjudication prompt (de-HPC-ified 2026-06-28).
-            # Uses evidence-driven, reliability-first principles instead of
-            # hard-coding production-environment assumptions.
-            prompt = (
-                "你现在是拥有长链条推理能力的终审法官。"
-                "请审视以下专家分析矩阵，给出最终裁决。\n\n"
-                f"## 原始问题\n{task_core}\n\n"
-                f"## 专家分析矩阵\n{matrix}\n\n"
-                "请按以下结构输出：\n\n"
-                "## 综合结论\n"
-                "基于共识区和特色区，给出最可靠全面的回答。"
-                "技术问题请输出可直接执行的方案。\n\n"
-                "## 争议裁决\n"
-                "逐条裁决冲突区。"
-                "权衡原则：可靠性优先、证据驱动、不确定性明确指出。\n\n"
-                "## 缝合方案\n"
-                "将特色区的优化、基准参数、防坑逻辑整合进共识区核心方案。\n\n"
-                "## 可信度评估\n"
-                "评估可信度（高/中/低），标注需进一步验证的内容。\n\n"
-                "## 补充说明\n"
-                "未解决的问题、建议的后续行动。\n\n"
-                "原则：优先共识、冲突必裁、技术细节不简化、"
-                "信息不足时明确指出、用中文回答。"
-            )
-
-            await gm.clear_input(page)
-            await gm.inject_prompt(page, prompt)
-            await gm.trigger_send(page)
-
-            raw = await gm.wait_response(page, timeout_ms=600_000)  # 10min for Extended Thinking
-            cleaned = gm.clean_response(raw, prompt)
-            log.info("[P4] Final output: %d chars", len(cleaned))
-            return cleaned
-
-        finally:
-            await gm.cleanup()
+            body_snippet = e.read().decode("utf-8", errors="replace")[:300]
+        except Exception:
+            pass
+        log.error("[P4] DeepSeek API HTTP %d: %s", e.code, body_snippet)
+        return ""
+    except URLError as e:
+        log.error("[P4] DeepSeek API connection failed: %s", e.reason)
+        return ""
+    except Exception as e:
+        log.error("[P4] DeepSeek API unexpected error: %s", e)
+        return ""
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -278,7 +326,7 @@ def main():
     if len(sys.argv) < 2:
         print("Usage:", file=sys.stderr)
         print("  orchestrator.py phase2 --file prompts.json --json", file=sys.stderr)
-        print("  orchestrator.py phase4 --file matrix.md --task-core 'summary'",
+        print("  orchestrator.py phase4 --file matrix.md --prompts-file prompts.json",
               file=sys.stderr)
         print("\nOptions:", file=sys.stderr)
         print("  --timeout N    Phase 2 per-platform timeout (default: 60s)",

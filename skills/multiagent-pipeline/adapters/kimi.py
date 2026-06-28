@@ -30,3 +30,10 @@ class KimiAdapter(BaseAdapter):
         'div.chat-detail-content',
         'div.main',
     ]
+    # During generation Kimi shows typing dots / loading indicator.
+    # Stability fallback checks this — if still visible, the real answer
+    # hasn't arrived yet and we must keep waiting.
+    THINKING_SELECTOR = (
+        '[class*="typing"], [class*="loading-indicator"], '
+        '[class*="stop-generate"]'
+    )
