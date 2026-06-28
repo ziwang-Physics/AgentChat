@@ -23,6 +23,9 @@
  *   --timeout=N  — override default thinking timeout (ms)
  *   --smoke      — smoke test: verify environment without submitting a prompt
  *   --doctor     — check Chrome CDP connectivity only
+ *   --session    — reuse existing Gemini tab (multi-turn conversation mode)
+ *   --new-session — force-create a new session even if one exists
+ *   --locale=zh-CN — override auto-detected Gemini UI language
  */
 
 const { chromium } = require('playwright-core');
@@ -34,6 +37,17 @@ const MAX_RETRIES       = 2;
 const THINKING_TIMEOUT  = 600_000; // 10 min default
 const POLL_INTERVAL     = 2_000;   // ms
 const INSERT_TEXT_LIMIT = 50_000;  // ~50KB safe CDP WebSocket payload
+
+// ── Locale-aware selectors ──────────────────────────────────────────────────
+// Gemini UI 根据用户账号语言渲染不同文本（简体中文/繁体中文/英文等）。
+// locales.js 集中管理所有语言变体，核心逻辑不再硬编码选择器。
+const LOC = require('./locales');
+
+// 用于 page.evaluate() 的组合 CSS（必须包含所有已知 locale，因为
+// evaluate 运行在浏览器端，无法访问 Node.js 运行时状态）
+const EVAL_MODEL_BTN = Object.values(LOC.PROFILES)
+    .map(p => `button[aria-label*="${p.modelAria}"]`)
+    .join(', ');
 
 // ── Telemetry (Round 7) ─────────────────────────────────────────────────────
 const telemetry = {
@@ -142,6 +156,89 @@ async function acquireIsolatedPage(browser) {
     }
 
     log('Isolated tab ready.');
+
+    // Auto-detect Gemini UI locale for correct selectors
+    const lang = await LOC.detectLocale(page);
+    if (lang) {
+        LOC.setLocale(lang);
+        log(`Detected Gemini UI locale: ${lang}`);
+    }
+
+    return page;
+}
+
+/**
+ * acquireSessionPage — reuses an existing Gemini tab for multi-turn conversation.
+ *
+ * Unlike acquireIsolatedPage (which always spawns a new tab), this finds an
+ * existing Gemini tab with an active conversation and reuses it — preserving
+ * conversation history, avoiding re-authentication, and preventing Google's
+ * security verification triggers.
+ *
+ * Falls back to creating a new tab if no suitable session exists.
+ */
+async function acquireSessionPage(browser) {
+    const context = browser.contexts()[0];
+    if (!context) throw new Error('No active browser context on Chrome instance.');
+
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+
+    // 1. Hunt for an existing Gemini tab with conversation context
+    const pages = await context.pages();
+    for (const pg of pages) {
+        try {
+            const url = pg.url();
+            // Must be a Gemini app page with loaded content
+            // Match both gemini.google.com/u/0/app and gemini.google.com/app
+            const isGeminiPage = url.startsWith(GEMINI_URL_PREFIX) || url.startsWith('https://gemini.google.com/app');
+            if (isGeminiPage && !url.includes('accounts.google.com')) {
+                const title = await pg.title().catch(() => '');
+                if (title && title !== 'about:blank' && !title.includes('登录')) {
+                    // Check if page is actually alive and responsive
+                    const ready = await pg.evaluate(() => document.readyState).catch(() => null);
+                    if (ready === 'complete') {
+                        log(`Reusing existing Gemini tab: "${title.substring(0, 50)}"`);
+                        // Re-detect locale on reused tab (new process, state is fresh)
+                        const lang = await LOC.detectLocale(pg);
+                        if (lang) {
+                            LOC.setLocale(lang);
+                            log(`Detected Gemini UI locale: ${lang}`);
+                        }
+                        return pg;
+                    }
+                }
+            }
+        } catch (_) {
+            // Page may have closed between listing and access — skip
+        }
+    }
+
+    // 2. No reusable page found — create a fresh one
+    log('No reusable Gemini tab found, creating new session...');
+    const page = await context.newPage();
+    page.on('crash',  () => log('WARN: Tab crashed.'));
+    page.on('close', () => log('WARN: Tab closed.'));
+
+    await page.goto(GEMINI_URL_PREFIX, { waitUntil: 'domcontentloaded', timeout: 45000 });
+
+    const currentUrl = page.url();
+    if (currentUrl.includes('accounts.google.com')) {
+        await page.close();
+        throw Object.assign(
+            new Error('Gemini requires login. Please sign in to gemini.google.com in Chrome.'),
+            { code: 'ERR_NOT_AUTHENTICATED' }
+        );
+    }
+
+    log('New session tab ready.');
+
+    // Auto-detect Gemini UI locale
+    const lang = await LOC.detectLocale(page);
+    if (lang) {
+        LOC.setLocale(lang);
+        log(`Detected Gemini UI locale: ${lang}`);
+    }
+
     return page;
 }
 
@@ -167,22 +264,20 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES) {
         await page.waitForTimeout(500);
 
         // Check current mode
-        const currentMode = await page.evaluate(() => {
-            const btn = document.querySelector(
-                'button[aria-label*="模式挑選器"], button[aria-label*="Model selector"], button[aria-label*="模式选择器"]'
-            );
+        const currentMode = await page.evaluate((evalBtn) => {
+            const btn = document.querySelector(evalBtn);
             return btn ? btn.textContent.trim() : 'UNKNOWN';
-        });
+        }, EVAL_MODEL_BTN);
         log(`attempt ${attempt}: current mode = "${currentMode}"`);
 
-        if (currentMode.includes('Pro延長') || currentMode.includes('Pro Extended')) {
+        if (currentMode.includes(LOC.verifyStr('modelVerify'))) {
             log('Pro Extended Thinking already active');
             return true;
         }
 
         // Step 1: Open model selector (using Playwright Locator with auto-wait)
         try {
-            const selectorBtn = page.locator('button[aria-label*="模式挑選器"], button[aria-label*="Model selector"], button[aria-label*="模式选择器"]').first();
+            const selectorBtn = page.locator(LOC.ariaCSS('modelAria')).first();
             await selectorBtn.waitFor({ state: 'visible', timeout: 5000 });
             await selectorBtn.click();
         } catch {
@@ -203,15 +298,15 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES) {
         if (!currentMode.includes('Pro') || currentMode.includes('Flash')) {
             log('switching to Pro model');
             try {
-                const proItem = page.locator('[role="menuitem"]', { hasText: 'Pro' })
+                const proItem = page.locator(LOC.STATIC.menuItem, { hasText: LOC.menuPattern('proText') })
                     .filter({ hasNotText: 'Flash' }).first();
                 await proItem.click();
                 await page.waitForTimeout(2000);
 
                 // Model switch often closes menu — reopen for thinking level
-                const selectorBtn = page.locator('button[aria-label*="模式挑選器"], button[aria-label*="Model selector"], button[aria-label*="模式选择器"]').first();
+                const selectorBtn = page.locator(LOC.ariaCSS('modelAria')).first();
                 await selectorBtn.click();
-                await page.locator('[role="menu"]').waitFor({ state: 'visible', timeout: 5000 });
+                await page.locator(LOC.STATIC.menuContainer).waitFor({ state: 'visible', timeout: 5000 });
             } catch {
                 log('WARN: Failed to switch to Pro model.');
                 continue;
@@ -219,9 +314,9 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES) {
         }
 
         // Step 3-4: Expand thinking level → select Extended (handles partial state)
-        const extendedBtn = page.locator('[role="menuitem"]')
-            .filter({ hasText: /延長|Extended/i })
-            .filter({ hasNotText: /思考|Thought/i })
+        const extendedBtn = page.locator(LOC.STATIC.menuItem)
+            .filter({ hasText: LOC.menuPattern('extendedText') })
+            .filter({ hasNotText: LOC.menuPattern('thinkText') })
             .first();
 
         const extendedAlreadyVisible = await extendedBtn.isVisible().catch(() => false);
@@ -229,7 +324,7 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES) {
         if (!extendedAlreadyVisible) {
             log('expanding thinking-level choices');
             try {
-                const thoughtItem = page.locator('[role="menuitem"]', { hasText: /思考|Thought/i }).first();
+                const thoughtItem = page.locator(LOC.STATIC.menuItem, { hasText: LOC.menuPattern('thinkText') }).first();
                 await thoughtItem.click();
                 // Locator auto-waits for extendedBtn to become visible
             } catch {
@@ -252,18 +347,16 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES) {
 
         // Step 5: Close menu gracefully and verify
         await page.keyboard.press('Escape');
-        await page.locator('.cdk-overlay-backdrop').waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {});
+        await page.locator(LOC.STATIC.overlayBackdrop).waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {});
 
         // Verify with polling (handles UI transition delays)
         // We use a lambda string pattern; null args since we use hardcoded selectors
-        const isActive = await page.waitForFunction(() => {
-            const btn = document.querySelector(
-                'button[aria-label*="模式挑選器"], button[aria-label*="Model selector"], button[aria-label*="模式选择器"]'
-            );
+        const isActive = await page.waitForFunction(({ evalBtn, verifyStr }) => {
+            const btn = document.querySelector(evalBtn);
             if (!btn) return false;
             const text = btn.textContent.trim();
-            return text.includes('Pro延長') || text.includes('Pro Extended');
-        }, null, { timeout: 3000 }).catch(() => false);
+            return text.includes(verifyStr);
+        }, { evalBtn: EVAL_MODEL_BTN, verifyStr: LOC.verifyStr('modelVerify') }, { timeout: 3000 }).catch(() => false);
 
         if (isActive) {
             log('Verified: Pro Extended Thinking active.');
@@ -294,7 +387,7 @@ async function waitForResponse(page, timeoutMs = THINKING_TIMEOUT) {
     const startTime = Date.now();
     log('waiting for response rendering to complete...');
 
-    const responseLocator = page.locator('.model-response-text');
+    const responseLocator = page.locator(LOC.STATIC.responseContainer);
 
     // Ensure at least one response block exists
     try {
@@ -306,7 +399,7 @@ async function waitForResponse(page, timeoutMs = THINKING_TIMEOUT) {
 
     // PRIMARY: Wait for Action Toolbar (Copy / Good response / thumbs)
     const actionToolbar = page.locator(
-        'button[aria-label*="複製"], button[aria-label*="Copy"], button[aria-label*="Good response"], button[aria-label*="好答案"]'
+        LOC.ariaCSS('copyAria') + ', ' + LOC.ariaCSS('goodAria')
     ).last();
 
     const toolbarAppeared = await actionToolbar.waitFor({ state: 'visible', timeout: Math.max(10000, timeoutMs - (Date.now() - startTime)) }).then(() => true).catch(() => false);
@@ -384,7 +477,7 @@ async function submitToGemini(page, message, options = {}) {
             // ── 2. Locate, verify, and focus editor ──
             log('locating input editor...');
 
-            const editorSelector = '.ql-editor, [contenteditable="true"][role="textbox"], rich-textarea';
+            const editorSelector = LOC.STATIC.editor;
             const editorLocator = page.locator(editorSelector).first();
 
             try {
@@ -459,7 +552,7 @@ async function submitToGemini(page, message, options = {}) {
 
             // ── 4. Send ──
             const sendBtn = page.locator(
-                'button[aria-label*="傳送"], button[aria-label*="发送"], button[aria-label*="Send"]'
+                LOC.ariaCSS('sendAria')
             );
 
             try {
@@ -481,7 +574,7 @@ async function submitToGemini(page, message, options = {}) {
             log('waiting for generation phase...');
             const genStartTime = Date.now();
             const stopBtn = page.locator(
-                'button[aria-label*="停止"], button[aria-label*="Stop"]'
+                LOC.ariaCSS('stopAria')
             ).first();
 
             try {
@@ -545,7 +638,7 @@ async function submitToGemini(page, message, options = {}) {
                 log('Attempting soft UI recovery...');
                 try {
                     // 1. Abort any stuck generation
-                    const stopBtn = page.locator('button[aria-label*="停止"], button[aria-label*="Stop"]').first();
+                    const stopBtn = page.locator(LOC.ariaCSS('stopAria')).first();
                     if (await stopBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
                         log('Canceling stuck generation...');
                         await stopBtn.click();
@@ -553,7 +646,7 @@ async function submitToGemini(page, message, options = {}) {
                     }
 
                     // 2. Clean editor
-                    const editorLocator = page.locator('.ql-editor, [contenteditable="true"], rich-textarea').first();
+                    const editorLocator = page.locator(LOC.STATIC.editorFallback).first();
                     if (await editorLocator.isVisible({ timeout: 2000 }).catch(() => false)) {
                         try { await editorLocator.fill(''); } catch {
                             await editorLocator.click();
@@ -618,7 +711,7 @@ async function main() {
     }
 
     // Parse --timeout flag
-    let promptArgs = args.filter(a => a !== '--smoke' && a !== '--doctor');
+    let promptArgs = args.filter(a => !a.startsWith('--timeout=') && !a.startsWith('--locale=') && a !== '--smoke' && a !== '--doctor' && a !== '--session' && a !== '--new-session');
     let customTimeout = THINKING_TIMEOUT;
 
     const timeoutFlagIdx = promptArgs.findIndex(a => a.startsWith('--timeout='));
@@ -627,6 +720,19 @@ async function main() {
         if (!isNaN(val) && val > 0) customTimeout = val;
         promptArgs.splice(timeoutFlagIdx, 1);
     }
+
+    // Parse --locale= flag (override auto-detection)
+    let manualLocale = null;
+    const localeArg = args.find(a => a.startsWith('--locale='));
+    if (localeArg) {
+        manualLocale = localeArg.split('=')[1].trim();
+        LOC.setLocale(manualLocale);
+        log(`Manual locale override: ${manualLocale}`);
+    }
+
+    // --session: reuse existing tab (multi-turn), --new-session: force fresh tab
+    const sessionMode = args.includes('--session');
+    const newSession = args.includes('--new-session');
 
     // Read prompt from remaining argv or stdin
     let prompt = promptArgs.join(' ').trim();
@@ -637,28 +743,45 @@ async function main() {
         prompt = chunks.join('').trim();
     }
     if (!prompt && !args.includes('--smoke')) {
-        console.error('Usage: node index.js [--timeout=N] [--smoke] [--doctor] "Your prompt"');
-        console.error('       echo "prompt" | node index.js [--timeout=N]');
+        console.error('Usage: node index.js [--timeout=N] [--smoke] [--doctor] [--session] [--new-session] [--locale=zh-CN] "Your prompt"');
+        console.error('       echo "prompt" | node index.js [--timeout=N] [--session]');
+        console.error('  --session     Reuse existing Gemini tab for multi-turn conversation');
+        console.error('  --new-session Force-create a new conversation tab');
+        console.error('  --locale=LANG Override auto-detected Gemini UI language (zh-CN|zh-TW|en)');
         process.exit(1);
     }
 
     // ── Connection & Page Lifecycle ──
     let browser, page;
+    let closePageOnExit = true;  // default: cleanup after ourselves
     const setupStart = Date.now();
     try {
         browser = await connectWithRetry(CDP_URL);
-        page    = await acquireIsolatedPage(browser);
+
+        if (newSession) {
+            // Force new tab even in session scenario
+            log('Forcing new session tab...');
+            page = await acquireIsolatedPage(browser);
+        } else if (sessionMode) {
+            // Multi-turn: reuse existing tab, don't close it when done
+            page = await acquireSessionPage(browser);
+            closePageOnExit = false;
+        } else {
+            // Default: isolated tab per invocation
+            page = await acquireIsolatedPage(browser);
+        }
+
         telemetry.setup_ms = Date.now() - setupStart;
 
         // --smoke: verify environment without submitting
         if (args.includes('--smoke')) {
             log('Running smoke test...');
             try {
-                const editor = page.locator('.ql-editor, [contenteditable="true"], rich-textarea').first();
+                const editor = page.locator(LOC.STATIC.editorFallback).first();
                 await editor.waitFor({ state: 'visible', timeout: 5000 });
                 log('Editor found on page.');
 
-                const selectorBtn = page.locator('button[aria-label*="模式挑選器"], button[aria-label*="Model selector"], button[aria-label*="模式选择器"]').first();
+                const selectorBtn = page.locator(LOC.ariaCSS('modelAria')).first();
                 await selectorBtn.waitFor({ state: 'visible', timeout: 5000 });
                 log('Model selector found on page.');
 
@@ -688,7 +811,7 @@ async function main() {
         process.exit(4);
     } finally {
         stopTimer();
-        if (page && !page.isClosed()) {
+        if (closePageOnExit && page && !page.isClosed()) {
             try { await page.close(); } catch (_) {}
         }
         if (browser) {
