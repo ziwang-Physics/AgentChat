@@ -2,6 +2,10 @@
 
 > **最后更新**: 2026-07-01
 > **核心功能**: 按优先级链自动降级，确保始终有一个可用的大模型
+> **最近修复**:
+> - Gemini Pro Extended 长 prompt 超时: stop button 可见=仍在思考, 延长等待+120s
+> - Claude "Thinking" 占位符: 过滤 Thinking/Analyzing 空响应, 多重停止检测
+> - Promise.allSettled: FreeSubAgent 单 worker 异常不再影响其他 worker
 
 ## Trigger
 

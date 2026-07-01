@@ -1,6 +1,8 @@
 # Gemini Web Extended Thinking
 
-> **最后更新**: 2026-06-25 — 完整诊断 Chrome 导航失败的根因并修复
+> **最后更新**: 2026-07-01
+> **注意**: 本 skill 为单 provider Gemini 专用。需要多 provider fallback 请用 AgentChat-WebExtended。
+> 最新 Gemini Pro Extended 超时修复和 Claude 占位符过滤已集成在 AgentChat-WebExtended 中。
 
 ## Trigger
 
