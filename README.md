@@ -27,7 +27,7 @@
 
 ## 为什么用这个？
 
-## 💡 传统全 API 方案：每轮对话的输入+输出 token 全部计费，长链条推理成本指数级增长。
+## 💡 传统全 API 方案：每轮对话的输入+输出 token 全部计费。
 **AgentChat "免费大脑"模式**：用最便宜的模型做规划，用最强大的免费 Web 端做推理。
 
 | 维度 | 传统 API 方案 | AgentChat |
@@ -43,7 +43,7 @@
 2. 🛡️ **8-Provider 智能降级** — `Gemini → ChatGPT → Claude → Qwen → Kimi → MiMo → MiniMax → DeepSeek`，Quota 耗尽/超时自动切换
 3. 🎭 **AI 角色分工体系** — Kimi=研究员 · Gemini=深度推理 · Qwen=事实核查 · ChatGPT=创意构建，互补不重叠
 4. ⚖️ **证据仲裁机制** — 多 worker 并发结果经过质量门 + 长度差异检测 + 置信度计算，不盲目合并
-5. 🪶 **薄编排器架构** — `FreeSubAgent` 仅 ~350 行，零 provider 代码重复，所有 AI 调用委托给 `WebExtended`
+5. 🎯 **薄编排器架构** — `FreeSubAgent` 仅 ~350 行，零 provider 代码重复，所有 AI 调用委托给 `WebExtended`
 
 ---
 
