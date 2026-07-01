@@ -792,15 +792,53 @@ async function tryClaude(page, prompt, timeoutMs) {
     log('claude: waiting for response...');
     const startTime = Date.now();
 
-    // Claude shows a stop button during generation
+    // Claude shows a stop button during generation. But the button's aria-label
+    // may vary between UI versions, and it may appear/disappear too quickly for
+    // our polling to catch.  Use multiple strategies.
+    let generationDetected = false;
     try {
-        const stopBtn = page.locator('button[aria-label="Stop"], button[aria-label="Stop generating"]').first();
-        await stopBtn.waitFor({ state: 'visible', timeout: 15000 });
-        log('claude: generation started');
-        const remaining = Math.max(30000, timeoutMs - (Date.now() - provStart));
-        await stopBtn.waitFor({ state: 'hidden', timeout: remaining }).catch(() => { });
-    } catch {
-        log('claude: No visible generation phase.');
+        const stopSelectors = [
+            'button[aria-label="Stop"]',
+            'button[aria-label="Stop generating"]',
+            'button[aria-label*="Stop"]',
+            '[data-testid="stop-button"]',
+        ];
+        for (const sel of stopSelectors) {
+            try {
+                const stopBtn = page.locator(sel).first();
+                await stopBtn.waitFor({ state: 'visible', timeout: 10000 });
+                log('claude: generation started (stop button visible)');
+                generationDetected = true;
+                const remaining = Math.max(30000, timeoutMs - (Date.now() - provStart));
+                await stopBtn.waitFor({ state: 'hidden', timeout: remaining }).catch(() => {});
+                log('claude: generation finished (stop button hidden)');
+                break;
+            } catch (_) { /* try next selector */ }
+        }
+    } catch (_) { }
+
+    if (!generationDetected) {
+        // Fallback: wait for the response element to contain MORE than just
+        // the "Thinking" placeholder. Claude shows "Thinking" / "Analyzing"
+        // during the reasoning phase — we must wait past that.
+        log('claude: Stop button not detected, waiting for real content...');
+        const DEADLINE_LOADING = Date.now() + Math.min(60000, timeoutMs);
+        while (Date.now() < DEADLINE_LOADING) {
+            await page.waitForTimeout(2000);
+            try {
+                const bodyText = await page.evaluate(() => document.body?.innerText || '');
+                // Look for meaningful content — not just the "Thinking" placeholder
+                const meaningful = bodyText.replace(/\b(Thinking|Analyzing|Reasoning|思考中|分析中)\.{0,3}\s*/gi, '').trim();
+                if (meaningful.length > 50) {
+                    log('claude: real content detected via body text scan');
+                    generationDetected = true;
+                    break;
+                }
+            } catch (_) { }
+        }
+        if (!generationDetected) {
+            log('claude: No generation detected after extended wait.');
+        }
     }
 
     // Extract response
@@ -850,6 +888,20 @@ async function tryClaude(page, prompt, timeoutMs) {
 
     const response = await responseEl.evaluate(el => (el.innerText || el.textContent || '').trim());
     if (!response || response.length < 5) {
+        return { success: false, reason: 'error' };
+    }
+
+    // Reject placeholder-only responses (Claude's "Thinking" / "Analyzing" phase)
+    const PLACEHOLDER_PATTERNS = [
+        /^Thinking\.{0,3}\s*$/i,
+        /^Analyzing\.{0,3}\s*$/i,
+        /^Reasoning\.{0,3}\s*$/i,
+        /^思考中\.{0,3}\s*$/i,
+        /^分析中\.{0,3}\s*$/i,
+    ];
+    const cleanedCheck = response.replace(/[\s\n]+/g, ' ').trim();
+    if (PLACEHOLDER_PATTERNS.some(p => p.test(cleanedCheck)) || cleanedCheck.length < 30) {
+        log(`claude: Response is placeholder-only ("${cleanedCheck.slice(0, 40)}") — treating as error`);
         return { success: false, reason: 'error' };
     }
 
@@ -1583,7 +1635,7 @@ async function doctorCheck() {
         process.exit(0);
     } catch (e) {
         log('Chrome CDP is NOT reachable on ' + CDP_URL);
-        log('Run: bash scripts/start-chrome-debug.sh');
+        log('Run: bash ~/start-chrome-debug.sh');
         process.exit(1);
     }
 }
@@ -1649,7 +1701,7 @@ async function main() {
         browser = await connectWithRetry(CDP_URL);
     } catch (err) {
         log(`FATAL: Cannot connect to Chrome CDP — ${err.message}`);
-        log('Ensure Chrome debug is running: bash scripts/start-chrome-debug.sh');
+        log('Ensure Chrome debug is running: bash ~/start-chrome-debug.sh');
         recordTelemetry(1);
         process.exit(1);
     }
