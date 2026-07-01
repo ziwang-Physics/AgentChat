@@ -2,7 +2,7 @@
 /**
  * AI Fallback Chain — Multi-Provider CDP Bridge
  *
- * Priority chain: Gemini (Pro Extended) → ChatGPT → Claude → Qwen → Kimi → MiniMax
+ * Priority chain: Gemini (Pro Extended) → ChatGPT → Claude → Qwen → Kimi → MiniMax → MiMo → DeepSeek
  * Falls to next provider on quota exhaustion or service unavailability.
  * Only ONE provider is used per invocation — first available wins.
  *
@@ -30,7 +30,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 
-const { ProviderError, classifyError, STAGES, REASONS } = require('../lib/errors');
+const { ProviderError, classifyError } = require('../lib/errors');
 
 // ══════════════════════════════════════════════════════════════════════════════
 // CONFIG
@@ -271,7 +271,6 @@ async function connectWithRetry(cdpUrl, retries = 3) {
     }
 }
 
-
 /** Click a send button (trying selectors in order) or fall back to keyboard */
 async function sendMessage(page, editorLocator, sendSelectors, sendFallback) {
     let sent = false;
@@ -348,7 +347,6 @@ function validateResponseComplete(text) {
     }
     return { ok: true };
 }
-
 
 async function ensureProExtended(page, maxRetries = 2) {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -2118,7 +2116,7 @@ async function tryAllProviders(browser, prompt, ctx, options = {}) {
                 default:
                     result = classifyError(
                         new Error(`Unknown provider: ${provider.key}`),
-                        STAGES.NAVIGATE, provider.key
+                        'navigate', provider.key
                     );
             }
         } catch (err) {
@@ -2364,7 +2362,11 @@ async function main() {
     }
 }
 
-main().catch(e => {
-    process.stderr.write(`[fallback] unhandled: ${e.message}\n`);
-    process.exit(4);
-});
+if (require.main === module) {
+    main().catch(e => {
+        process.stderr.write(`[fallback] unhandled: ${e.message}\n`);
+        process.exit(4);
+    });
+}
+
+module.exports = { PROVIDER_CHAIN };

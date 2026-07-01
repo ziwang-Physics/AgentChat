@@ -10,7 +10,7 @@
  */
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Stage enum — which step in the 9-step pipeline failed
+// Stage enum — which step in the provider pipeline failed
 // ══════════════════════════════════════════════════════════════════════════════
 
 const STAGES = Object.freeze({
