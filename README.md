@@ -1,6 +1,6 @@
 # AgentChat — Free Web-SubAgent Workflow
 
-> *Chrome CDP + Playwright 驱动的 Web AI 自动化交互系统*
+> Chrome CDP + Playwright 驱动的 Web AI 自动化交互系统
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
