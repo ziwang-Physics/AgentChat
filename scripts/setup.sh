@@ -55,13 +55,18 @@ check "playwright (Python)" \
     "python3 -c 'from playwright.sync_api import sync_playwright'" \
     "pip3 install playwright"
 
-check "Playwright Chromium" \
-    "python3 -c 'from playwright.sync_api import sync_playwright; p=__import__(\"playwright\").sync_api.sync_playwright().start(); print(p.chromium.executable_path); p.stop()' 2>/dev/null | grep -q chromium" \
-    "python3 -m playwright install chromium"
+check "Playwright (Python API)" \
+    "python3 -c 'from playwright.sync_api import sync_playwright'" \
+    "pip3 install playwright"
 
-check "websocket-client" \
+check "websocket-client (CDP fallback)" \
     "python3 -c 'import websocket'" \
     "pip3 install websocket-client"
+
+# System Chrome (NOT Playwright Chromium — daemon rejects it)
+check "System Chrome (CHROMIUM_PATH)" \
+    "test -n \"\${CHROMIUM_PATH:-}\" -a -x \"\$CHROMIUM_PATH\" -o -x /usr/bin/google-chrome-stable -o -x /usr/bin/chromium -o -x /usr/bin/google-chrome" \
+    "安装系统 Chrome 并在 .env 设置 CHROMIUM_PATH"
 
 echo ""
 
