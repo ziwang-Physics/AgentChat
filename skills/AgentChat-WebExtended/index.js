@@ -1267,11 +1267,14 @@ async function tryKimi(page, prompt, timeoutMs) {
         return { success: false, reason: 'error' };
     }
 
-    // Stability check
+    // Kimi generates in BURSTS with pauses between sentences.
+    // A short stability window triggers mid-generation → truncated responses.
+    // Use a longer window (15s) and verify the response looks complete.
     let lastLen = 0;
     let lastChangeTime = Date.now();
-    const STABILITY_WINDOW = 8_000;
+    const STABILITY_WINDOW = 15_000;  // Kimi pauses longer between paragraphs
     const DEADLINE = startTime + timeoutMs;
+    const MIN_CONTENT_DEADLINE = startTime + 45_000; // must wait at least 45s for content
 
     while ((Date.now() - lastChangeTime) < STABILITY_WINDOW && Date.now() < DEADLINE) {
         await page.waitForTimeout(POLL_INTERVAL);
@@ -1282,7 +1285,14 @@ async function tryKimi(page, prompt, timeoutMs) {
                 lastChangeTime = Date.now();
                 spinner('+');
             } else {
-                spinner('.');
+                // If content is still very short and we haven't waited long enough,
+                // reset the stability timer — Kimi may be thinking between bursts
+                if (text.length < 80 && Date.now() < MIN_CONTENT_DEADLINE) {
+                    lastChangeTime = Date.now(); // keep waiting
+                    spinner('_');
+                } else {
+                    spinner('.');
+                }
             }
         } catch { spinner('?'); }
     }
@@ -1291,6 +1301,14 @@ async function tryKimi(page, prompt, timeoutMs) {
     const response = await responseEl.evaluate(el => (el.innerText || el.textContent || '').trim());
     if (!response || response.length < 5) {
         log(`kimi: empty or too-short response (${response?.length || 0} chars).`);
+        return { success: false, reason: 'error' };
+    }
+
+    // Reject clearly truncated responses — Kimi occasionally stops mid-sentence
+    // after just the opening line (e.g. "我来从...角度审查"). A proper review
+    // should be at least 200 chars for any meaningful analysis.
+    if (response.length < 80 && /^(我来|让我|我将|我会|下面|以下|首先)/.test(response)) {
+        log(`kimi: Response appears truncated (${response.length} chars, starts with meta-planning) — treating as error`);
         return { success: false, reason: 'error' };
     }
 
