@@ -19,22 +19,15 @@
 - 免费额度用尽后自动切换到下一个免费模型
 - PID 锁防冲突——三层架构零代码冗余
 
-• FreeSubAgent = 并行编排器：多角色分工（研究/推理/检索/创作）+ 证据仲裁，拒绝重复回答 🚛
+  FreeSubAgent = 并行编排器：多角色分工（研究/推理/检索/创作）+ 证据仲裁，拒绝重复回答 🚛
 -  并行模式：多个 AI 同时执行不同子任务
 
-• WebExtended = 单一 AI 桥梁：8 提供商自动降级 + 熔断器，一个入口搞定所有模型 🔌
+  WebExtended = 单一 AI 桥梁：8 提供商自动降级 + 熔断器，一个入口搞定所有模型 🔌
 -  串行模式：只用你最喜欢的一个 AI
 
 ## 为什么用这个？
 
 **AgentChat "免费大脑💡"模式**：用最便宜的模型做规划，用最强大的免费 Web 端做推理。
-
-| 维度 | 传统 API 方案 | AgentChat |
-|------|-------------|-----------|
-| **推理成本** | $50-500+/月（输入+输出双向计费） | **$0**（网页版免费，仅规划消耗几十 token） |
-| **多模型调用** | 需维护 N 个平台的 API Key | **免 Key**，基于 Web 登录态自动调用 |
-| **高可用** | 单点依赖，API 挂则任务挂 | **8 节点自动降级**，一个不可用秒切下一个 |
-| **并发能力** | 受 Rate Limit 限制 | **4 worker 真正并行**，各自跑不同 AI |
 
 ### 五大核心创新
 
@@ -47,26 +40,6 @@
 ---
 
 ## 🏗️ Architecture
-
-```mermaid
-graph TD
-    User([用户 / Claude Code]) --> SubAgent{AgentChat-FreeSubAgent<br/>任务拆解 · 4 路并发}
-
-    SubAgent --> W1[🔬 Kimi<br/>研究员]
-    SubAgent --> W2[🧠 Gemini<br/>深度推理]
-    SubAgent --> W3[✅ Qwen<br/>事实核查]
-    SubAgent --> W4[🎨 ChatGPT<br/>创意构建]
-
-    W1 -.- F1[8-Provider 降级链]
-    W2 -.- F2[8-Provider 降级链]
-    W3 -.- F3[8-Provider 降级链]
-    W4 -.- F4[8-Provider 降级链]
-
-    F1 & F2 & F3 & F4 -.-> Chain[Gemini → ChatGPT → Claude → Qwen → Kimi → MiMo → MiniMax → DeepSeek]
-
-    W1 & W2 & W3 & W4 --> Arbiter{证据仲裁<br/>质量评分 + 置信度计算}
-    Arbiter --> Result([📊 高质量 · 零成本 · 可验证的输出])
-```
 
 **三层设计（零代码重复）**：
 
