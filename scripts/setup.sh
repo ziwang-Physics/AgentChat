@@ -55,10 +55,6 @@ check "playwright (Python)" \
     "python3 -c 'from playwright.sync_api import sync_playwright'" \
     "pip3 install playwright"
 
-check "Playwright (Python API)" \
-    "python3 -c 'from playwright.sync_api import sync_playwright'" \
-    "pip3 install playwright"
-
 check "websocket-client (CDP fallback)" \
     "python3 -c 'import websocket'" \
     "pip3 install websocket-client"

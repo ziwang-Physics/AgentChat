@@ -41,11 +41,19 @@ Do NOT use for: interactive conversations that need multi-turn context (each pro
 
      quota用尽    ┌──────────┐    quota用尽    ┌──────────┐    quota用尽    ┌──────────┐
   ──────────────→ │   Qwen   │ ──────────────→ │   Kimi   │ ──────────────→ │ MiniMax  │
-                  │ (通义千问) │                 │ (月之暗面) │                 │ MiniMax  │
+                  │ (通义千问) │                 │ (月之暗面) │                 │          │
                   └────┬─────┘                 └────┬─────┘                 └────┬─────┘
                        │ 成功                       │ 成功                       │ 成功
                        ▼                            ▼                            ▼
                     返回结果                     返回结果                     返回结果
+
+     quota用尽    ┌──────────┐    quota用尽    ┌──────────┐
+  ──────────────→ │   MiMo   │ ──────────────→ │ DeepSeek │
+                  │ (小米)    │                 │          │
+                  └────┬─────┘                 └────┬─────┘
+                       │ 成功                       │ 成功
+                       ▼                            ▼
+                    返回结果                     返回结果
 
   全部不可用 → ERR_ALL_EXHAUSTED (exit code 9)
 ```
@@ -92,7 +100,7 @@ Gemini 是 chain 中唯一要求 **Pro Extended Thinking** 的 provider。
 #    复制并编辑项目 .env 文件：
 #      cp .env.example .env
 #    关键配置:
-#      CHROMIUM_PATH=      (留空自动检测 Playwright Chromium)
+#      CHROMIUM_PATH=/usr/bin/google-chrome-stable  (REQUIRED — 必须设为系统 Chrome，留空会报错退出；拒绝 ms-playwright 路径)
 #      CHROME_PROFILE=~/.chrome-debug-profile
 #    如果未配置，所有 AI 网站的登录态会丢失！
 
@@ -204,7 +212,9 @@ index.js
 │   ├── tryClaude()           — Claude Web
 │   ├── tryQwen()             — 通义千问 Web
 │   ├── tryKimi()             — Kimi/月之暗面 Web
-│   └── tryMiniMax()          — MiniMax Web
+│   ├── tryMiniMax()          — MiniMax Web
+│   ├── tryMiMo()             — 小米 MiMo Studio Web
+│   └── tryDeepSeek()         — DeepSeek Web
 ├── helpers/
 │   ├── log() / startTimer()  — 终端输出
 │   ├── connectWithRetry()    — CDP 连接 + 重试
@@ -292,6 +302,6 @@ index.js
 
 ## Code Location
 
-- `index.js` — 完整实现 (~1500 lines, 6 providers)
+- `index.js` — 完整实现 (~2370 lines, 8 providers)
 - `SKILL.md` — this file (AI-facing operational guide)
 - `package.json` — npm metadata (playwright-core)

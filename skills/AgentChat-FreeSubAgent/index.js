@@ -80,7 +80,6 @@ function buildFallbackChain(primaryKey, skipList = []) {
     return [primaryKey, ...rest];
 }
 
-const INSERT_TEXT_LIMIT = 4000;
 const STAGGER_MS = 1500; // inter-worker launch delay
 
 // Module-level flags set by main()
