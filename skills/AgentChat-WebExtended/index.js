@@ -471,20 +471,38 @@ async function tryGemini(page, prompt, timeoutMs) {
     }
 
     // ── Wait for generation phase ──
-    const genStart = Date.now();
+    // Pro Extended Thinking can take 2-5 minutes for complex prompts.
+    // The stop button is visible during the ENTIRE thinking+generation phase.
+    // When it's visible → Gemini IS working → keep waiting, don't time out.
     const stopBtn = page.locator('button[aria-label*="停止"], button[aria-label*="Stop"]').first();
     try {
-        await stopBtn.waitFor({ state: 'visible', timeout: 15000 });
-        log('gemini: generation started');
-        const remainingForGen = Math.max(10000, timeoutMs - (Date.now() - provStart));
+        await stopBtn.waitFor({ state: 'visible', timeout: 20000 });
+        log('gemini: generation started (stop button visible)');
+        // Use nearly the full remaining budget for the generation wait.
+        // Pro Extended thinking for long prompts can legitimately take 3-5 min.
+        const remainingForGen = Math.max(60000, timeoutMs - (Date.now() - provStart) - 15000);
         await stopBtn.waitFor({ state: 'hidden', timeout: remainingForGen });
-        log('gemini: generation finished');
+        log('gemini: generation finished (stop button hidden)');
     } catch {
-        log('gemini: No prolonged generation phase (instant/cached response).');
+        // Check if stop button is STILL visible — if so, Gemini is still working.
+        // Don't give up; give it one more extension (up to 120s extra).
+        const stillWorking = await stopBtn.isVisible().catch(() => false);
+        if (stillWorking) {
+            log('gemini: Still generating after initial wait — extending (Pro Extended may be thinking)...');
+            const extraBudget = Math.min(120000, Math.max(30000, timeoutMs - (Date.now() - provStart) - 5000));
+            if (extraBudget > 20000) {
+                await stopBtn.waitFor({ state: 'hidden', timeout: extraBudget }).catch(() => {
+                    log('gemini: Generation still in progress at hard deadline.');
+                });
+            }
+        } else {
+            log('gemini: No prolonged generation phase (instant/cached response).');
+        }
     }
 
     // ── Collect response ──
-    const remainingForResp = Math.max(30000, timeoutMs - (Date.now() - provStart));
+    // For Pro Extended, the response may need extra time to render after generation finishes
+    const remainingForResp = Math.max(45000, timeoutMs - (Date.now() - provStart));
     const response = await waitForGeminiResponse(page, remainingForResp);
 
     if (!response || response.length < 10) {
