@@ -261,12 +261,14 @@ def main():
         sys.exit(1)
 
     CHROMIUM = validate_chrome_binary(CHROMIUM)
+
+    # Create profile dir FIRST — validate_profile needs it to exist
+    os.makedirs(PROFILE, exist_ok=True)
     PROFILE = validate_profile(PROFILE)
     log.info(f"Chrome: {CHROMIUM}")
     log.info(f"Profile: {PROFILE}")
 
     # Clean stale lock files from previous crashes
-    os.makedirs(PROFILE, exist_ok=True)
     for lock in ["SingletonLock", "SingletonSocket", "SingletonCookie"]:
         path = os.path.join(PROFILE, lock)
         if os.path.exists(path):

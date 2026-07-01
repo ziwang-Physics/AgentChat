@@ -37,7 +37,7 @@ const { createLogger } = require('../lib/logger');
 // CONFIG
 // ══════════════════════════════════════════════════════════════════════════════
 
-const CDP_URL = 'http://127.0.0.1:9222';
+const CDP_URL = `http://127.0.0.1:${process.env.CDP_PORT || '9222'}`;
 const DEFAULT_TOTAL_TIMEOUT = 600_000; // 10 min total across all providers
 const DEFAULT_PROVIDER_TIMEOUT = 180_000; // 3 min per provider
 const POLL_INTERVAL = 2_000; // ms between response stability checks
