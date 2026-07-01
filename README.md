@@ -21,8 +21,8 @@
 ## 为什么用这个？
 
 1. 💸 **零 API 成本** — 桥接 8 个免费网页版 AI，生成的数万 token 思考过程不花一分钱
-2. 🛡️ **8-Provider 智能降级** — `Gemini → ChatGPT → Claude → Qwen → Kimi → MiMo → MiniMax → DeepSeek`
-3. 🎭 **AI 角色分工体系** — Kimi=研究员 · Gemini=深度推理 · Qwen=事实核查 · ChatGPT=创意构建，互补不重叠
+2. 🎭 **AI 角色分工体系** — Kimi=研究员 · Gemini=深度推理 · Qwen=事实核查 · ChatGPT=创意构建，互补不重叠
+3. 🛡️ **8-Provider 智能降级** — `Gemini → ChatGPT → Claude → Qwen → Kimi → MiMo → MiniMax → DeepSeek`
 4. ⚖️ **证据仲裁机制** — 多 worker 并发结果经过质量门 + 长度差异检测 + 置信度计算，不盲目合并
 5. 🎯 **薄编排器架构** — `FreeSubAgent` 仅 ~350 行，零 provider 代码重复，所有 AI 调用委托给 `WebExtended`
 
