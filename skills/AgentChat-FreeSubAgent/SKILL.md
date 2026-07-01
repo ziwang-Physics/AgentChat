@@ -1,9 +1,10 @@
 # Parallel AI Decompose — Thin Orchestrator over AgentChat-WebExtended
 
-> **最后更新**: 2026-07-01
+> **最后更新**: 2026-07-02
 > **核心原则**: Claude Code 拆任务 + 写 prompt → Node.js 并发派发 → 质量门 + 证据仲裁
 > **Provider 层**: 单一源 — `AgentChat-WebExtended` (6 providers, 零代码重复)
 > **v3 重构**: 删除 ~400 行重复 provider 代码，改为 subprocess 调用 AgentChat-WebExtended
+> **🛡 安全策略 (2026-07-02)**: 永远不关闭用户 Chrome。`browser.close()` 已彻底移除，`--keep-tabs` 硬编码为 true。
 
 ## Architecture
 
@@ -36,7 +37,7 @@ Chrome → Gemini / ChatGPT / Claude / Qwen / Kimi / MiniMax
 
 | AI | 必须附加的指令 | 原因 |
 |----|---------------|------|
-| **Kimi** | `请将数据整理成对比表格。` 或 `用表格列出。` | Kimi 联网搜索后倾向输出搜索词列表而非整理好的数据，显式要求表格可强制其结构化输出 |
+| **Kimi** | `用要点列出关键事实。不要运行任何代码。` | Kimi 联网搜索后倾向输出搜索词列表/执行 Python 而非直接给结论，显式禁止代码可强制其文字输出 |
 | **Gemini** | `直接给出完整的分析。`  | Gemini 推理深度高，但偶尔会因多轮思考而截断，需要明确"完整" |
 | **Qwen** | `每个结论标注信息来源。` | Qwen 联网检索能力强，但来源标注不稳定，显式要求可提升可验证性 |
 | **ChatGPT** | `直接输出完整报告，不要解释方法论。` | ChatGPT 容易输出"我会从X/Y/Z维度分析…"的规划式回应，禁止其描述方法 |
@@ -72,7 +73,7 @@ Chrome → Gemini / ChatGPT / Claude / Qwen / Kimi / MiniMax
       "id": "research",
       "role": "researcher",
       "primary": "kimi",
-      "prompt": "请收集关于...的详细资料和关键数据。直接列出事实，不要规划。请将数据整理成对比表格。"
+      "prompt": "请收集关于...的详细资料和关键数据。用要点列出关键事实。不要运行任何代码。"
     },
     {
       "id": "mechanism",
@@ -98,10 +99,16 @@ Chrome → Gemini / ChatGPT / Claude / Qwen / Kimi / MiniMax
 
 ### Step 3: 并发调度
 
-**默认命令**（4 workers 并发，各保留浏览器标签）：
+**默认命令**（4 workers 并发，完成后自动关闭标签页）：
 
 ```bash
 node skills/AgentChat-FreeSubAgent/index.js --timeout=900 '<DAG_JSON_STRING>'
+```
+
+**保留标签页**（AI 回答后保留浏览器标签页，方便查看原始对话）：
+
+```bash
+node skills/AgentChat-FreeSubAgent/index.js --timeout=900 --keep-tabs '<DAG_JSON_STRING>'
 ```
 
 或写入临时文件：
@@ -110,7 +117,7 @@ node skills/AgentChat-FreeSubAgent/index.js --timeout=900 '<DAG_JSON_STRING>'
 cat > /tmp/ai_plan.json << 'ENDJSON'
 {...JSON计划...}
 ENDJSON
-node skills/AgentChat-FreeSubAgent/index.js --timeout=900 "$(cat /tmp/ai_plan.json)"
+node skills/AgentChat-FreeSubAgent/index.js --timeout=900 --keep-tabs "$(cat /tmp/ai_plan.json)"
 ```
 
 ### Step 4: 解读结果 & 呈现给用户
@@ -122,8 +129,10 @@ node skills/AgentChat-FreeSubAgent/index.js --timeout=900 "$(cat /tmp/ai_plan.js
 任意 provider 不可用时自动降级（由 AgentChat-WebExtended 处理）：
 
 ```
-Gemini → ChatGPT → Claude → Qwen → Kimi → MiniMax
+Gemini → ChatGPT → Claude → Qwen → Kimi → MiMo → MiniMax → DeepSeek
 ```
+
+FreeSubAgent 层降级链严格遵循 WebExtended 原生顺序，不做优先级重排
 
 降级结果会显式标记在输出中（provider_used ≠ primary_intended）。
 
@@ -136,7 +145,9 @@ Gemini → ChatGPT → Claude → Qwen → Kimi → MiniMax
 | Claude | ✅ | AgentChat-WebExtended |
 | Qwen | ✅ 已验证 Tailwind DOM | AgentChat-WebExtended |
 | Kimi | ✅ 新增 | AgentChat-WebExtended |
+| MiMo | ⚠ 新增 | AgentChat-WebExtended |
 | MiniMax | ⚠ 可用 | AgentChat-WebExtended |
+| DeepSeek | ⚠ 新增 | AgentChat-WebExtended |
 
 ## 维护命令
 

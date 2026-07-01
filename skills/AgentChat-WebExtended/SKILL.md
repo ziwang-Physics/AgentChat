@@ -1,8 +1,13 @@
 # AI Fallback Chain — Multi-Provider CDP Bridge
 
-> **最后更新**: 2026-07-01
+> **最后更新**: 2026-07-02
 > **核心功能**: 按优先级链自动降级，确保始终有一个可用的大模型
 > **最近修复**:
+> - Kimi 响应检测: 字符串相等比较 → 元素计数+文本长度增长, 修复同文本不匹配 bug
+> - Kimi 新建会话: 每次调用前点击 `.new-chat-btn` 清空旧 DOM, 避免检测干扰
+> - Kimi 问候语识别: `oldCount===1 && oldText<30chars` → 视为空白页
+> - Kimi 稳定性窗口: 自适应 (5s/30s/20s/15s/8s), 短文不再等 30s
+> - Kimi 串行超时: selector 60s → 10s each, 45s 最坏 → 30s
 > - Gemini Pro Extended 长 prompt 超时: stop button 可见=仍在思考, 延长等待+120s
 > - Claude "Thinking" 占位符: 过滤 Thinking/Analyzing 空响应, 多重停止检测
 > - Promise.allSettled: FreeSubAgent 单 worker 异常不再影响其他 worker
@@ -255,6 +260,11 @@ index.js
 - Editor: `[contenteditable="true"][role="textbox"]` (类名 `chat-input-editor`)
 - Send: `div.send-button-container` (输入文字后失去 "disabled" 类名)
 - Response: `[class*="chat-content-item-assistant"]` / `[class*="segment-content"]`
+- 响应检测: 元素计数 (`curCount > oldCount`) + 文本长度增长 (`txtLen > effectiveOldLen`)，**NOT** 字符串相等
+- 新建会话: 每次调用前通过 `page.evaluate()` 点击 `.new-chat-btn`，带 fallback 文本搜索
+- 问候语识别: `oldCount === 1 && oldText.length < 30` → `effectiveOldLen = 0`，避免 Kimi 默认问候语干扰
+- 串行超时: 每 selector 10s（vs 旧版 60s），3 个 selector 最坏 30s
+- 稳定性窗口: 自适应 — `<50 chars → 5s`, `<150 → 30s`, `<500 → 20s`, `<1500 → 15s`, `≥1500 → 8s`
 - 限流检测：页面含 "高峰期算力不足" / "Kimi有点累了" / "聊的人太多了" — 注意限流消息在发送后才出现
 - 注意：SPA 需要额外 4s 等待 React 渲染
 

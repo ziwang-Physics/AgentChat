@@ -23,11 +23,69 @@ const fs = require("fs");
 // ═══════════════════════════════════════════════════════════════════
 // CONSTANTS
 // ═══════════════════════════════════════════════════════════════════
+const LOCK_DIR = path.join(require("os").tmpdir(), "ai_locks");
+try { fs.mkdirSync(LOCK_DIR, { recursive: true }); } catch (_) {}
+
+// Simple file-based mutex: each provider gets a lock file with the PID.
+// Workers skip providers locked by another process (still running).
+function acquireLock(provider) {
+    const f = path.join(LOCK_DIR, provider);
+    try {
+        // Check if existing lock is stale (process dead)
+        if (fs.existsSync(f)) {
+            const oldPid = parseInt(fs.readFileSync(f, "utf8").trim(), 10);
+            try { process.kill(oldPid, 0); } catch (_) {
+                // Stale lock — PID no longer exists
+                fs.unlinkSync(f);
+            }
+        }
+        // Try to create (fail if another process beat us to it)
+        fs.writeFileSync(f, String(process.pid), { flag: "wx" });
+        return true;
+    } catch (_) {
+        return false; // locked by another running process
+    }
+}
+
+function releaseLock(provider) {
+    const f = path.join(LOCK_DIR, provider);
+    try {
+        const data = fs.readFileSync(f, "utf8").trim();
+        if (parseInt(data, 10) === process.pid) fs.unlinkSync(f);
+    } catch (_) {}
+}
+
+// Cleanup all locks owned by this process on exit (prevent stale locks)
+function cleanupAllLocks() {
+    const files = fs.readdirSync(LOCK_DIR);
+    for (const f of files) {
+        const p = path.join(LOCK_DIR, f);
+        try {
+            const data = fs.readFileSync(p, "utf8").trim();
+            if (parseInt(data, 10) === process.pid) fs.unlinkSync(p);
+        } catch (_) {}
+    }
+}
+process.on("exit", cleanupAllLocks);
+process.on("SIGINT", () => { cleanupAllLocks(); process.exit(); });
+process.on("SIGTERM", () => { cleanupAllLocks(); process.exit(); });
 
 const WEBEXT = path.resolve(__dirname, "..", "AgentChat-WebExtended", "index.js");
-const FALLBACK_CHAIN = ["gemini", "chatgpt", "claude", "qwen", "kimi", "minimax"];
+const FALLBACK_CHAIN = ["gemini", "chatgpt", "qwen", "kimi", "mimo", "minimax", "claude", "deepseek"];
+
+// Follow WebExtended's native chain order exactly — no priority reordering.
+function buildFallbackChain(primaryKey, skipList = []) {
+    const skipSet = new Set([primaryKey, ...skipList]);
+    const rest = FALLBACK_CHAIN.filter(k => !skipSet.has(k));
+    return [primaryKey, ...rest];
+}
+
 const INSERT_TEXT_LIMIT = 4000;
 const STAGGER_MS = 1500; // inter-worker launch delay
+
+// Module-level flags set by main()
+// POLICY: Always keep tabs. Never let subprocesses close the user's browser.
+const KEEP_TABS = true;
 
 // ═══════════════════════════════════════════════════════════════════
 // UTILS
@@ -48,26 +106,63 @@ function ts() { return new Date().toISOString().slice(11, 19); }
  */
 function callProvider(prompt, provider, timeoutMs) {
   return new Promise((resolve) => {
-    const child = spawn("node", [
+    const spawnArgs = [
       WEBEXT,
       `--from=${provider}`,
       `--timeout=${timeoutMs}`,
-      prompt,
-    ], {
+    ];
+    spawnArgs.push("--keep-tabs"); // Always — never let child process close tabs
+    spawnArgs.push(prompt);
+
+    const child = spawn("node", spawnArgs, {
       stdio: ["ignore", "pipe", "pipe"],
-      timeout: timeoutMs + 30000, // slightly more than child's internal timeout
+      // P0-4: Removed built-in timeout (SIGTERM only, no SIGKILL fallback).
+      // Using explicit dual-timer instead to prevent zombie processes.
     });
 
     let stdout = "", stderr = "";
-    child.stdout.on("data", d => stdout += d.toString());
-    child.stderr.on("data", d => stderr += d.toString());
+    const MAX_BUFFER = 1024 * 1024; // 1MB to prevent OOM (P1 extra safety)
+    let truncated = false;
+
+    child.stdout.on("data", d => {
+      if (stdout.length < MAX_BUFFER) stdout += d.toString();
+      else truncated = true;
+    });
+    child.stderr.on("data", d => {
+      if (stderr.length < MAX_BUFFER) stderr += d.toString();
+      else truncated = true;
+    });
+
+    let settled = false;
+    const sigtermTime = timeoutMs + 30000;
+    const sigkillTime = sigtermTime + 5000;
+
+    // P0-4: SIGTERM first, then SIGKILL to prevent zombie processes
+    const sigtermTimer = setTimeout(() => {
+      if (!settled) { log(`    [orch] SIGTERM -> ${provider} (actual elapsed ${sigtermTime}ms, call budget ${timeoutMs}ms)`); child.kill('SIGTERM'); }
+    }, sigtermTime);
+
+    const sigkillTimer = setTimeout(() => {
+      if (!settled) { log(`    [orch] SIGKILL -> ${provider} (forced after ${sigkillTime}ms total)`); child.kill('SIGKILL'); }
+    }, sigkillTime);
 
     child.on("close", (code) => {
+      settled = true;
+      clearTimeout(sigtermTimer);
+      clearTimeout(sigkillTimer);
+
       const text = stdout.trim();
       const provMatch = stderr.match(/✓\s*(\w+):\s*USED/);
       const providerUsed = provMatch ? provMatch[1].toLowerCase() : provider;
 
-      if (code === 0 && text.length >= 5) {
+      if (truncated) {
+        log(`    [orch] WARN: Output truncated for ${provider} (exceeded 1MB buffer)`);
+      }
+
+      // P0-5: If WebExtended logged "✓ Provider: USED" to stderr, trust it.
+      // Concurrent subprocesses can race stdout delivery vs close event.
+      const usedMatch = stderr.match(/✓\s*(\w+):\s*USED\s*\((\d+)\s*chars/);
+      if (code === 0 && (text.length >= 5 || usedMatch)) {
         resolve({ ok: true, text, provider: providerUsed });
       } else {
         const reasonMap = { 1: "no_cdp", 2: "auth", 3: "safety", 4: "internal", 5: "quota", 9: "all_exhausted", 10: "timeout" };
@@ -76,6 +171,9 @@ function callProvider(prompt, provider, timeoutMs) {
     });
 
     child.on("error", (err) => {
+      settled = true;
+      clearTimeout(sigtermTimer);
+      clearTimeout(sigkillTimer);
       resolve({ ok: false, text: "", provider, reason: "spawn_error", error: err.message });
     });
   });
@@ -85,18 +183,28 @@ function callProvider(prompt, provider, timeoutMs) {
 // FALLBACK EXECUTOR — try primary first, then chain
 // ═══════════════════════════════════════════════════════════════════
 
-async function executeWithFallback(primaryKey, prompt, budgetMs) {
-  const chain = [primaryKey, ...FALLBACK_CHAIN.filter(k => k !== primaryKey)];
+async function executeWithFallback(primaryKey, prompt, budgetMs, skipList = []) {
+  const start = Date.now();
+  const chain = buildFallbackChain(primaryKey, skipList);
   const tried = [];
-  const perCallBudget = Math.max(60000, Math.floor(budgetMs / (chain.length + 1)));
+  const myLocks = []; // track which providers we locked
+  const perCallBudget = Math.max(120000, Math.floor(budgetMs / (Math.min(chain.length, 4) + 1)));
 
   for (const key of chain) {
+    // File lock: skip if another worker already has this provider open
+    if (!acquireLock(key)) {
+      log(`    [fallback] Skipping ${key} (locked by another worker)`);
+      tried.push({ key, reason: "locked" });
+      continue;
+    }
+    myLocks.push(key);
+
     log(`    [fallback] Trying ${key}...`);
-    const start = Date.now();
 
     const result = await callProvider(prompt, key, perCallBudget);
 
     if (result.ok) {
+      // Keep lock — marks provider as "in use" so other workers skip it
       return {
         provider_used: result.provider || key,
         primary_intended: primaryKey,
@@ -110,7 +218,11 @@ async function executeWithFallback(primaryKey, prompt, budgetMs) {
       };
     }
     tried.push({ key, reason: result.reason || "unknown" });
+    releaseLock(key); // failed — release so other worker can try it later
   }
+
+  // All exhausted — release any remaining locks
+  for (const k of myLocks) releaseLock(k);
 
   return {
     provider_used: null,
@@ -186,8 +298,40 @@ CRITICAL RULES:
   }
 }`;
 
+function tryParsePreDecomposedPlan(userTask) {
+  // Detect if input is already a pre-decomposed JSON plan with "subtasks" array
+  // (as produced by Claude Code's Step 2). If so, extract nodes directly — no re-decomposition.
+  try {
+    const json = JSON.parse(userTask);
+    if (json.subtasks && Array.isArray(json.subtasks) && json.subtasks.length >= 2) {
+      const nodes = json.subtasks.map(st => ({
+        id: st.id || st.role || `task_${Math.random().toString(36).slice(2,6)}`,
+        ai: st.primary || "gemini",
+        role: st.role || "worker",
+        goal: st.id || "task",
+        depends_on: st.depends_on || [],
+        prompt: st.prompt || "",
+      }));
+      // Validate all nodes have non-empty prompts
+      if (nodes.every(n => n.prompt && n.prompt.length > 5)) {
+        return { nodes, pre_decomposed: true };
+      }
+    }
+  } catch (_) { /* not JSON, proceed to decomposition */ }
+  return null;
+}
+
 async function buildDAG(userTask, budgetMs) {
   log("━━━ Module 1: Task DAG Construction ━━━");
+
+  // P1: Detect pre-decomposed JSON plan — skip re-decomposition entirely
+  const preDecomposed = tryParsePreDecomposedPlan(userTask);
+  if (preDecomposed) {
+    log(`  Task: pre-decomposed JSON with ${preDecomposed.nodes.length} subtasks — skipping decomposition`);
+    log(`  Nodes: ${preDecomposed.nodes.map(n => `${n.id}→${n.ai}(${n.role})`).join(" | ")}`);
+    return preDecomposed;
+  }
+
   log(`  Task: "${userTask.slice(0, 100)}${userTask.length > 100 ? "..." : ""}"`);
 
   const prompt = DAG_DECOMPOSER_PROMPT.replace("<TASK>", userTask);
@@ -244,11 +388,11 @@ function qualityGate(node, result) {
   };
 }
 
-async function runOneWorker(node, budgetMs) {
+async function runOneWorker(node, budgetMs, skipList = []) {
   const primaryKey = normalizeAI(node.ai);
 
   try {
-    const result = await executeWithFallback(primaryKey, node.prompt, budgetMs);
+    const result = await executeWithFallback(primaryKey, node.prompt, budgetMs, skipList);
     const qr = qualityGate(node, result);
     const degNote = result.degradation
       ? ` ⚠ ${result.provider_used} (intended ${primaryKey})`
@@ -271,15 +415,22 @@ async function dispatchParallel(dag, budgetMs) {
   log(`━━━ Module 2: Parallel Dispatch — ${nodes.length} workers ━━━`);
   log(`  Roles: ${nodes.map(n => `${n.id}→${n.ai}(${n.role})`).join(" | ")}`);
 
-  const perNodeBudget = Math.floor(budgetMs / nodes.length);
-  const deadline = Date.now() + perNodeBudget;
+  // P1-6: Subtract stagger overhead from budget before dividing equally
+  const totalStaggerOverhead = (nodes.length - 1) * STAGGER_MS;
+  const effectiveBudget = Math.max(nodes.length * 60000, budgetMs - totalStaggerOverhead);
+  const perNodeBudget = Math.floor(effectiveBudget / nodes.length);
 
-  // Launch all workers with stagger, run concurrently via Promise.all
+  // Collect all primary providers so each worker avoids stepping on others' toes
+  const allPrimaries = nodes.map(n => normalizeAI(n.ai));
+  const uniquePrimaries = [...new Set(allPrimaries)];
+
+  // Launch all workers with stagger, each with equal budget from its own start time
   const tasks = nodes.map((node, i) => {
     const delay = i * STAGGER_MS;
+    const myPrimary = normalizeAI(node.ai);
+    const skipList = uniquePrimaries.filter(p => p !== myPrimary);
     return new Promise(resolve => setTimeout(async () => {
-      const remaining = Math.max(60000, deadline - Date.now());
-      const r = await runOneWorker(node, remaining);
+      const r = await runOneWorker(node, perNodeBudget, skipList);
       resolve(r);
     }, delay));
   });
@@ -433,9 +584,9 @@ async function main() {
     } else if (args[i] === "--smoke") smoke = true;
     else if (args[i] === "--doctor") doctor = true;
     else prompt += args[i] + " ";
+  // --keep-tabs is now always-on (no longer configurable — we never close user's Chrome)
   }
   prompt = prompt.trim();
-
   if (!prompt && !smoke && !doctor && !process.stdin.isTTY) {
     const chunks = [];
     for await (const chunk of process.stdin) chunks.push(chunk);

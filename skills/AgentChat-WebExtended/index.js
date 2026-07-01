@@ -30,6 +30,9 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 
+const { ProviderError, classifyError, STAGES, REASONS } = require('../lib/errors');
+const { createLogger } = require('../lib/logger');
+
 // ══════════════════════════════════════════════════════════════════════════════
 // CONFIG
 // ══════════════════════════════════════════════════════════════════════════════
@@ -38,39 +41,64 @@ const CDP_URL = 'http://127.0.0.1:9222';
 const DEFAULT_TOTAL_TIMEOUT = 600_000; // 10 min total across all providers
 const DEFAULT_PROVIDER_TIMEOUT = 180_000; // 3 min per provider
 const POLL_INTERVAL = 2_000; // ms between response stability checks
-const INSERT_TEXT_LIMIT = 50_000; // ~50KB safe CDP WebSocket payload
+// keyboard.insertText() dispatches one input event per character, which triggers
+// React re-renders (ChatGPT, Claude, etc.) — O(n) CDP round-trips for n chars.
+// Clipboard paste (navigator.clipboard.writeText + Ctrl+V) is O(1) regardless of length.
+// Threshold set to 500 so anything beyond a short sentence uses the fast clipboard path.
+const INSERT_TEXT_LIMIT = 500;
 const SKILL_DIR = path.dirname(__filename); // skill directory for telemetry
 
 // ══════════════════════════════════════════════════════════════════════════════
-// CIRCUIT BREAKER — skip repeatedly-failing providers to avoid timeout waste
+// INVOCATION CONTEXT — per-run state isolated from module globals (P0-2)
 // ══════════════════════════════════════════════════════════════════════════════
 
 const CIRCUIT_BREAKER_THRESHOLD = 3;   // consecutive failures before breaking
 const CIRCUIT_COOLDOWN_MS = 300_000;   // 5 min cooldown before retry
-const circuitState = {};               // { gemini: {failures, brokenUntil}, ... }
 
-function circuitIsBroken(key) {
-    const s = circuitState[key];
-    if (!s || s.failures < CIRCUIT_BREAKER_THRESHOLD) return false;
-    if (Date.now() > s.brokenUntil) {
-        // Cooldown expired — allow one probe request
-        delete circuitState[key];
-        return false;
+class InvocationContext {
+    constructor() {
+        this.circuitState = {};  // { gemini: {failures, brokenUntil}, ... }
+        this.telemetry = {
+            timestamp: new Date().toISOString(),
+            provider_used: null,
+            providers_tried: [],
+            fallback_reasons: {},
+            prompt_length_chars: 0,
+            response_length_chars: 0,
+            total_ms: 0,
+            per_provider_ms: {},
+            exit_code: 0,
+        };
     }
-    return true;
-}
 
-function circuitRecordFailure(key) {
-    if (!circuitState[key]) circuitState[key] = { failures: 0, brokenUntil: 0 };
-    const s = circuitState[key];
-    s.failures++;
-    if (s.failures >= CIRCUIT_BREAKER_THRESHOLD) {
-        s.brokenUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
+    circuitIsBroken(key) {
+        const s = this.circuitState[key];
+        if (!s || s.failures < CIRCUIT_BREAKER_THRESHOLD) return false;
+        if (Date.now() > s.brokenUntil) {
+            delete this.circuitState[key];
+            return false;
+        }
+        return true;
     }
-}
 
-function circuitRecordSuccess(key) {
-    delete circuitState[key]; // reset on any success
+    circuitRecordFailure(key) {
+        if (!this.circuitState[key]) this.circuitState[key] = { failures: 0, brokenUntil: 0 };
+        const s = this.circuitState[key];
+        s.failures++;
+        if (s.failures >= CIRCUIT_BREAKER_THRESHOLD) {
+            s.brokenUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
+        }
+    }
+
+    circuitRecordSuccess(key) {
+        delete this.circuitState[key];
+    }
+
+    recordTelemetry(code) {
+        this.telemetry.exit_code = code;
+        const f = path.join(SKILL_DIR, 'fallback-telemetry.jsonl');
+        fs.appendFileSync(f, JSON.stringify(this.telemetry) + '\n');
+    }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -163,29 +191,33 @@ const PROVIDER_CHAIN = [
             /请.*(?:充值|升级)/i,
         ],
     },
+    {
+        key: 'mimo',
+        name: 'MiMo',
+        url: 'https://aistudio.xiaomimimo.com/',
+        requiresProCheck: false,
+        authDomains: ['aistudio.xiaomimimo.com/login', 'auth0.com'],
+        quotaPatterns: [
+            /额度.*(?:已|用).*(?:完|尽|满)/i,
+            /quota\s*(?:exceeded|limit)/i,
+            /免费版.*升级/i,
+            /请.*(?:充值|升级|续费)/i,
+        ],
+    },
+    {
+        key: 'deepseek',
+        name: 'DeepSeek',
+        url: 'https://chat.deepseek.com/',
+        requiresProCheck: false,
+        authDomains: ['chat.deepseek.com/login', 'deepseek.com/login'],
+        quotaPatterns: [
+            /额度.*(?:已|用).*(?:完|尽|满)/i,
+            /quota\s*(?:exceeded|limit)/i,
+            /rate\s*limit/i,
+            /请.*(?:充值|升级)/i,
+        ],
+    },
 ];
-
-// ══════════════════════════════════════════════════════════════════════════════
-// TELEMETRY
-// ══════════════════════════════════════════════════════════════════════════════
-
-const telemetry = {
-    timestamp: new Date().toISOString(),
-    provider_used: null,
-    providers_tried: [],
-    fallback_reasons: {},
-    prompt_length_chars: 0,
-    response_length_chars: 0,
-    total_ms: 0,
-    per_provider_ms: {},
-    exit_code: 0,
-};
-
-function recordTelemetry(code) {
-    telemetry.exit_code = code;
-    const f = path.join(SKILL_DIR, 'fallback-telemetry.jsonl');
-    fs.appendFileSync(f, JSON.stringify(telemetry) + '\n');
-}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // TERMINAL HELPERS
@@ -241,8 +273,329 @@ async function connectWithRetry(cdpUrl, retries = 3) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// PROVIDER: GEMINI (Pro Extended Thinking)
+// SHARED PROVIDER PIPELINE (P1-1) — eliminates ~40% code duplication
 // ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Shared helpers for the 9-step provider pipeline.
+ * Each provider handler calls runProviderFlow with its adapter config.
+ */
+
+/** Find the first editable element from an ordered list of selectors */
+async function findEditor(page, selectors) {
+    for (const sel of selectors) {
+        try {
+            const loc = page.locator(sel).first();
+            if (!(await loc.isVisible({ timeout: 3000 }).catch(() => false))) continue;
+            const editable = await loc.evaluate(el => {
+                if (el.tagName === 'TEXTAREA') return !el.disabled && !el.readOnly;
+                return el.getAttribute('contenteditable') !== 'false' && !el.hasAttribute('readonly');
+            }).catch(() => true);
+            if (editable) return loc;
+        } catch (_) { /* try next selector */ }
+    }
+    return null;
+}
+
+/** Clear and type prompt into editor, with clipboard fallback for large payloads */
+async function typePrompt(page, editorLocator, prompt) {
+    await editorLocator.focus();
+    await editorLocator.click();
+    await page.waitForTimeout(200);
+
+    try { await editorLocator.fill(''); } catch {
+        await page.keyboard.press('ControlOrMeta+a');
+        await page.keyboard.press('Backspace');
+    }
+    await page.waitForTimeout(100);
+
+    if (prompt.length > INSERT_TEXT_LIMIT) {
+        try { await page.evaluate(t => navigator.clipboard.writeText(t), prompt); } catch (_) { }
+        await page.keyboard.press('ControlOrMeta+v');
+        await page.waitForTimeout(500);
+    } else {
+        await page.keyboard.insertText(prompt);
+        await page.waitForTimeout(300);
+    }
+}
+
+/** Click a send button (trying selectors in order) or fall back to keyboard */
+async function sendMessage(page, editorLocator, sendSelectors, sendFallback) {
+    let sent = false;
+    for (const sel of sendSelectors) {
+        try {
+            const btn = page.locator(sel);
+            const btnLoc = btn.first ? btn.first() : btn;
+            if (await btnLoc.isVisible({ timeout: 2000 }).catch(() => false)) {
+                await btnLoc.click();
+                sent = true;
+                break;
+            }
+        } catch (_) { }
+    }
+    if (!sent) {
+        await editorLocator.focus();
+        await page.keyboard.press(sendFallback || 'Enter');
+    }
+    await page.waitForTimeout(1500);
+}
+
+/** Patterns that indicate the AI is still working, not producing final output */
+const STILL_WORKING_TEXT = [
+    /^搜索网页\s*$/im,
+    /^\d+\s*个结果\s*$/im,
+    /^Searching\w*\s*$/im,
+    /^(?:Thought|Thinking|Analyzing|Reasoning)\s*(?:for\s*\d+s?)?\.{0,3}\s*$/im,
+    /^(?:思考中|分析中|搜索中|正在搜索)\.{0,3}\s*$/im,
+    /^Running\s+\w+\s*\.{0,3}\s*$/im,
+    /^実行中\s*$/im,
+];
+const STILL_WORKING_UI = [
+    'button[aria-label*="Stop"]',
+    'button[aria-label*="停止"]',
+    '[data-testid="stop-button"]',
+    '[class*="stop-generat"]',
+    '[class*="pause-generat"]',
+];
+
+/** Check if the page UI indicates generation is still in progress */
+async function isStillGenerating(page) {
+    for (const sel of STILL_WORKING_UI) {
+        try {
+            const el = page.locator(sel).first();
+            if (await el.isVisible({ timeout: 300 }).catch(() => false)) return true;
+        } catch (_) {}
+    }
+    return false;
+}
+
+/** Check if text looks like pre-generation filler (search queries, thinking, etc.) */
+function looksLikePreGeneration(text) {
+    const trimmed = (text || '').trim();
+    if (trimmed.length === 0) return true;
+    if (trimmed.length > 300) return false;  // enough content → real response
+    for (const pat of STILL_WORKING_TEXT) {
+        if (pat.test(trimmed)) return true;
+    }
+    // Short response that's just search keywords (no Chinese/Japanese sentences)
+    if (trimmed.length < 150 && !/[。！？\.!\?;；，\n]{1}/.test(trimmed)) return true;
+    return false;
+}
+
+/** Post-extraction: validate that the response is complete and meaningful */
+function validateResponseComplete(text) {
+    const trimmed = (text || '').trim();
+    if (trimmed.length < 10) return { ok: false, reason: 'too_short' };
+    // Pure search-query page with no answer content
+    if (/^搜索网页\s*\n[\s\S]{0,200}\d+\s*个结果\s*$/.test(trimmed)) return { ok: false, reason: 'search_only' };
+    if (/^Searching\w*\s*\n[\s\S]{0,200}\d+\s*results?\s*$/i.test(trimmed)) return { ok: false, reason: 'search_only' };
+    // Only thinking placeholder
+    if (/^(?:Thought|Thinking|思考中|分析中)\s*for\s*\d+s?\s*$/im.test(trimmed) && trimmed.length < 60) {
+        return { ok: false, reason: 'thinking_only' };
+    }
+    return { ok: true };
+}
+
+/** Stability-check polling: wait for response to stop growing.
+ *  Three-layer defense against premature extraction:
+ *  1. UI signals — stop button / loading indicator detection
+ *  2. Adaptive stability window — shorter content → longer wait
+ *  3. Thinking-pattern reset — if text looks like pre-generation filler, keep waiting
+ */
+async function stabilityWait(page, responseEl, stabilityWindow, timeoutMs, provStart) {
+    let lastLen = 0;
+    let lastChangeTime = Date.now();
+    const startTime = provStart || Date.now();
+    const deadline = startTime + timeoutMs;
+
+    while ((Date.now() - lastChangeTime) < stabilityWindow && Date.now() < deadline) {
+        await page.waitForTimeout(POLL_INTERVAL);
+        try {
+            const text = await responseEl.evaluate(el => el.innerText || el.textContent || '');
+
+            // ── Layer 1: UI signals — stop button still visible? ──
+            const generating = await isStillGenerating(page);
+
+            // ── Layer 2: Text content — still just thinking/search filler? ──
+            const preGen = looksLikePreGeneration(text);
+
+            // ── Layer 3: Adaptive window — short content gets longer patience ──
+            const adaptiveWindow = text.length < 150  ? Math.max(stabilityWindow, 30_000)   // early stage: ≥30s
+                                : text.length < 500  ? Math.max(stabilityWindow, 20_000)   // mid stage: ≥20s
+                                : text.length < 1500 ? stabilityWindow                       // normal
+                                :                       Math.min(stabilityWindow, 10_000);   // long: 10s enough
+
+            if (text.length > lastLen) {
+                lastLen = text.length;
+                lastChangeTime = Date.now();
+                spinner('+');
+            } else if (generating || preGen) {
+                // AI is still working — reset the clock, don't count this as idle
+                lastChangeTime = Date.now();
+                spinner(generating ? '⚙' : '…');
+            } else {
+                spinner('.');
+            }
+        } catch { spinner('?'); }
+    }
+    process.stderr.write('\n');
+
+    const response = await responseEl.evaluate(el => (el.innerText || el.textContent || '').trim());
+    return response;
+}
+
+/**
+ * runProviderFlow — the shared 9-step pipeline.
+ *
+ * Steps: navigate → auth → quota → pre-editor hook → find editor → type → send →
+ *        wait for response → extract → validate → return
+ *
+ * @param {object} adapter — provider-specific config
+ * @param {Page} page
+ * @param {string} prompt
+ * @param {number} timeoutMs
+ * @param {InvocationContext} ctx
+ */
+async function runProviderFlow(adapter, page, prompt, timeoutMs, ctx) {
+    const provStart = Date.now();
+    const cfg = adapter.config;
+    const provName = cfg.name;
+    const provKey = cfg.key;
+
+    try {
+        // ── Step 1: Navigate ──
+        log(`━━━ Trying ${provName} (priority ${adapter.priority || '?'}) ━━━`);
+
+        try {
+            await page.goto(cfg.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        } catch {
+            return classifyError(new Error('Page load failed'), STAGES.NAVIGATE, provKey);
+        }
+
+        // Post-navigate hook (SPA warmup, etc.)
+        if (adapter.postNavigate) {
+            await adapter.postNavigate(page);
+        }
+
+        // ── Step 2: Auth check ──
+        const url = page.url();
+        if (cfg.authDomains.some(d => url.includes(d))) {
+            log(`${provKey}: Not authenticated — login redirect.`);
+            return classifyError(new Error('Auth redirect detected'), STAGES.AUTH_CHECK, provKey, REASONS.AUTH);
+        }
+        if (adapter.checkAuth && adapter.checkAuth(url)) {
+            log(`${provKey}: Auth page detected.`);
+            return classifyError(new Error('Auth page detected'), STAGES.AUTH_CHECK, provKey, REASONS.AUTH);
+        }
+
+        // ── Step 3: Quota / Rate-limit check ──
+        if (cfg.quotaPatterns && cfg.quotaPatterns.length > 0) {
+            const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
+            for (const pattern of cfg.quotaPatterns) {
+                if (pattern.test(bodyText)) {
+                    log(`${provKey}: Quota pattern matched: "${bodyText.match(pattern)?.[0]}"`);
+                    return classifyError(new Error('Quota/rate-limit detected'), STAGES.QUOTA_CHECK, provKey, REASONS.QUOTA);
+                }
+            }
+        }
+
+        // ── Step 4: Pre-editor hook (e.g., Gemini Pro Extended activation) ──
+        if (adapter.beforeEditor) {
+            const preResult = await adapter.beforeEditor(page);
+            if (preResult !== true) {
+                log(`${provKey}: Pre-editor hook failed.`);
+                return classifyError(new Error('Pre-editor hook failed'), STAGES.PRE_EDITOR, provKey);
+            }
+        }
+
+        // ── Step 5: Find editor ──
+        const editorLocator = await findEditor(page, adapter.editorSelectors);
+        if (!editorLocator) {
+            log(`${provKey}: No editable input found.`);
+            return classifyError(new Error('Editor not found'), STAGES.EDITOR_FIND, provKey);
+        }
+        log(`${provKey}: Editor found, typing...`);
+
+        // ── Step 6: Type prompt ──
+        await typePrompt(page, editorLocator, prompt);
+
+        // ── Step 7: Send ──
+        log(`${provKey}: sending...`);
+        await sendMessage(page, editorLocator, adapter.sendSelectors, adapter.sendFallback);
+
+        // ── Step 8: Wait for response ──
+        log(`${provKey}: waiting for response...`);
+        const responseStart = Date.now();
+        const respResult = await adapter.waitForResponse(page, editorLocator, timeoutMs, provStart, provKey);
+        if (!respResult || respResult.success === false) {
+            return respResult || classifyError(new Error('Response extraction failed'), STAGES.WAIT_RESPONSE, provKey);
+        }
+
+        // ── Step 9: Post-process + validate ──
+        let response = respResult.response || respResult;
+        if (typeof response !== 'string') response = String(response);
+        if (adapter.postProcess) {
+            response = adapter.postProcess(response);
+        }
+
+        // Three-layer validation: length + completeness + content quality
+        const validation = validateResponseComplete(response);
+        if (!validation.ok) {
+            log(`${provKey}: response rejected — ${validation.reason} (${response.length} chars)`);
+            return classifyError(new Error(`Response validation failed: ${validation.reason}`), STAGES.EXTRACT, provKey);
+        }
+
+        ctx.telemetry.per_provider_ms[provKey] = Date.now() - provStart;
+        log(`${provKey}: SUCCESS — ${response.length} chars in ${ctx.telemetry.per_provider_ms[provKey]}ms`);
+        return { success: true, response };
+
+    } catch (err) {
+        const pe = new ProviderError(err, { stage: 'unknown', provider: provKey });
+        log(`${provName}: ${pe.originalName} — ${pe.message}`);
+        return pe.toResult();
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PROVIDER ADAPTERS — one per provider, configs with provider-specific hooks
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Generic adapter factory for simple text-based providers (ChatGPT, Claude).
+ * Providers with special pre-editor hooks (Gemini, Kimi) override beforeEditor.
+ */
+function makeStandardAdapter(configKey, overrides = {}) {
+    const cfg = PROVIDER_CHAIN.find(p => p.key === configKey);
+    return {
+        config: cfg,
+        priority: PROVIDER_CHAIN.indexOf(cfg) + 1,
+        editorSelectors: overrides.editorSelectors || ['[contenteditable="true"]', 'textarea', '[role="textbox"]'],
+        sendSelectors: overrides.sendSelectors || [],
+        sendFallback: overrides.sendFallback || 'Enter',
+        stabilityWindow: overrides.stabilityWindow || 10_000,
+        postNavigate: overrides.postNavigate || null,
+        beforeEditor: overrides.beforeEditor || null,
+        checkAuth: overrides.checkAuth || null,
+        postProcess: overrides.postProcess || null,
+
+        async waitForResponse(page, editorLocator, timeoutMs, provStart, provKey) {
+            const startTime = Date.now();
+            const responseEl = await findEditor(page, overrides.responseSelectors || ['[class*="message"]', '.prose', '.markdown']);
+            if (!responseEl) {
+                const sel = overrides.responseSelectors ? overrides.responseSelectors[0] : '[class*="message"]';
+                try {
+                    const loc = page.locator(sel).last();
+                    await loc.waitFor({ state: 'attached', timeout: Math.min(30000, timeoutMs) });
+                    return await stabilityWait(page, loc, overrides.stabilityWindow || 10_000, timeoutMs, provStart);
+                } catch {
+                    return { success: false, reason: 'error' };
+                }
+            }
+            const response = await stabilityWait(page, responseEl, overrides.stabilityWindow || 10_000, timeoutMs, provStart);
+            return { success: true, response };
+        },
+    };
+}
 
 async function ensureProExtended(page, maxRetries = 2) {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -383,22 +736,34 @@ async function waitForGeminiResponse(page, timeoutMs) {
     }).then(() => true).catch(() => false);
 
     if (!toolbarAppeared) {
-        log('gemini: Action toolbar not detected, falling back to stability check...');
+        log('gemini: Action toolbar not detected, falling back to enhanced stability check...');
         let lastLen = 0;
         let lastChangeTime = Date.now();
-        const STABILITY_WINDOW = 15_000;
+        const MAX_STABILITY = 15_000;
 
-        while ((Date.now() - lastChangeTime) < STABILITY_WINDOW) {
+        while ((Date.now() - lastChangeTime) < MAX_STABILITY) {
             if ((Date.now() - startTime) > timeoutMs) break;
             await page.waitForTimeout(POLL_INTERVAL);
             try {
                 const currentText = await responseLocator.last().evaluate(el => el.innerText || el.textContent || '');
+
+                // Three-layer defense for bursty generation (Pro Extended Thinking pauses)
+                const generating = await isStillGenerating(page);
+                const preGen = looksLikePreGeneration(currentText);
+                const adaptiveWindow = currentText.length < 150 ? 30_000
+                                    : currentText.length < 500 ? 20_000
+                                    : 15_000;
+
                 if (currentText.length > lastLen) {
                     lastLen = currentText.length;
                     lastChangeTime = Date.now();
                     spinner('+');
+                } else if (generating || preGen) {
+                    lastChangeTime = Date.now();  // still working, reset clock
+                    spinner(generating ? '⚙' : '…');
                 } else {
-                    spinner('s');
+                    const stableFor = Date.now() - lastChangeTime;
+                    spinner(stableFor < adaptiveWindow ? '·' : 's');
                 }
             } catch { spinner('?'); }
         }
@@ -417,10 +782,19 @@ async function waitForGeminiResponse(page, timeoutMs) {
     });
 
     log(`gemini: response complete, length = ${finalContent ? finalContent.length : 0}`);
+
+    // Post-extraction validation — reject search-only/thinking-only responses
+    if (finalContent && finalContent.length > 0) {
+        const validation = validateResponseComplete(finalContent);
+        if (!validation.ok) {
+            log(`gemini: response rejected — ${validation.reason}`);
+            return null;
+        }
+    }
     return finalContent;
 }
 
-async function tryGemini(page, prompt, timeoutMs) {
+async function tryGemini(page, prompt, timeoutMs, ctx) {
     const provStart = Date.now();
     log('━━━ Trying Gemini (priority 1) ━━━');
 
@@ -551,8 +925,8 @@ async function tryGemini(page, prompt, timeoutMs) {
         return { success: false, reason: 'error' };
     }
 
-    telemetry.per_provider_ms.gemini = Date.now() - provStart;
-    log(`gemini: SUCCESS — ${response.length} chars in ${telemetry.per_provider_ms.gemini}ms`);
+    ctx.telemetry.per_provider_ms.gemini = Date.now() - provStart;
+    log(`gemini: SUCCESS — ${response.length} chars in ${ctx.telemetry.per_provider_ms.gemini}ms`);
     return { success: true, response };
 }
 
@@ -560,7 +934,7 @@ async function tryGemini(page, prompt, timeoutMs) {
 // PROVIDER: CHATGPT
 // ══════════════════════════════════════════════════════════════════════════════
 
-async function tryChatGPT(page, prompt, timeoutMs) {
+async function tryChatGPT(page, prompt, timeoutMs, ctx) {
     const provStart = Date.now();
     log('━━━ Trying ChatGPT (priority 2) ━━━');
 
@@ -621,54 +995,32 @@ async function tryChatGPT(page, prompt, timeoutMs) {
         return { success: false, reason: 'error' };
     }
 
-    log('chatgpt: Editor found, typing prompt...');
-
+    log('chatgpt: Editor found, clipboard paste...');
     await editorLocator.focus();
     await editorLocator.click();
     await page.waitForTimeout(200);
-
-    // Clear and type
-    try { await editorLocator.fill(''); } catch {
-        await page.keyboard.press('ControlOrMeta+a');
-        await page.keyboard.press('Backspace');
-    }
+    // ChatGPT uses contenteditable div — fill() hangs for 30s before throwing.
+    // Use keyboard shortcuts directly instead.
+    await page.keyboard.press('ControlOrMeta+a');
+    await page.keyboard.press('Backspace');
     await page.waitForTimeout(100);
-
-    if (prompt.length > INSERT_TEXT_LIMIT) {
-        try { await page.evaluate(t => navigator.clipboard.writeText(t), prompt); } catch (_) { }
-        await page.keyboard.press('ControlOrMeta+v');
-    } else {
-        // ChatGPT uses a contenteditable div — type character by character
-        // but keyboard.insertText is faster and usually works
-        await page.keyboard.insertText(prompt);
-    }
+    // Always use clipboard — skip O(n) keyboard.insertText for React re-render perf
+    try { await page.evaluate(t => navigator.clipboard.writeText(t), prompt); } catch (_) { }
+    await page.keyboard.press('ControlOrMeta+v');
     await page.waitForTimeout(500);
+    // Trigger React change detection
+    await editorLocator.evaluate(node => {
+        node.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    });
 
-    // Send — ChatGPT uses Enter or a send button
     const sendSelectors = [
         'button[data-testid="send-button"]',
         'button[aria-label="Send prompt"]',
         'button[aria-label="Send"]',
-        'button svg', // fallback
+        'button svg',
     ];
-
-    let sent = false;
-    for (const sel of sendSelectors) {
-        try {
-            const btn = page.locator(sel).first();
-            if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
-                await btn.click();
-                sent = true;
-                log('chatgpt: Sent via button click.');
-                break;
-            }
-        } catch (_) { }
-    }
-    if (!sent) {
-        log('chatgpt: No send button, trying Enter...');
-        await editorLocator.focus();
-        await page.keyboard.press('Enter');
-    }
+    await sendMessage(page, editorLocator, sendSelectors, 'Enter');
+    log('chatgpt: Sent.');
 
     // ── Wait for response ──
     log('chatgpt: waiting for response...');
@@ -731,8 +1083,8 @@ async function tryChatGPT(page, prompt, timeoutMs) {
         return { success: false, reason: 'error' };
     }
 
-    telemetry.per_provider_ms.chatgpt = Date.now() - provStart;
-    log(`chatgpt: SUCCESS — ${response.length} chars in ${telemetry.per_provider_ms.chatgpt}ms`);
+    ctx.telemetry.per_provider_ms.chatgpt = Date.now() - provStart;
+    log(`chatgpt: SUCCESS — ${response.length} chars in ${ctx.telemetry.per_provider_ms.chatgpt}ms`);
     return { success: true, response };
 }
 
@@ -740,7 +1092,7 @@ async function tryChatGPT(page, prompt, timeoutMs) {
 // PROVIDER: CLAUDE
 // ══════════════════════════════════════════════════════════════════════════════
 
-async function tryClaude(page, prompt, timeoutMs) {
+async function tryClaude(page, prompt, timeoutMs, ctx) {
     const provStart = Date.now();
     log('━━━ Trying Claude (priority 3) ━━━');
 
@@ -955,8 +1307,8 @@ async function tryClaude(page, prompt, timeoutMs) {
         return { success: false, reason: 'error' };
     }
 
-    telemetry.per_provider_ms.claude = Date.now() - provStart;
-    log(`claude: SUCCESS — ${response.length} chars in ${telemetry.per_provider_ms.claude}ms`);
+    ctx.telemetry.per_provider_ms.claude = Date.now() - provStart;
+    log(`claude: SUCCESS — ${response.length} chars in ${ctx.telemetry.per_provider_ms.claude}ms`);
     return { success: true, response };
 }
 
@@ -964,7 +1316,7 @@ async function tryClaude(page, prompt, timeoutMs) {
 // PROVIDER: QWEN (通义千问)
 // ══════════════════════════════════════════════════════════════════════════════
 
-async function tryQwen(page, prompt, timeoutMs) {
+async function tryQwen(page, prompt, timeoutMs, ctx) {
     const provStart = Date.now();
     log('━━━ Trying Qwen/通义千问 (priority 4) ━━━');
 
@@ -1145,8 +1497,8 @@ async function tryQwen(page, prompt, timeoutMs) {
     // Strip model-name prefix if present (e.g., "Qwen3.7-Max\n")
     const cleaned = response.replace(/^Qwen[\d.]+-(?:Max|Plus|Turbo|Flash)\s*\n?\s*/i, '').trim();
 
-    telemetry.per_provider_ms.qwen = Date.now() - provStart;
-    log(`qwen: SUCCESS — ${cleaned.length} chars in ${telemetry.per_provider_ms.qwen}ms`);
+    ctx.telemetry.per_provider_ms.qwen = Date.now() - provStart;
+    log(`qwen: SUCCESS — ${cleaned.length} chars in ${ctx.telemetry.per_provider_ms.qwen}ms`);
     return { success: true, response: cleaned };
 }
 
@@ -1154,7 +1506,7 @@ async function tryQwen(page, prompt, timeoutMs) {
 // PROVIDER: KIMI (月之暗面 Moonshot)
 // ══════════════════════════════════════════════════════════════════════════════
 
-async function tryKimi(page, prompt, timeoutMs) {
+async function tryKimi(page, prompt, timeoutMs, ctx) {
     const provStart = Date.now();
     log('━━━ Trying Kimi/月之暗面 (priority 5) ━━━');
 
@@ -1169,6 +1521,30 @@ async function tryKimi(page, prompt, timeoutMs) {
 
     // Wait for SPA to fully render (Kimi is React-based, redirects to www.kimi.com)
     await page.waitForTimeout(4000);
+
+    // Start a fresh chat to avoid stale DOM from previous conversations
+    // (otherwise pre-existing assistant elements break response detection)
+    try {
+        // Use evaluate for reliability — Playwright isVisible() can be flaky for sidebar elements
+        const clicked = await page.evaluate(() => {
+            let btn = document.querySelector('.new-chat-btn');
+            if (!btn) {
+                // Fallback: find link containing "新建会话"
+                const links = document.querySelectorAll('a, div[class*="new-chat"], div[class*="sidebar-new"]');
+                for (const el of links) {
+                    if ((el.textContent || '').includes('新建会话')) { btn = el; break; }
+                }
+            }
+            if (btn) { btn.click(); return true; }
+            return false;
+        });
+        if (clicked) {
+            log('kimi: Started new conversation.');
+            await page.waitForTimeout(2500);
+        }
+    } catch (_) {
+        // Non-critical: if new-chat fails, we still proceed with the fallback detection logic
+    }
 
     // Auth check
     const url = page.url();
@@ -1280,48 +1656,100 @@ async function tryKimi(page, prompt, timeoutMs) {
         '[class*="chat-content-list"] [class*="assistant"]',
     ];
 
+    // Snapshot assistant elements BEFORE sending: count + last element's text.
+    // After send, Kimi either (a) creates a NEW assistant element, or
+    // (b) reuses the existing one with updated text. Both cases handled.
+    const oldCount = await page.locator('[class*="chat-content-item-assistant"]').count();
+    const lastAssistant = page.locator('[class*="chat-content-item-assistant"]').last();
+    const oldText = await lastAssistant.evaluate(el => (el.innerText || el.textContent || '').trim()).catch(() => '');
+    // Treat Kimi's default greeting / very short pre-existing text as "no real content"
+    // (new conversation always has exactly 1 short assistant greeting element)
+    const isGreeting = oldCount === 1 && oldText.length < 30;
+    const effectiveOldLen = isGreeting ? 0 : oldText.length;
+    log(`kimi: ${oldCount} pre-existing assistant element(s), last text ${oldText.length} chars${isGreeting ? ' (greeting)' : ''}`);
+
     let responseEl = null;
+    // Short serial timeouts — each selector gets 10s
+    const PER_SEL_TIMEOUT = 10000;
     for (const sel of responseSelectors) {
         try {
-            const loc = page.locator(sel).last();
-            await loc.waitFor({ state: 'attached', timeout: 60000 });
-            const txt = await loc.evaluate(el => (el.innerText || el.textContent || '').trim()).catch(() => '');
-            if (txt.length > 10) {
-                responseEl = loc;
-                log(`kimi: Response element matched via "${sel}"`);
-                break;
+            const deadline = Date.now() + PER_SEL_TIMEOUT;
+            let matched = false;
+            while (Date.now() < deadline) {
+                const curCount = await page.locator(sel).count();
+                const loc = page.locator(sel).last();
+                const txt = await loc.evaluate(el => (el.innerText || el.textContent || '').trim()).catch(() => '');
+                const isNewElement = curCount > oldCount;
+                const textGrew = txt.length > effectiveOldLen;
+                if (txt.length > 10 && (isNewElement || textGrew)) {
+                    responseEl = loc;
+                    log(`kimi: Response element matched via "${sel}" (${txt.length} chars, newEl=${isNewElement}, grew=${textGrew})`);
+                    matched = true;
+                    break;
+                }
+                await page.waitForTimeout(1500);
             }
-        } catch (_) { }
+            if (matched) break;
+            log(`kimi:   selector "${sel}" timed out (${PER_SEL_TIMEOUT/1000}s)`);
+        } catch (e) {
+            log(`kimi:   selector "${sel}" FAILED: ${(e.message || String(e)).slice(0, 100)}`);
+        }
     }
 
     if (!responseEl) {
-        log('kimi: No response element found.');
+        log('kimi: No response element found. Dumping debug info...');
+        try {
+            const url = page.url();
+            log(`kimi:   current URL: ${url}`);
+            const bodySnippet = await page.evaluate(() => (document.body?.innerText || '').slice(0, 300));
+            log(`kimi:   body snippet: ${bodySnippet.replace(/\n/g, ' | ')}`);
+        } catch (_) {}
         return { success: false, reason: 'error' };
     }
 
-    // Kimi generates in BURSTS with pauses between sentences.
-    // A short stability window triggers mid-generation → truncated responses.
-    // Use a longer window (15s) and verify the response looks complete.
+    // Kimi generates in BURSTS with pauses between sentences, plus a "search web"
+    // pre-phase (搜索网页 → N 个结果 → then real answer). Three-layer defense:
+    //   L1: UI signals — Kimi's stop/loading indicator still visible?
+    //   L2: Text patterns — still showing search queries instead of real answer?
+    //   L3: Adaptive window — short content gets longer patience (30s → 20s → 15s)
     let lastLen = 0;
     let lastChangeTime = Date.now();
-    const STABILITY_WINDOW = 15_000;  // Kimi pauses longer between paragraphs
     const DEADLINE = startTime + timeoutMs;
-    const MIN_CONTENT_DEADLINE = startTime + 45_000; // must wait at least 45s for content
+    const MIN_CONTENT_DEADLINE = startTime + 60_000; // must stay ≥60s when content < 200 chars
 
-    while ((Date.now() - lastChangeTime) < STABILITY_WINDOW && Date.now() < DEADLINE) {
+    while (Date.now() < DEADLINE) {
+        // Adaptive stability window: very short content = done in one burst
+        const stabilityWindow = lastLen < 50   ?  5_000   // simple greeting, done
+                              : lastLen < 150  ? 30_000   // still in search/thinking phase
+                              : lastLen < 500  ? 20_000   // early generation
+                              : lastLen < 1500 ? 15_000   // mid generation
+                              :                   8_000;  // long content, likely near end
+
+        if ((Date.now() - lastChangeTime) > stabilityWindow) break;
+
         await page.waitForTimeout(POLL_INTERVAL);
         try {
             const text = await responseEl.evaluate(el => el.innerText || el.textContent || '');
+
+            // ── L1: UI signals ──
+            const generating = await isStillGenerating(page);
+
+            // ── L2: Text patterns — still just search queries? ──
+            const preGen = looksLikePreGeneration(text);
+
             if (text.length > lastLen) {
                 lastLen = text.length;
                 lastChangeTime = Date.now();
                 spinner('+');
+            } else if (generating || preGen) {
+                // AI is still working — keep waiting, don't count as idle
+                lastChangeTime = Date.now();
+                spinner(generating ? '⚙' : '…');
             } else {
-                // If content is still very short and we haven't waited long enough,
-                // reset the stability timer — Kimi may be thinking between bursts
-                if (text.length < 80 && Date.now() < MIN_CONTENT_DEADLINE) {
-                    lastChangeTime = Date.now(); // keep waiting
-                    spinner('_');
+                // Text is stable but maybe too early? Check against adaptive window
+                const stableFor = Date.now() - lastChangeTime;
+                if (stableFor < stabilityWindow) {
+                    spinner('·');  // not yet past adaptive window, keep waiting
                 } else {
                     spinner('.');
                 }
@@ -1331,8 +1759,11 @@ async function tryKimi(page, prompt, timeoutMs) {
     process.stderr.write('\n');
 
     const response = await responseEl.evaluate(el => (el.innerText || el.textContent || '').trim());
-    if (!response || response.length < 5) {
-        log(`kimi: empty or too-short response (${response?.length || 0} chars).`);
+
+    // Shared three-layer validation
+    const validation = validateResponseComplete(response);
+    if (!validation.ok) {
+        log(`kimi: response rejected — ${validation.reason} (${response?.length || 0} chars)`);
         return { success: false, reason: 'error' };
     }
 
@@ -1344,8 +1775,8 @@ async function tryKimi(page, prompt, timeoutMs) {
         return { success: false, reason: 'error' };
     }
 
-    telemetry.per_provider_ms.kimi = Date.now() - provStart;
-    log(`kimi: SUCCESS — ${response.length} chars in ${telemetry.per_provider_ms.kimi}ms`);
+    ctx.telemetry.per_provider_ms.kimi = Date.now() - provStart;
+    log(`kimi: SUCCESS — ${response.length} chars in ${ctx.telemetry.per_provider_ms.kimi}ms`);
     return { success: true, response };
 }
 
@@ -1353,7 +1784,7 @@ async function tryKimi(page, prompt, timeoutMs) {
 // PROVIDER: MINIMAX
 // ══════════════════════════════════════════════════════════════════════════════
 
-async function tryMiniMax(page, prompt, timeoutMs) {
+async function tryMiniMax(page, prompt, timeoutMs, ctx) {
     const provStart = Date.now();
     log('━━━ Trying MiniMax (priority 5) ━━━');
 
@@ -1456,9 +1887,9 @@ async function tryMiniMax(page, prompt, timeoutMs) {
         } catch (_) { }
     }
     if (!sent) {
-        log('minimax: No send button, trying Ctrl+Enter...');
+        log('minimax: No send button, trying Enter...');
         await editorLocator.focus();
-        await page.keyboard.press('ControlOrMeta+Enter');
+        await page.keyboard.press('Enter');
     }
 
     // ── Wait for response ──
@@ -1515,8 +1946,315 @@ async function tryMiniMax(page, prompt, timeoutMs) {
         return { success: false, reason: 'error' };
     }
 
-    telemetry.per_provider_ms.minimax = Date.now() - provStart;
-    log(`minimax: SUCCESS — ${response.length} chars in ${telemetry.per_provider_ms.minimax}ms`);
+    ctx.telemetry.per_provider_ms.minimax = Date.now() - provStart;
+    log(`minimax: SUCCESS — ${response.length} chars in ${ctx.telemetry.per_provider_ms.minimax}ms`);
+    return { success: true, response };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PROVIDER: MIMO (Xiaomi MiMo Studio — MiMo-V2.5-Pro)
+// ══════════════════════════════════════════════════════════════════════════════
+
+async function tryMiMo(page, prompt, timeoutMs, ctx) {
+    const provStart = Date.now();
+    log('━━━ Trying MiMo/Xiaomi (priority 6) ━━━');
+
+    const cfg = PROVIDER_CHAIN.find(p => p.key === 'mimo');
+
+    try {
+        await page.goto(cfg.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    } catch {
+        log('mimo: Page load failed.');
+        return { success: false, reason: 'error' };
+    }
+
+    // Wait for SPA to render (MiMo is React/Tailwind-based, auto-creates new chat at /#/c)
+    await page.waitForTimeout(4000);
+
+    // Auth check
+    const url = page.url();
+    if (cfg.authDomains.some(d => url.includes(d)) || url.includes('/login')) {
+        log('mimo: Not authenticated.');
+        return { success: false, reason: 'auth' };
+    }
+
+    // Quota / rate-limit check
+    const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
+    for (const pattern of cfg.quotaPatterns) {
+        if (pattern.test(bodyText)) {
+            log(`mimo: Quota pattern matched: "${bodyText.match(pattern)?.[0]}"`);
+            return { success: false, reason: 'quota' };
+        }
+    }
+
+    // Find editor — MiMo uses a textarea (Tailwind-styled, no id/name)
+    // placeholder="有问题，尽管问，Shift + Enter 换行"
+    const editorSelectors = [
+        'textarea[placeholder*="有问题，尽管问"]',
+        'textarea[placeholder*="Shift + Enter"]',
+    ];
+
+    let editorLocator = null;
+    for (const sel of editorSelectors) {
+        try {
+            const loc = page.locator(sel).first();
+            if (await loc.isVisible({ timeout: 3000 }).catch(() => false)) {
+                editorLocator = loc;
+                break;
+            }
+        } catch (_) { }
+    }
+
+    if (!editorLocator) {
+        log('mimo: No editable input found.');
+        return { success: false, reason: 'error' };
+    }
+
+    log('mimo: Editor found, typing...');
+    await editorLocator.focus();
+    await editorLocator.click();
+    await page.waitForTimeout(200);
+
+    // Clear
+    await editorLocator.fill('');
+    await page.waitForTimeout(100);
+
+    // Type prompt — prefer clipboard paste for performance
+    if (prompt.length > INSERT_TEXT_LIMIT) {
+        try { await page.evaluate(t => navigator.clipboard.writeText(t), prompt); } catch (_) { }
+        await page.keyboard.press('ControlOrMeta+v');
+    } else {
+        await page.keyboard.insertText(prompt);
+    }
+    await page.waitForTimeout(800);
+
+    // Send — click the send button (paper-plane icon, second button in input container)
+    // The send button has rounded-full class and becomes enabled after text is typed
+    let sent = false;
+    try {
+        // Find the input container, then find the button with SVG paper-plane icon
+        const sendBtn = page.locator('textarea[placeholder*="有问题，尽管问"]')
+            .locator('..')  // parent
+            .locator('..')  // grandparent (rounded-xl input container)
+            .locator('button:not([disabled])')
+            .filter({ has: page.locator('svg') })
+            .last();
+        if (await sendBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+            await sendBtn.click();
+            sent = true;
+            log('mimo: Sent via send button click.');
+        }
+    } catch (_) { }
+
+    if (!sent) {
+        // Fallback: press Enter (Shift+Enter is for newlines, so Enter should send)
+        log('mimo: Send button not found, trying Enter...');
+        await page.keyboard.press('Enter');
+    }
+
+    // ── Wait for response ──
+    log('mimo: waiting for response...');
+    const startTime = Date.now();
+
+    // After sending, URL changes from /#/c to /#/chat/[hash]
+    // Wait for the markdown response area to appear
+    const responseSelectors = [
+        '.markdown-prose',
+        '.Markdown_markdown__',
+        '[class*="markdown"]',
+    ];
+
+    let responseEl = null;
+    for (const sel of responseSelectors) {
+        try {
+            const loc = page.locator(sel).last();
+            await loc.waitFor({ state: 'attached', timeout: Math.min(30000, timeoutMs) });
+            // Verify it has actual content (not just empty markdown container)
+            const text = await loc.evaluate(el => el.innerText || el.textContent || '').catch(() => '');
+            if (text.length > 10) {
+                responseEl = loc;
+                break;
+            }
+        } catch (_) { }
+    }
+
+    if (!responseEl) {
+        log('mimo: No response element appeared.');
+        return { success: false, reason: 'timeout' };
+    }
+
+    // MiMo shows "已深度思考（用时 X 秒）" — wait for this phase + response stability
+    // No explicit stop button found; rely on text stability
+    let lastLen = 0;
+    let lastChangeTime = Date.now();
+    const DEADLINE = startTime + timeoutMs;
+
+    while ((Date.now() - lastChangeTime) < 15_000 && Date.now() < DEADLINE) {
+        await page.waitForTimeout(POLL_INTERVAL);
+        try {
+            const text = await responseEl.evaluate(el => el.innerText || el.textContent || '');
+            if (text.length > lastLen) {
+                lastLen = text.length;
+                lastChangeTime = Date.now();
+                spinner('+');
+            } else {
+                spinner('.');
+            }
+        } catch { spinner('?'); }
+    }
+    process.stderr.write('\n');
+
+    const response = await responseEl.evaluate(el => (el.innerText || el.textContent || '').trim());
+    if (!response || response.length < 5) {
+        return { success: false, reason: 'error' };
+    }
+
+    ctx.telemetry.per_provider_ms.mimo = Date.now() - provStart;
+    log(`mimo: SUCCESS — ${response.length} chars in ${ctx.telemetry.per_provider_ms.mimo}ms`);
+    return { success: true, response };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PROVIDER: DEEPSEEK
+// ══════════════════════════════════════════════════════════════════════════════
+
+async function tryDeepSeek(page, prompt, timeoutMs, ctx) {
+    const provStart = Date.now();
+    log('━━━ Trying DeepSeek (priority 7) ━━━');
+
+    const cfg = PROVIDER_CHAIN.find(p => p.key === 'deepseek');
+
+    try {
+        await page.goto(cfg.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    } catch {
+        log('deepseek: Page load failed.');
+        return { success: false, reason: 'error' };
+    }
+
+    // Wait for SPA to render
+    await page.waitForTimeout(3000);
+
+    // Auth check
+    const url = page.url();
+    if (cfg.authDomains.some(d => url.includes(d)) || url.includes('/login')) {
+        log('deepseek: Not authenticated.');
+        return { success: false, reason: 'auth' };
+    }
+
+    // Find editor — DeepSeek uses a textarea with placeholder
+    const editorSelectors = [
+        'textarea[placeholder*="给 DeepSeek 发送消息"]',
+        'textarea[placeholder*="DeepSeek"]',
+    ];
+
+    let editorLocator = null;
+    for (const sel of editorSelectors) {
+        try {
+            const loc = page.locator(sel).first();
+            if (await loc.isVisible({ timeout: 3000 }).catch(() => false)) {
+                editorLocator = loc;
+                break;
+            }
+        } catch (_) { }
+    }
+
+    if (!editorLocator) {
+        log('deepseek: No editable input found.');
+        return { success: false, reason: 'error' };
+    }
+
+    log('deepseek: Editor found, typing...');
+    await editorLocator.focus();
+    await editorLocator.click();
+    await page.waitForTimeout(200);
+
+    // Clear
+    await editorLocator.fill('');
+    await page.waitForTimeout(100);
+
+    // Type prompt — prefer clipboard paste for performance
+    if (prompt.length > INSERT_TEXT_LIMIT) {
+        try { await page.evaluate(t => navigator.clipboard.writeText(t), prompt); } catch (_) { }
+        await page.keyboard.press('ControlOrMeta+v');
+    } else {
+        await page.keyboard.insertText(prompt);
+    }
+    await page.waitForTimeout(500);
+
+    // Send — click the primary filled circle send button
+    let sent = false;
+    try {
+        // The send button is inside the input container, identified by ds-button--primary.ds-button--filled.ds-button--circle
+        const sendBtn = page.locator('.ds-button--primary.ds-button--filled.ds-button--circle').first();
+        if (await sendBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+            await sendBtn.click();
+            sent = true;
+            log('deepseek: Sent via send button click.');
+        }
+    } catch (_) { }
+
+    if (!sent) {
+        log('deepseek: Send button not found, trying Enter...');
+        await page.keyboard.press('Enter');
+    }
+
+    // ── Wait for response ──
+    log('deepseek: waiting for response...');
+    const startTime = Date.now();
+
+    // DeepSeek shows "已思考（用时 X 秒）" then the final answer
+    // Response appears in div.ds-markdown inside assistant message
+    const responseSelectors = [
+        '.ds-markdown',
+        '.ds-assistant-message-main-content',
+        '[class*="ds-markdown"]',
+    ];
+
+    let responseEl = null;
+    for (const sel of responseSelectors) {
+        try {
+            const loc = page.locator(sel).last();
+            await loc.waitFor({ state: 'attached', timeout: Math.min(60000, timeoutMs) });
+            const text = await loc.evaluate(el => el.innerText || el.textContent || '').catch(() => '');
+            if (text.length > 10) {
+                responseEl = loc;
+                break;
+            }
+        } catch (_) { }
+    }
+
+    if (!responseEl) {
+        log('deepseek: No response element appeared.');
+        return { success: false, reason: 'timeout' };
+    }
+
+    // Stability check — DeepSeek may show thinking first, then final answer
+    let lastLen = 0;
+    let lastChangeTime = Date.now();
+    const DEADLINE = startTime + timeoutMs;
+
+    while ((Date.now() - lastChangeTime) < 12_000 && Date.now() < DEADLINE) {
+        await page.waitForTimeout(POLL_INTERVAL);
+        try {
+            const text = await responseEl.evaluate(el => el.innerText || el.textContent || '');
+            if (text.length > lastLen) {
+                lastLen = text.length;
+                lastChangeTime = Date.now();
+                spinner('+');
+            } else {
+                spinner('.');
+            }
+        } catch { spinner('?'); }
+    }
+    process.stderr.write('\n');
+
+    const response = await responseEl.evaluate(el => (el.innerText || el.textContent || '').trim());
+    if (!response || response.length < 5) {
+        return { success: false, reason: 'error' };
+    }
+
+    ctx.telemetry.per_provider_ms.deepseek = Date.now() - provStart;
+    log(`deepseek: SUCCESS — ${response.length} chars in ${ctx.telemetry.per_provider_ms.deepseek}ms`);
     return { success: true, response };
 }
 
@@ -1529,11 +2267,14 @@ async function tryMiniMax(page, prompt, timeoutMs) {
  *
  * @param {Browser} browser - CDP browser connection
  * @param {string} prompt - The prompt to send
+ * @param {InvocationContext} ctx - Per-invocation context (circuit breaker + telemetry)
  * @param {object} options - { totalTimeout, providerTimeout, startFrom }
  * @returns {{success: true, response: string, provider: string}} | {{success: false, reasons: object}}
  */
-async function tryAllProviders(browser, prompt, options = {}) {
-    const { closeBrowser = false } = options;
+async function tryAllProviders(browser, prompt, ctx, options = {}) {
+    // POLICY: Never close the user's Chrome browser. We are a guest in their session.
+    // Only manage our own tabs — page.close() for cleanup, but NEVER browser.close().
+    const { keepTabs = true } = options;
     const totalTimeout = options.totalTimeout || DEFAULT_TOTAL_TIMEOUT;
     const providerTimeout = options.providerTimeout || Math.min(DEFAULT_PROVIDER_TIMEOUT, Math.floor(totalTimeout / 2));
     const overallStart = Date.now();
@@ -1566,7 +2307,7 @@ async function tryAllProviders(browser, prompt, options = {}) {
 
         if (remainingTotal < 15000) {
             log(`Total timeout approaching — ${remainingTotal}ms left. Stopping chain.`);
-            fallbackReasons[provider.key] = 'total_timeout';
+            fallbackReasons[provider.key] = { reason: 'total_timeout' };
             triedProviders.push(provider.key);
             break;
         }
@@ -1574,11 +2315,11 @@ async function tryAllProviders(browser, prompt, options = {}) {
         const perProvTimeout = Math.min(providerTimeout, remainingTotal);
 
         // Circuit breaker: skip providers that have repeatedly failed
-        if (circuitIsBroken(provider.key)) {
-            const s = circuitState[provider.key];
+        if (ctx.circuitIsBroken(provider.key)) {
+            const s = ctx.circuitState[provider.key];
             const remainingCooldown = Math.ceil((s.brokenUntil - Date.now()) / 1000);
             log(`\n▶ Provider ${i + 1}/${PROVIDER_CHAIN.length}: ${provider.name} — CIRCUIT BROKEN (${remainingCooldown}s cooldown remaining)`);
-            fallbackReasons[provider.key] = 'circuit_broken';
+            fallbackReasons[provider.key] = { reason: 'circuit_broken' };
             triedProviders.push(provider.key);
             continue;
         }
@@ -1595,58 +2336,74 @@ async function tryAllProviders(browser, prompt, options = {}) {
             // Grant clipboard permissions
             try { await context.grantPermissions(['clipboard-read', 'clipboard-write']); } catch (_) { }
 
-            // Dispatch to provider handler
+            // Dispatch to provider handler (each receives ctx for telemetry tracking)
             switch (provider.key) {
                 case 'gemini':
-                    result = await tryGemini(page, prompt, perProvTimeout);
+                    result = await tryGemini(page, prompt, perProvTimeout, ctx);
                     break;
                 case 'chatgpt':
-                    result = await tryChatGPT(page, prompt, perProvTimeout);
+                    result = await tryChatGPT(page, prompt, perProvTimeout, ctx);
                     break;
                 case 'claude':
-                    result = await tryClaude(page, prompt, perProvTimeout);
+                    result = await tryClaude(page, prompt, perProvTimeout, ctx);
                     break;
                 case 'qwen':
-                    result = await tryQwen(page, prompt, perProvTimeout);
+                    result = await tryQwen(page, prompt, perProvTimeout, ctx);
                     break;
                 case 'kimi':
-                    result = await tryKimi(page, prompt, perProvTimeout);
+                    result = await tryKimi(page, prompt, perProvTimeout, ctx);
                     break;
                 case 'minimax':
-                    result = await tryMiniMax(page, prompt, perProvTimeout);
+                    result = await tryMiniMax(page, prompt, perProvTimeout, ctx);
+                    break;
+                case 'mimo':
+                    result = await tryMiMo(page, prompt, perProvTimeout, ctx);
+                    break;
+                case 'deepseek':
+                    result = await tryDeepSeek(page, prompt, perProvTimeout, ctx);
                     break;
                 default:
-                    result = { success: false, reason: 'error' };
+                    result = classifyError(
+                        new Error(`Unknown provider: ${provider.key}`),
+                        STAGES.NAVIGATE, provider.key
+                    );
             }
         } catch (err) {
-            log(`${provider.name}: Exception — ${err.message}`);
-            result = { success: false, reason: 'error' };
+            const pe = new ProviderError(err, { stage: 'unknown', provider: provider.key });
+            log(`${provider.name}: ${pe.originalName} — ${pe.message}`);
+            result = pe.toResult();
         } finally {
             stopTimer();
-            // Close this provider's tab — only on failure, or if --close set
-            if (page && !page.isClosed()) {
-                if (closeBrowser || !result || !result.success) {
-                    try { await page.close(); } catch (_) { }
-                }
-            }
         }
 
         triedProviders.push(provider.key);
         if (!result.success) {
-            circuitRecordFailure(provider.key);
-            fallbackReasons[provider.key] = `ERR_${result.reason.toUpperCase()}`;
+            // Close failed provider's tab — useless clutter regardless of --keep-tabs
+            if (page && !page.isClosed()) {
+                try { await page.close(); } catch (_) { }
+            }
+            ctx.circuitRecordFailure(provider.key);
+            fallbackReasons[provider.key] = {
+                reason: result.reason || 'error',
+                error_details: result.error_details || null,
+            };
             log(`✗ ${provider.name}: FAILED — ${result.reason} → falling to next provider`);
             continue;
         }
 
-        // SUCCESS!
-        circuitRecordSuccess(provider.key);
-        telemetry.provider_used = provider.name;
-        telemetry.providers_tried = triedProviders;
-        telemetry.fallback_reasons = fallbackReasons;
-        telemetry.total_ms = Date.now() - overallStart;
+        // SUCCESS: keep or close tab based on --keep-tabs flag
+        if (page && !page.isClosed() && !options.keepTabs) {
+            try { await page.close(); } catch (_) { }
+        }
 
-        log(`\n✓ ${provider.name}: USED (${result.response.length} chars, ${telemetry.total_ms}ms total)`);
+        // SUCCESS!
+        ctx.circuitRecordSuccess(provider.key);
+        ctx.telemetry.provider_used = provider.name;
+        ctx.telemetry.providers_tried = triedProviders;
+        ctx.telemetry.fallback_reasons = fallbackReasons;
+        ctx.telemetry.total_ms = Date.now() - overallStart;
+
+        log(`\n✓ ${provider.name}: USED (${result.response.length} chars, ${ctx.telemetry.total_ms}ms total)`);
         if (triedProviders.length > 1) {
             log(`  Fallback chain: ${triedProviders.join(' → ')} (${triedProviders.length - 1} provider(s) skipped)`);
         }
@@ -1654,9 +2411,9 @@ async function tryAllProviders(browser, prompt, options = {}) {
     }
 
     // All providers exhausted
-    telemetry.providers_tried = triedProviders;
-    telemetry.fallback_reasons = fallbackReasons;
-    telemetry.total_ms = Date.now() - overallStart;
+    ctx.telemetry.providers_tried = triedProviders;
+    ctx.telemetry.fallback_reasons = fallbackReasons;
+    ctx.telemetry.total_ms = Date.now() - overallStart;
 
     log(`\n✗ All ${triedProviders.length} provider(s) exhausted.`);
     log(`  Reasons: ${JSON.stringify(fallbackReasons)}`);
@@ -1664,7 +2421,7 @@ async function tryAllProviders(browser, prompt, options = {}) {
     // If the first 2+ providers failed with page-load/auth errors,
     // the proxy or network is likely the root cause, not the providers.
     const pageFailCount = Object.values(fallbackReasons).filter(r =>
-        String(r).includes('ERR_ERROR') || String(r).includes('ERR_AUTH')
+        String(r.reason).includes('error') || String(r.reason).includes('auth')
     ).length;
     if (pageFailCount >= 2) {
         log('  ⚠  Multiple providers failed with page/auth errors.');
@@ -1736,6 +2493,7 @@ async function doctorCheck() {
 
 async function main() {
     const args = process.argv.slice(2);
+    const ctx = new InvocationContext(); // P0-2: per-invocation state isolation
 
     // --doctor
     if (args.includes('--doctor')) {
@@ -1746,7 +2504,7 @@ async function main() {
     let customTimeout = DEFAULT_TOTAL_TIMEOUT;
     let customProvTimeout = null;
     let startFrom = null;
-    let closeBrowser = false;
+    let keepTabs = true; // Always keep tabs — never close user's browser
 
     const remaining = [];
     for (let i = 0; i < args.length; i++) {
@@ -1759,8 +2517,8 @@ async function main() {
         } else if (a.startsWith('--timeout-per-provider=')) {
             const v = parseInt(a.split('=')[1], 10);
             if (!isNaN(v) && v > 0) customProvTimeout = v;
-        } else if (a === '--close' || a === '--close-browser') {
-            closeBrowser = true;
+        } else if (a === '--keep-tabs') {
+            keepTabs = true;
         } else if (a.startsWith('--from=')) {
             startFrom = a.split('=')[1];
         } else if (!a.startsWith('--')) {
@@ -1778,12 +2536,12 @@ async function main() {
         prompt = chunks.join('').trim();
     }
     if (!prompt && !args.includes('--smoke')) {
-        console.error('Usage: node index.js [--timeout=N] [--from=NAME] [--smoke] [--doctor] "Your prompt"');
+        console.error('Usage: node index.js [--timeout=N] [--from=NAME] [--keep-tabs] [--smoke] [--doctor] "Your prompt"');
         console.error('       echo "prompt" | node index.js [flags]');
         process.exit(1);
     }
 
-    telemetry.prompt_length_chars = prompt.length;
+    ctx.telemetry.prompt_length_chars = prompt.length;
 
     // Connect to Chrome
     let browser;
@@ -1792,7 +2550,7 @@ async function main() {
     } catch (err) {
         log(`FATAL: Cannot connect to Chrome CDP — ${err.message}`);
         log('Ensure Chrome debug is running: bash ~/start-chrome-debug.sh');
-        recordTelemetry(1);
+        ctx.recordTelemetry(1);
         process.exit(1);
     }
 
@@ -1803,54 +2561,53 @@ async function main() {
             process.exit(0);
         }
 
-        // Run fallback chain
-        const result = await tryAllProviders(browser, prompt, {
+        // Run fallback chain (ctx carries isolated state through the chain)
+        const result = await tryAllProviders(browser, prompt, ctx, {
             totalTimeout: customTimeout,
             providerTimeout: customProvTimeout,
             startFrom,
-            closeBrowser,
+            keepTabs,
         });
 
         if (result.success) {
             console.log(result.response); // stdout for piping
-            recordTelemetry(0);
+            ctx.recordTelemetry(0);
             process.exit(0);
         }
 
-        // Classify failure
-        const reasons = Object.values(result.reasons);
-        const allAuth = reasons.every(r => r.includes('AUTH'));
-        const allQuota = reasons.every(r => r.includes('QUOTA') || r.includes('RATE'));
-        const hasSafety = reasons.some(r => r.includes('SAFETY'));
+        // Classify failure — reasons are now objects {reason, error_details}
+        const reasonValues = Object.values(result.reasons).map(r =>
+            typeof r === 'string' ? r : (r.reason || '')
+        );
+        const allAuth = reasonValues.every(r => r.includes('auth') || r.includes('AUTH'));
+        const allQuota = reasonValues.every(r => r.includes('quota') || r.includes('QUOTA') || r.includes('rate') || r.includes('RATE'));
+        const hasSafety = reasonValues.some(r => r.includes('safety') || r.includes('SAFETY'));
 
         if (allAuth) {
             log('All providers require authentication. Log into at least one service in Chrome.');
-            recordTelemetry(2);
+            ctx.recordTelemetry(2);
             process.exit(2);
         }
         if (allQuota) {
             log('All providers are rate-limited. Wait and retry later.');
-            recordTelemetry(5);
+            ctx.recordTelemetry(5);
             process.exit(5);
         }
         if (hasSafety) {
-            recordTelemetry(3);
+            ctx.recordTelemetry(3);
             process.exit(3);
         }
-        recordTelemetry(9);
+        ctx.recordTelemetry(9);
         process.exit(9);
 
     } catch (err) {
         log(`FATAL: ${err.message}`);
-        recordTelemetry(4);
+        ctx.recordTelemetry(4);
         process.exit(4);
     } finally {
         stopTimer();
-        if (browser && closeBrowser) {
-            try { await browser.close(); } catch (_) { }
-        } else if (browser) {
-            log('Browser kept open (use --close to auto-close)');
-        }
+        // POLICY: NEVER call browser.close() — this is a CDP guest session.
+        // Closing the browser destroys ALL the user's tabs, not just ours.
     }
 }
 
