@@ -1661,6 +1661,16 @@ async function tryAllProviders(browser, prompt, options = {}) {
     log(`\n✗ All ${triedProviders.length} provider(s) exhausted.`);
     log(`  Reasons: ${JSON.stringify(fallbackReasons)}`);
 
+    // If the first 2+ providers failed with page-load/auth errors,
+    // the proxy or network is likely the root cause, not the providers.
+    const pageFailCount = Object.values(fallbackReasons).filter(r =>
+        String(r).includes('ERR_ERROR') || String(r).includes('ERR_AUTH')
+    ).length;
+    if (pageFailCount >= 2) {
+        log('  ⚠  Multiple providers failed with page/auth errors.');
+        log('  ⚠  This may indicate a proxy/network issue — check PROXY_SERVER in .env');
+    }
+
     return { success: false, reasons: fallbackReasons };
 }
 
