@@ -197,7 +197,7 @@ AgentChat/
 | MiMo | mimo.xiaomi.com | 小米账号 |
 | DeepSeek | chat.deepseek.com | 微信/手机号 |
 
-也可以将账号密码写入环境变量交给 Agent 自动登录（见 `.env.example`）。
+也可以将账号密码写入环境变量交给 Agent 自动登录（`.env.example`提供示例）。
 </details>
 
 <details>
