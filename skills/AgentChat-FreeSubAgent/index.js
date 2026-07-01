@@ -284,11 +284,16 @@ async function dispatchParallel(dag, budgetMs) {
     }, delay));
   });
 
-  const workerResults = await Promise.all(tasks);
-
+  // Promise.allSettled — never fails if a single worker throws unexpectedly
+  const settled = await Promise.allSettled(tasks);
   const results = {};
-  for (const wr of workerResults) {
-    results[wr.nodeId] = { output: wr.output, quality: wr.quality, node: wr.node };
+  for (const s of settled) {
+    if (s.status === 'rejected') {
+      log(`  Worker promise rejected: ${String(s.reason).slice(0, 60)}`);
+      continue;
+    }
+    const wr = s.value;
+    if (wr) results[wr.nodeId] = { output: wr.output, quality: wr.quality, node: wr.node };
   }
   return results;
 }
