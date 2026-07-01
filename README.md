@@ -11,7 +11,6 @@
 
 > **Claude Code 接低价/免费API只做决策分工，Gemini/ChatGPT/Claude 等免费网页 AI 执行不同子任务。**
 
-[English](#) | [中文](#)
 
 ## 什么是 Free Web-SubAgent ？
 
@@ -28,9 +27,7 @@
 
 ## 为什么用这个？
 
-## 💡 
-
-传统全 API 方案：每轮对话的输入+输出 token 全部计费，长链条推理成本指数级增长。
+## 💡 传统全 API 方案：每轮对话的输入+输出 token 全部计费，长链条推理成本指数级增长。
 **AgentChat "免费大脑"模式**：用最便宜的模型做规划，用最强大的免费 Web 端做推理。
 
 | 维度 | 传统 API 方案 | AgentChat |
