@@ -9,7 +9,7 @@
 [![Zero API Cost](https://img.shields.io/badge/Cost-$0-success.svg)](#-why-agentchat)
 [![Claude Code Ready](https://img.shields.io/badge/Claude_Code-Skill_Ready-8A2BE2.svg)](#-claude-code-integration)
 
-> **Claude Code 接低价/免费API只做决策分工，Gemini/ChatGPT/Claude 等免费网页 AI 执行不同子任务。**
+> **Claude Code 接低价/免费API做决策分工，Gemini/ChatGPT/Claude 等免费网页 AI 执行子任务。**
 
 
 ## 什么是 Free Web-SubAgent ？
