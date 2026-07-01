@@ -184,11 +184,20 @@ AgentChat/
 
 ### 🔐 AI 网页登录
 
-在 Chrome 中手动登录各 AI 网页，或将账号密码交给 Agent 自动登录：
+首次使用前，在 Chrome 中手动登录以下 AI 网页（登录态保存在 `CHROME_PROFILE`，只需一次）：
 
-**Gemini / ChatGPT / Claude / Qwen / Kimi / MiniMax / MiMo / DeepSeek**
+| AI | 登录地址 | 账号类型 |
+|----|---------|---------|
+| Gemini | gemini.google.com | Google 账号（免登录仅 Flash 模型） |
+| ChatGPT | chatgpt.com | OpenAI 账号 |
+| Claude | claude.ai | Anthropic 账号 |
+| Qwen | tongyi.aliyun.com/qianwen | 阿里云/淘宝 |
+| Kimi | kimi.moonshot.cn | 微信/手机号 |
+| MiniMax | hailuoai.com | 手机号 |
+| MiMo | mimo.xiaomi.com | 小米账号 |
+| DeepSeek | chat.deepseek.com | 微信/手机号 |
 
-登录态保存在 `CHROME_PROFILE`，只需登录一次。
+也可以将账号密码写入环境变量交给 Agent 自动登录（见 `.env.example`）。
 </details>
 
 <details>
