@@ -75,21 +75,23 @@ Gemini 是 chain 中唯一要求 **Pro Extended Thinking** 的 provider。
 ## Prerequisites
 
 ```bash
-# 0. ⚠️ CRITICAL: 必须使用系统 Chrome + 系统 profile（不能用 Playwright Chromium）
-#    检查 ~/.env 是否已配置：
-#      CHROMIUM_PATH=/home/wangzi/soft/chrome/opt/google/chrome/chrome
-#      CHROME_PROFILE=/home/wangzi/.config/google-chrome
+# 0. ⚠️ CRITICAL: 必须使用系统 Chrome + 含登录态的 profile
+#    复制并编辑项目 .env 文件：
+#      cp .env.example .env
+#    关键配置:
+#      CHROMIUM_PATH=      (留空自动检测 Playwright Chromium)
+#      CHROME_PROFILE=~/.chrome-debug-profile
 #    如果未配置，所有 AI 网站的登录态会丢失！
-cat ~/.env
 
 # 1. Chrome debug 在端口 9222 运行
-pgrep -f "start-chrome-debug" || bash ~/start-chrome-debug.sh
+pgrep -f "start-chrome-debug" || bash scripts/start-chrome-debug.sh
 
 # 2. CDP 可达
 curl -s http://127.0.0.1:9222/json/version | python3 -c "import json,sys; print(json.load(sys.stdin).get('Browser','FAIL'))"
 
-# 3. playwright-core (npm, ~3MB)
-[ -d /tmp/node_modules/playwright-core ] || (cd /tmp && npm install playwright-core)
+# 3. playwright-core (npm, ~3MB) — 在各 skill 目录安装
+(cd skills/AgentChat-WebExtended && npm install)
+(cd skills/gemini-web-extended-thinking && npm install)
 
 # 4. 至少一个 AI service 已登录 (Chrome profile 中)
 #    各 service 登录 URL:

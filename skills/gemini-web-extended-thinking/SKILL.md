@@ -66,17 +66,16 @@ Layer 1 的请求根本不会发出 → Layer 2 不会失败 → Layer 3 的 fai
 ### 脚本架构
 
 ```
-~/start-chrome-debug.sh   ← Shell 入口 (idempotent)
-    └─ ~/start-chrome-debug.py  ← Playwright daemon (Chrome 生命周期管理)
-~/connect-gemini.sh       ← 验证/创建 Gemini tab (Playwright connect_over_cdp + raw CDP 回退)
-~/open-chrome-gui.py      ← 可见窗口模式 (X11 forwarding)
+scripts/start-chrome-debug.sh   ← Shell 入口 (idempotent)
+    └─ scripts/start-chrome-debug.py  ← Playwright daemon (Chrome 生命周期管理)
+scripts/connect-gemini.sh       ← 验证/创建 Gemini tab (Playwright connect_over_cdp + raw CDP 回退)
 ```
 
 ## Prerequisites (verify before execution)
 
 ```bash
 # 1. Chrome debug 必须在端口 9222 运行 (Playwright daemon 管理)
-pgrep -f "start-chrome-debug" || bash ~/start-chrome-debug.sh
+pgrep -f "start-chrome-debug" || bash scripts/start-chrome-debug.sh
 
 # 2. 确认 CDP 可用
 curl -s http://127.0.0.1:9222/json/version | python3 -c "import json,sys; print(json.load(sys.stdin).get('Browser','FAIL'))"
@@ -94,7 +93,7 @@ else:
 "
 
 # 4. playwright-core (npm) — CDP 连接用 (~3MB, 不需要浏览器二进制)
-[ -d /tmp/node_modules/playwright-core ] || (cd /tmp && npm install playwright-core)
+(cd skills/gemini-web-extended-thinking && npm install)
 
 # 5. playwright (pip) — Chrome daemon 启动用 (~60MB, 管理浏览器生命周期)
 python3 -c "from playwright.sync_api import sync_playwright" 2>/dev/null || pip3 install playwright
@@ -244,7 +243,7 @@ node index.js --doctor     # check Chrome CDP connectivity only
 | Exit | Error code | Meaning | Action |
 |------|-----------|---------|--------|
 | 1 | `ERR_NOT_AUTHENTICATED` | Gemini requires sign-in | Open gemini.google.com in Chrome and log in |
-| 1 | — | Chrome CDP not reachable | Run `~/start-chrome-debug.sh` |
+| 1 | — | Chrome CDP not reachable | Run `scripts/start-chrome-debug.sh` |
 | 2 | `ERR_MODEL_DEGRADED` | Pro Extended failed to activate | **Stop.** Do NOT retry. Report to user. |
 | 3 | `ERR_SAFETY_REJECTED` | Safety filter rejected prompt | Skip prompt. Do NOT retry. |
 | 4 | `ERR_EDITOR_NOT_FOUND` | Input editor not in DOM (UI changed?) | Update selectors in index.js |
@@ -273,10 +272,10 @@ for p in pages:
 # 2. 重启 Chrome daemon
 pkill -9 chrome
 sleep 2
-bash ~/start-chrome-debug.sh
+bash scripts/start-chrome-debug.sh
 
 # 3. 验证修复 (title 应为 "Google Gemini")
-bash ~/connect-gemini.sh
+bash scripts/connect-gemini.sh
 ```
 
 ### Chrome Daemon 手动管理
@@ -293,7 +292,7 @@ cat /tmp/chrome-debug.log
 pkill -9 -f "start-chrome-debug.py"
 pkill -9 chrome
 sleep 2
-bash ~/start-chrome-debug.sh
+bash scripts/start-chrome-debug.sh
 ```
 
 ## Key Architecture Decisions
