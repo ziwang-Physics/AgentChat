@@ -9,6 +9,10 @@ Use this skill when the user asks to:
 - Run a prompt through Gemini Pro Extended Thinking mode
 - Send content to `gemini.google.com` for deep reasoning
 
+**When to use THIS skill vs AgentChat-WebExtended:**
+- **THIS skill**: Single prompt → Gemini only, Pro Extended Thinking guaranteed. Use when you need MAX reasoning depth from Gemini specifically.
+- **AgentChat-WebExtended**: Multi-provider fallback chain. Use when provider reliability matters more than specific model choice, or when Gemini quota may be exhausted.
+
 Do NOT use for: simple Q&A, quick lookups, or when the user hasn't explicitly asked for Gemini Web.
 
 ---

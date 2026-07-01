@@ -13,6 +13,10 @@ Use this skill when:
 
 Do NOT use for: interactive conversations that need multi-turn context (each provider has independent session state).
 
+**When to use THIS skill vs gemini-web-extended-thinking:**
+- **THIS skill**: Multi-provider with automatic fallback. Use for reliability, batch processing, or when you don't care which AI answers.
+- **gemini-web-extended-thinking**: Gemini-specific, Pro Extended Thinking guaranteed. Use when you need MAX reasoning depth from Gemini.
+
 ---
 
 ## Fallback Chain (Priority Order)
