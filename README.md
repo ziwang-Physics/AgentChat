@@ -16,7 +16,6 @@
 - 一套零成本的 Claude Code 技能套件，通过接管本地 Chrome 浏览器桥接 8 个免费网页 AI
 - 支持串行降级（单模型自动切换）与并行编排（4角色分工+证据仲裁)
 - 免费额度用尽后自动切换到下一个免费模型
-- PID 锁防冲突——三层架构零代码冗余
 
 ## 为什么用这个？
 
@@ -24,7 +23,7 @@
 2. 🎭 **AI 角色分工体系** — Kimi=研究员 · Gemini=深度推理 · Qwen=事实核查 · ChatGPT=创意构建，互补不重叠
 3. 🛡️ **8-Provider 智能降级** — `Gemini → ChatGPT → Claude → Qwen → Kimi → MiniMax → MiMo → DeepSeek`
 4. ⚖️ **证据仲裁机制** — 多 worker 并发结果经过质量门 + 长度差异检测 + 置信度计算，不盲目合并
-5. 🎯 **薄编排器架构** — `FreeSubAgent` 仅 ~350 行，零 provider 代码重复，所有 AI 调用委托给 `WebExtended`
+5. 🎯 **薄编排器架构** — `FreeSubAgent` 零 provider 代码重复，所有 AI 调用委托给 `WebExtended`
 
 ---
 
@@ -146,11 +145,11 @@ AgentChat/
 └── skills/
     ├── AgentChat-WebExtended/           # 8-Provider Fallback Chain
     │   ├── SKILL.md                     # 🤖 AI 操作指南
-    │   ├── index.js                     # ~1700 lines，完整实现
+    │   ├── index.js                     # 完整实现
     │   └── package.json
     ├── AgentChat-FreeSubAgent/          # 并行编排器
     │   ├── SKILL.md                     # 🤖 AI 操作指南 + 角色分工
-    │   └── index.js                     # ~350 lines，零 provider 代码
+    │   └── index.js                     # 零 provider 代码
     └── gemini-web-extended-thinking/    # Gemini Pro Extended Thinking
         ├── SKILL.md                     # 🤖 AI 操作指南
         ├── index.js
@@ -183,26 +182,13 @@ AgentChat/
 | `CHROMIUM_PATH` | 自动检测 | 手动指定 Chrome 路径 |
 | `LOG_FILE` | `/tmp/chrome-debug.log` | 诊断日志 |
 
-### 🔐 Google 登录
+### 🔐 AI 网页登录
 
-Gemini Pro Extended Thinking 需要 Google 登录。登录态保存在 `CHROME_PROFILE`，只需一次：
+在 Chrome 中手动登录各 AI 网页，或将账号密码交给 Agent 自动登录：
 
-```bash
-python3 -c "
-import os
-from playwright.sync_api import sync_playwright
-with sync_playwright() as p:
-    ctx = p.chromium.launch_persistent_context(
-        user_data_dir=os.path.expanduser(os.environ.get('CHROME_PROFILE', '~/.chrome-debug-profile')),
-        headless=False,
-        proxy={'server': os.environ.get('PROXY_SERVER', 'http://127.0.0.1:7897')},
-        args=['--no-sandbox','--disable-gpu']
-    )
-    ctx.pages[0].goto('https://gemini.google.com/u/0/app')
-    input('登录完成后按 Enter 关闭...')
-    ctx.close()
-"
-```
+**Gemini / ChatGPT / Claude / Qwen / Kimi / MiniMax / MiMo / DeepSeek**
+
+登录态保存在 `CHROME_PROFILE`，只需登录一次。
 </details>
 
 <details>
