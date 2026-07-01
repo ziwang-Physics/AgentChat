@@ -35,10 +35,10 @@
 **三层设计（零代码重复）**：
 
 ```
-AgentChat-FreeSubAgent  (~350 行，编排层)
+AgentChat-FreeSubAgent  (编排层)
     │  child_process.spawn()
     ▼
-AgentChat-WebExtended   (~1700 行，Provider 唯一实现)
+AgentChat-WebExtended   (Provider 唯一实现)
     │  playwright-core → Chrome CDP :9222
     ▼
 Chrome → Gemini / ChatGPT / Claude / Qwen / Kimi / MiniMax / MiMo / DeepSeek
