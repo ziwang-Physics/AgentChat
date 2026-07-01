@@ -71,9 +71,11 @@ process.on("SIGINT", () => { cleanupAllLocks(); process.exit(); });
 process.on("SIGTERM", () => { cleanupAllLocks(); process.exit(); });
 
 const WEBEXT = path.resolve(__dirname, "..", "AgentChat-WebExtended", "index.js");
-const FALLBACK_CHAIN = ["gemini", "chatgpt", "qwen", "kimi", "mimo", "minimax", "claude", "deepseek"];
+// Single source of truth: derived from WebExtended's PROVIDER_CHAIN order.
+// No manual sync needed — if WebExtended reorders, FreeSubAgent follows automatically.
+const { PROVIDER_CHAIN } = require('../AgentChat-WebExtended/index.js');
+const FALLBACK_CHAIN = PROVIDER_CHAIN.map(p => p.key);
 
-// Follow WebExtended's native chain order exactly — no priority reordering.
 function buildFallbackChain(primaryKey, skipList = []) {
     const skipSet = new Set([primaryKey, ...skipList]);
     const rest = FALLBACK_CHAIN.filter(k => !skipSet.has(k));

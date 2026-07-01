@@ -2,7 +2,7 @@
 
 > **最后更新**: 2026-07-02
 > **核心原则**: Claude Code 拆任务 + 写 prompt → Node.js 并发派发 → 质量门 + 证据仲裁
-> **Provider 层**: 单一源 — `AgentChat-WebExtended` (6 providers, 零代码重复)
+> **Provider 层**: 单一源 — `AgentChat-WebExtended` (8 providers, 零代码重复)
 > **v3 重构**: 删除 ~400 行重复 provider 代码，改为 subprocess 调用 AgentChat-WebExtended
 > **🛡 安全策略 (2026-07-02)**: 永远不关闭用户 Chrome。`browser.close()` 已彻底移除，`--keep-tabs` 硬编码为 true。
 
@@ -13,11 +13,11 @@ AgentChat-FreeSubAgent (本 skill, ~350 行)
     │
     │  child_process.spawn('node', ['../AgentChat-WebExtended/index.js', '--from=X', prompt])
     ▼
-AgentChat-WebExtended (Provider 唯一实现, 6 providers, 已验证 DOM 选择器)
+AgentChat-WebExtended (Provider 唯一实现, 8 providers, 已验证 DOM 选择器)
     │
     │  playwright-core → Chrome CDP port 9222
     ▼
-Chrome → Gemini / ChatGPT / Claude / Qwen / Kimi / MiniMax
+Chrome → Gemini / ChatGPT / Claude / Qwen / Kimi / MiniMax / MiMo / DeepSeek
 ```
 
 **关键设计**: FreeSubAgent 不包含任何 provider 实现代码。所有 AI 调用通过 subprocess 委托给 AgentChat-WebExtended。
@@ -129,7 +129,7 @@ node skills/AgentChat-FreeSubAgent/index.js --timeout=900 --keep-tabs "$(cat /tm
 任意 provider 不可用时自动降级（由 AgentChat-WebExtended 处理）：
 
 ```
-Gemini → ChatGPT → Claude → Qwen → Kimi → MiMo → MiniMax → DeepSeek
+Gemini → ChatGPT → Claude → Qwen → Kimi → MiniMax → MiMo → DeepSeek
 ```
 
 FreeSubAgent 层降级链严格遵循 WebExtended 原生顺序，不做优先级重排
