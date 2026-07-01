@@ -42,6 +42,38 @@ const INSERT_TEXT_LIMIT = 50_000; // ~50KB safe CDP WebSocket payload
 const SKILL_DIR = path.dirname(__filename); // skill directory for telemetry
 
 // ══════════════════════════════════════════════════════════════════════════════
+// CIRCUIT BREAKER — skip repeatedly-failing providers to avoid timeout waste
+// ══════════════════════════════════════════════════════════════════════════════
+
+const CIRCUIT_BREAKER_THRESHOLD = 3;   // consecutive failures before breaking
+const CIRCUIT_COOLDOWN_MS = 300_000;   // 5 min cooldown before retry
+const circuitState = {};               // { gemini: {failures, brokenUntil}, ... }
+
+function circuitIsBroken(key) {
+    const s = circuitState[key];
+    if (!s || s.failures < CIRCUIT_BREAKER_THRESHOLD) return false;
+    if (Date.now() > s.brokenUntil) {
+        // Cooldown expired — allow one probe request
+        delete circuitState[key];
+        return false;
+    }
+    return true;
+}
+
+function circuitRecordFailure(key) {
+    if (!circuitState[key]) circuitState[key] = { failures: 0, brokenUntil: 0 };
+    const s = circuitState[key];
+    s.failures++;
+    if (s.failures >= CIRCUIT_BREAKER_THRESHOLD) {
+        s.brokenUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
+    }
+}
+
+function circuitRecordSuccess(key) {
+    delete circuitState[key]; // reset on any success
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // PROVIDER CHAIN (priority order — first available wins)
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -1541,6 +1573,16 @@ async function tryAllProviders(browser, prompt, options = {}) {
 
         const perProvTimeout = Math.min(providerTimeout, remainingTotal);
 
+        // Circuit breaker: skip providers that have repeatedly failed
+        if (circuitIsBroken(provider.key)) {
+            const s = circuitState[provider.key];
+            const remainingCooldown = Math.ceil((s.brokenUntil - Date.now()) / 1000);
+            log(`\n▶ Provider ${i + 1}/${PROVIDER_CHAIN.length}: ${provider.name} — CIRCUIT BROKEN (${remainingCooldown}s cooldown remaining)`);
+            fallbackReasons[provider.key] = 'circuit_broken';
+            triedProviders.push(provider.key);
+            continue;
+        }
+
         log(`\n▶ Provider ${i + 1}/${PROVIDER_CHAIN.length}: ${provider.name} (${Math.round(perProvTimeout / 1000)}s budget)`);
         startTimer(`${provider.name}`);
 
@@ -1591,12 +1633,14 @@ async function tryAllProviders(browser, prompt, options = {}) {
 
         triedProviders.push(provider.key);
         if (!result.success) {
+            circuitRecordFailure(provider.key);
             fallbackReasons[provider.key] = `ERR_${result.reason.toUpperCase()}`;
             log(`✗ ${provider.name}: FAILED — ${result.reason} → falling to next provider`);
             continue;
         }
 
         // SUCCESS!
+        circuitRecordSuccess(provider.key);
         telemetry.provider_used = provider.name;
         telemetry.providers_tried = triedProviders;
         telemetry.fallback_reasons = fallbackReasons;
@@ -1671,7 +1715,7 @@ async function doctorCheck() {
         process.exit(0);
     } catch (e) {
         log('Chrome CDP is NOT reachable on ' + CDP_URL);
-        log('Run: bash ~/start-chrome-debug.sh');
+        log('Run: bash scripts/start-chrome-debug.sh');
         process.exit(1);
     }
 }
