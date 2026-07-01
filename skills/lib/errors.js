@@ -19,8 +19,6 @@ const STAGES = Object.freeze({
     QUOTA_CHECK:    'quota_check',
     PRE_EDITOR:     'pre_editor',      // e.g., Gemini Pro Extended activation
     EDITOR_FIND:    'editor_find',
-    EDITOR_TYPE:    'editor_type',
-    SEND:           'send',
     WAIT_RESPONSE:  'wait_response',
     EXTRACT:        'extract',
 });
