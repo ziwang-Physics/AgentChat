@@ -9,7 +9,7 @@
 [![Zero API Cost](https://img.shields.io/badge/Cost-$0-success.svg)](#-why-agentchat)
 [![Claude Code Ready](https://img.shields.io/badge/Claude_Code-Skill_Ready-8A2BE2.svg)](#-claude-code-integration)
 
-> **用 Claude Code 写代码，让 Gemini、ChatGPT、Kimi 等免费网页 AI 帮你并行执行不同子任务——不花一分钱。AgentChat 就是这个桥梁。**
+> **Claude Code 接低价/免费API只做决策分工，Gemini、ChatGPT、Claude 等免费网页 AI 执行不同子任务——不花一分钱。**
 
 [English](#) | [中文](#)
 
@@ -26,9 +26,7 @@
 • WebExtended = 单一 AI 桥梁：8 提供商自动降级 + 熔断器，一个入口搞定所有模型 🔌
 - 🚗 串行模式：只用你最喜欢的一个 AI
 
----
 ## 为什么用这个？
----
 
 ## 💡 
 
