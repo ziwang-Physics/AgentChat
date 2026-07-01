@@ -1,7 +1,5 @@
 # AgentChat — Free Web-SubAgent Workflow
 
-> Chrome CDP + Playwright 驱动的 Web AI 自动化交互系统
-
 > Claude Code 接低价/免费API做决策分工，
 > Gemini/ChatGPT/Claude 等免费网页 AI 执行子任务。
 
@@ -16,15 +14,11 @@
 ## 什么是 Free Web-SubAgent ？
 
 - 一套零成本的 Claude Code 技能套件，通过接管本地 Chrome 浏览器桥接 8 个免费网页 AI
-- 支持串行降级（单模型自动切换）与并行编排（4角色分工+证据仲裁
+- 支持串行降级（单模型自动切换）与并行编排（4角色分工+证据仲裁)
 - 免费额度用尽后自动切换到下一个免费模型
 - PID 锁防冲突——三层架构零代码冗余
-
-  FreeSubAgent = 并行编排器：多角色分工（研究/推理/检索/创作）+ 证据仲裁，拒绝重复回答 🚛
--  并行模式：多个 AI 同时执行不同子任务
-
-  WebExtended = 单一 AI 桥梁：8 提供商自动降级 + 熔断器，一个入口搞定所有模型 🔌
--  串行模式：只用你最喜欢的一个 AI
+- 并行模式：多个 AI 同时执行不同子任务
+- 串行模式：只用你最喜欢的一个 AI
 
 ## 为什么用这个？
 
