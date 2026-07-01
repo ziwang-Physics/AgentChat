@@ -1,25 +1,31 @@
 #!/usr/bin/env python3
 """
-Chrome CDP Daemon — uses Playwright to launch Chromium, navigate to Gemini,
+Chrome CDP Daemon — uses Playwright to launch system Chrome with persistent profile,
 and keep the browser alive with CDP port for external interaction.
 
 Features:
-  - Auto-detect Chromium binary (Playwright → system Chrome, cross-platform)
-  - Heartbeat monitor: detects crashes, auto-restarts browser
-  - Secure PID file: ~/.local/state/agentchat/ (not world-writable /tmp)
+  - Persistent profile: login sessions survive daemon restarts
+  - Profile & binary validation: fail-fast on misconfiguration
+  - Auto-restart on crash (max 3 consecutive, then exit)
+  - HEADLESS mode controllable via env var
+  - Google CAPTCHA prevention flag (AutomationControlled disabled)
   - CDP bound to 127.0.0.1 only (no external exposure)
 
-Environment variables (all optional, with defaults):
+Prerequisites:
+  - System Chrome/Chromium installed (NOT Playwright's bundled Chromium)
+  - Profile directory with valid login Cookies (≥50KB)
+  - Both configured via project .env file
+
+Environment variables (set in .env, loaded by shell wrapper):
   CDP_PORT          CDP debug port (default: 9222)
   PROXY_SERVER      HTTP/SOCKS5 proxy (default: http://127.0.0.1:7897)
-  GEMINI_URL        Target Gemini URL
-  CHROMIUM_PATH     Override auto-detected Chromium binary
+  CHROMIUM_PATH     Path to system Chrome binary (REQUIRED — no auto-detection)
   CHROME_PROFILE    Persistent profile dir (default: ~/.chrome-debug-profile)
+  HEADLESS          "1"/"true"/"yes" for headless, otherwise visible GUI (default: false)
 
 Usage:
-  python3 start-chrome-debug.py
-
-Managed by start-chrome-debug.sh
+  # Managed by start-chrome-debug.sh — don't run directly
+  bash scripts/start-chrome-debug.sh
 """
 
 import os, sys, time, signal, logging
@@ -33,72 +39,110 @@ logging.basicConfig(
 log = logging.getLogger("chrome-daemon")
 
 
-def auto_detect_chromium():
-    """Auto-detect Playwright's Chromium or use CHROMIUM_PATH env var."""
-    custom = os.environ.get("CHROMIUM_PATH", "")
-    if custom and os.path.isfile(custom):
-        return custom
-
-    candidates = []
-    home = os.path.expanduser("~")
-
-    # Playwright's managed Chromium
-    cache = os.path.join(home, ".cache", "ms-playwright")
-    if os.path.isdir(cache):
-        for d in sorted(os.listdir(cache), reverse=True):
-            if d.startswith("chromium-") or d.startswith("chromium_headless"):
-                for root, _, files in os.walk(os.path.join(cache, d)):
-                    if "chrome" in files and "linux" in root:
-                        candidates.append(os.path.join(root, "chrome"))
-
-    # System Chrome — platform-aware
-    import platform
-    system = platform.system()
-    if system == "Darwin":
-        candidates.append("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
-    elif system == "Windows":
-        candidates.extend([
-            os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
-            os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
-            os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
-        ])
-    else:
-        for p in ["google-chrome-stable", "google-chrome", "chromium", "chromium-browser"]:
-            candidates.append(f"/usr/bin/{p}")
-
-    for c in candidates:
-        if os.path.isfile(c) and os.access(c, os.X_OK):
-            return c
-    return None
-
-
 # ---- Config from env vars ----
 CDP_PORT = int(os.environ.get("CDP_PORT", "9222"))
 PROXY = os.environ.get("PROXY_SERVER", "http://127.0.0.1:7897")
-GEMINI_URL = os.environ.get("GEMINI_URL", "https://gemini.google.com/u/0/app")
 PROFILE = os.path.expanduser(os.environ.get("CHROME_PROFILE", "~/.chrome-debug-profile"))
+HEADLESS = os.environ.get("HEADLESS", "false").lower() in ("1", "true", "yes")
+CHROMIUM = os.environ.get("CHROMIUM_PATH")
 
-# Secure PID file: user-private directory, not world-writable /tmp
+HEARTBEAT_INTERVAL = 30   # seconds between health checks
+MAX_CRASH_RESTARTS = 3    # max consecutive auto-restarts before giving up
+
+# Secure PID file: user-private directory
 STATE_DIR = os.path.expanduser("~/.local/state/agentchat")
 PID_FILE = os.path.join(STATE_DIR, "chrome-debug.pid")
 
-CHROMIUM = os.environ.get("CHROMIUM_PATH")
-HEARTBEAT_INTERVAL = 30  # seconds between health checks
-MAX_CRASH_RESTARTS = 3   # max consecutive auto-restarts before giving up
-
 from playwright.sync_api import sync_playwright
 
-browser = None
+context = None
 crash_count = 0
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Validation — fail-fast on misconfiguration
+# ═══════════════════════════════════════════════════════════════════
+
+def _is_playwright_chromium(path: str) -> bool:
+    """Detect if the Chrome binary is Playwright's managed Chromium.
+    Playwright installs under ~/.cache/ms-playwright/ — this does NOT
+    have the user's login sessions and must be rejected."""
+    return any(m in path for m in [".cache/ms-playwright", "ms-playwright"])
+
+
+def validate_chrome_binary(chromium_path: str | None) -> str:
+    """Validate the Chrome binary: must exist, be executable, and NOT be
+    Playwright Chromium. Returns the validated path or hard-exits."""
+    if not chromium_path:
+        log.error("CHROMIUM_PATH is not set.")
+        log.error("  Set it in .env to your system Chrome path, e.g.:")
+        log.error("  CHROMIUM_PATH=/usr/bin/google-chrome-stable")
+        log.error("  Or on macOS: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        sys.exit(1)
+
+    if not os.path.isfile(chromium_path):
+        log.error(f"Chrome binary not found: {chromium_path}")
+        log.error("  Set CHROMIUM_PATH in .env to a valid Chrome executable.")
+        sys.exit(1)
+
+    if not os.access(chromium_path, os.X_OK):
+        log.error(f"Chrome binary not executable: {chromium_path}")
+        sys.exit(1)
+
+    if _is_playwright_chromium(chromium_path):
+        log.error("REFUSING to launch Playwright Chromium!")
+        log.error(f"  Detected: {chromium_path}")
+        log.error("  Playwright Chromium has NO login state.")
+        log.error("  Set CHROMIUM_PATH in .env to your SYSTEM Chrome, e.g.:")
+        log.error("  CHROMIUM_PATH=/usr/bin/google-chrome-stable")
+        sys.exit(1)
+
+    return chromium_path
+
+
+def validate_profile(profile_dir: str, min_cookies_bytes: int = 50_000) -> str:
+    """Validate the profile directory has a reasonable Cookies file."""
+    profile_dir = os.path.expanduser(profile_dir)
+
+    if not os.path.isdir(profile_dir):
+        log.error(f"Profile directory does not exist: {profile_dir}")
+        log.error("  Create it or fix CHROME_PROFILE in .env")
+        sys.exit(1)
+
+    # Check Default/ subdirectory (standard Chromium layout)
+    cookies_path = os.path.join(profile_dir, "Default", "Cookies")
+    if not os.path.isfile(cookies_path):
+        cookies_path = os.path.join(profile_dir, "Cookies")
+    if not os.path.isfile(cookies_path):
+        log.warning("No Cookies file found — this may be a fresh profile.")
+        log.warning(f"  Profile: {profile_dir}")
+        log.warning("  Continuing, but AI service logins may not be available.")
+        return profile_dir
+
+    cookies_size = os.path.getsize(cookies_path)
+    if cookies_size < min_cookies_bytes:
+        log.error(f"Cookies file too small: {cookies_size} bytes (need ≥{min_cookies_bytes})")
+        log.error(f"  Path: {cookies_path}")
+        log.error("  This profile has NO login sessions (empty Cookies DB).")
+        log.error("  Fix CHROME_PROFILE in .env to point to the profile with your logins.")
+        log.error("  (Hint: ~/.chrome-debug-profile usually has the login state)")
+        sys.exit(1)
+
+    log.info(f"Profile validated: {cookies_size}B Cookies at {cookies_path}")
+    return profile_dir
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Daemon lifecycle
+# ═══════════════════════════════════════════════════════════════════
+
 def cleanup(sig=None, frame=None):
-    global browser
+    global context
     log.info("Shutting down...")
-    if browser:
+    if context:
         try:
-            browser.close()
-        except:
+            context.close()
+        except Exception:
             pass
     if os.path.exists(PID_FILE):
         os.remove(PID_FILE)
@@ -107,7 +151,6 @@ def cleanup(sig=None, frame=None):
 
 def write_pid():
     os.makedirs(STATE_DIR, exist_ok=True)
-    # Set restrictive permissions on state dir
     os.chmod(STATE_DIR, 0o700)
     with open(PID_FILE, "w") as f:
         f.write(str(os.getpid()))
@@ -115,92 +158,114 @@ def write_pid():
 
 
 def launch_browser(p):
-    """Launch Chromium with verified flags. Returns (browser, page)."""
+    """Launch system Chrome with persistent profile. Returns (context, page)."""
     global crash_count
-    browser = p.chromium.launch(
-        headless=True,
-        executable_path=CHROMIUM,
-        proxy={"server": PROXY},
-        args=[
-            "--no-sandbox",
-            "--disable-gpu",
-            "--ignore-certificate-errors",
-            f"--remote-debugging-port={CDP_PORT}",
-            "--remote-debugging-address=127.0.0.1",  # bind localhost only
-            "--remote-allow-origins=*",  # needed for Playwright connect_over_cdp
-            "--disable-dev-shm-usage",
-            "--disable-breakpad",
-            "--disable-component-update",
-            "--disable-default-apps",
-            "--disable-sync",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-background-networking",
-            "--disable-client-side-phishing-detection",
-            "--disable-extensions",
-            "--disable-hang-monitor",
-            "--disable-popup-blocking",
-            "--disable-renderer-backgrounding",
-            "--disable-field-trial-config",
-            "--disable-features=HttpsUpgrades,OptimizationHints,Translate",
-            "--noerrdialogs",
-            "--no-startup-window",
-            "--hide-scrollbars",
-            "--mute-audio",
+
+    args = [
+        "--no-sandbox",
+        "--disable-gpu",
+        "--ignore-certificate-errors",
+        f"--remote-debugging-port={CDP_PORT}",
+        "--remote-debugging-address=127.0.0.1",
+        "--remote-allow-origins=*",
+        "--disable-dev-shm-usage",
+        "--disable-breakpad",
+        "--disable-component-update",
+        "--disable-default-apps",
+        "--disable-sync",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-background-networking",
+        "--disable-client-side-phishing-detection",
+        "--disable-extensions",
+        "--disable-hang-monitor",
+        "--disable-popup-blocking",
+        "--disable-renderer-backgrounding",
+        "--disable-field-trial-config",
+        # CRITICAL: prevent Google from detecting automation → CAPTCHA
+        "--disable-blink-features=AutomationControlled",
+        "--disable-features=HttpsUpgrades,OptimizationHints,Translate",
+        "--noerrdialogs",
+        "--hide-scrollbars",
+        "--mute-audio",
+        "--proxy-bypass-list=<-loopback>",
+    ]
+
+    if HEADLESS:
+        args.extend([
             "--ozone-platform=headless",
             "--use-angle=swiftshader-webgl",
-            "--proxy-bypass-list=<-loopback>",
-        ],
+        ])
+
+    log.info("Launching in %s mode", "HEADLESS" if HEADLESS else "VISIBLE (GUI)")
+
+    # launch_persistent_context preserves login state across restarts
+    context = p.chromium.launch_persistent_context(
+        user_data_dir=PROFILE,
+        headless=HEADLESS,
+        executable_path=CHROMIUM,
+        proxy={"server": PROXY},
+        args=args,
+        viewport=None,
     )
 
-    page = browser.new_page()
+    # Start with blank page — pipeline skills manage their own tabs
+    page = context.pages[0] if context.pages else context.new_page()
     try:
-        resp = page.goto(GEMINI_URL, timeout=30000, wait_until="domcontentloaded")
-        log.info(f"Gemini loaded: status={resp.status} title={page.title()}")
-    except Exception as e:
-        log.warning(f"Gemini navigation: {e}")
+        page.goto("about:blank", timeout=5000)
+    except Exception:
+        pass
+    log.info(f"Chrome ready — CDP http://127.0.0.1:{CDP_PORT}")
 
-    return browser, page
+    return context, page
 
 
 def heartbeat(page):
-    """Check browser health. Returns True if healthy, False if needs restart."""
-    global browser, crash_count
+    """Check browser health. Returns True if healthy."""
+    global context, crash_count
     try:
-        if not browser or not browser.is_connected():
-            log.error("Browser disconnected!")
+        if not context:
+            log.error("Browser context is None!")
             return False
 
-        # Check page is still alive and not about:blank
+        try:
+            if not context.browser or not context.browser.is_connected():
+                log.error("Browser disconnected!")
+                return False
+        except Exception:
+            log.error("Cannot access browser from context!")
+            return False
+
         current_url = page.evaluate("window.location.href")
         if current_url == "about:blank":
-            log.warning("Page reverted to about:blank — may need re-navigation")
-            try:
-                page.goto(GEMINI_URL, timeout=30000, wait_until="domcontentloaded")
-                log.info("Re-navigated to Gemini")
-            except Exception as e:
-                log.error(f"Re-navigation failed: {e}")
-                return False
-
-        # Check page didn't crash
+            log.warning("Page reverted to about:blank — keeping alive")
         if page.evaluate("document.readyState") == "complete":
             return True
 
         return True
     except Exception as e:
-        log.error(f"Heartbeat check failed: {e}")
+        log.error(f"Heartbeat failed: {e}")
         return False
 
 
 def main():
-    global browser, CHROMIUM
+    global context, CHROMIUM, crash_count, PROFILE
 
+    # Validate before launch — fail-fast, clear diagnostics
     if not CHROMIUM:
-        CHROMIUM = auto_detect_chromium()
+        CHROMIUM = os.environ.get("CHROMIUM_PATH")
     if not CHROMIUM:
-        log.error("Cannot find Chromium. Run: python3 -m playwright install chromium")
+        log.error("CHROMIUM_PATH not set.")
+        log.error("  Set it in .env, e.g.:")
+        log.error("  CHROMIUM_PATH=/usr/bin/google-chrome-stable")
         sys.exit(1)
 
+    CHROMIUM = validate_chrome_binary(CHROMIUM)
+    PROFILE = validate_profile(PROFILE)
+    log.info(f"Chrome: {CHROMIUM}")
+    log.info(f"Profile: {PROFILE}")
+
+    # Clean stale lock files from previous crashes
     os.makedirs(PROFILE, exist_ok=True)
     for lock in ["SingletonLock", "SingletonSocket", "SingletonCookie"]:
         path = os.path.join(PROFILE, lock)
@@ -212,8 +277,8 @@ def main():
     signal.signal(signal.SIGINT, cleanup)
 
     with sync_playwright() as p:
-        browser, page = launch_browser(p)
-        log.info(f"Daemon ready — CDP http://127.0.0.1:{CDP_PORT} PID={os.getpid()}")
+        context, page = launch_browser(p)
+        log.info(f"Daemon ready — PID={os.getpid()}")
 
         while True:
             time.sleep(HEARTBEAT_INTERVAL)
@@ -227,15 +292,15 @@ def main():
                     cleanup()
                     sys.exit(1)
 
-                log.info("Attempting browser restart...")
+                log.info("Attempting restart...")
                 try:
-                    browser.close()
-                except:
+                    context.close()
+                except Exception:
                     pass
                 try:
-                    browser, page = launch_browser(p)
-                    crash_count = 0  # reset on successful restart
-                    log.info("Browser restarted successfully")
+                    context, page = launch_browser(p)
+                    crash_count = 0
+                    log.info("Restarted successfully")
                 except Exception as e:
                     log.error(f"Restart failed: {e}")
 

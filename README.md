@@ -104,12 +104,13 @@ Chrome 的登录状态保存在 `CHROME_PROFILE` 目录（默认 `~/.chrome-debu
 ```bash
 # 启动带窗口的 Chrome（正常显示登录页面）
 python3 -c "
+import os
 from playwright.sync_api import sync_playwright
 with sync_playwright() as p:
     ctx = p.chromium.launch_persistent_context(
-        user_data_dir='$HOME/.chrome-debug-profile',
+        user_data_dir=os.path.expanduser(os.environ.get('CHROME_PROFILE', '~/.chrome-debug-profile')),
         headless=False,
-        proxy={'server': 'http://127.0.0.1:7897'},
+        proxy={'server': os.environ.get('PROXY_SERVER', 'http://127.0.0.1:7897')},
         args=['--no-sandbox','--disable-gpu']
     )
     ctx.pages[0].goto('https://gemini.google.com/u/0/app')
