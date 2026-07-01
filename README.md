@@ -1,7 +1,9 @@
 # AgentChat — Free Web-SubAgent Workflow
 
 > Chrome CDP + Playwright 驱动的 Web AI 自动化交互系统
-  Claude Code 接低价/免费API做决策分工，Gemini/ChatGPT/Claude 等免费网页 AI 执行子任务。
+>
+> Claude Code 接低价/免费API做决策分工，
+> Gemini/ChatGPT/Claude 等免费网页 AI 执行子任务。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
