@@ -1583,7 +1583,7 @@ async function doctorCheck() {
         process.exit(0);
     } catch (e) {
         log('Chrome CDP is NOT reachable on ' + CDP_URL);
-        log('Run: bash ~/start-chrome-debug.sh');
+        log('Run: bash scripts/start-chrome-debug.sh');
         process.exit(1);
     }
 }
@@ -1649,7 +1649,7 @@ async function main() {
         browser = await connectWithRetry(CDP_URL);
     } catch (err) {
         log(`FATAL: Cannot connect to Chrome CDP — ${err.message}`);
-        log('Ensure Chrome debug is running: bash ~/start-chrome-debug.sh');
+        log('Ensure Chrome debug is running: bash scripts/start-chrome-debug.sh');
         recordTelemetry(1);
         process.exit(1);
     }

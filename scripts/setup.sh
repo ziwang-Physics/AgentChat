@@ -63,9 +63,30 @@ check "websocket-client" \
     "python3 -c 'import websocket'" \
     "pip3 install websocket-client"
 
-check "playwright-core (npm)" \
-    "[ -d /tmp/node_modules/playwright-core ] || [ -d node_modules/playwright-core ]" \
-    "cd /tmp && npm install playwright-core"
+echo ""
+
+# --- Node.js ---
+echo "📦 Node.js:"
+check "node >= 18" \
+    "node -e 'process.exit(parseInt(process.version.slice(1)) >= 18 ? 0 : 1)'" \
+    "安装 Node.js 18+: https://nodejs.org/"
+
+check "npm" \
+    "which npm" \
+    "安装 Node.js 后自动包含 npm"
+
+echo ""
+
+# --- Skill npm 依赖 ---
+echo "📦 Skill npm 依赖:"
+for skill_dir in skills/gemini-web-extended-thinking skills/AgentChat-WebExtended; do
+    if [ -d "$skill_dir" ]; then
+        skill_name=$(basename "$skill_dir")
+        check "$skill_name node_modules" \
+            "[ -d '$skill_dir/node_modules/playwright-core' ]" \
+            "cd $skill_dir && npm install"
+    fi
+done
 
 echo ""
 
@@ -111,6 +132,9 @@ if [ $fail_count -gt 0 ]; then
 fi
 
 echo ""
-echo "✅ 环境就绪! 运行以下命令连接 Gemini:"
+echo "✅ 环境就绪! 运行以下命令启动:"
 echo "   bash scripts/start-chrome-debug.sh"
 echo "   bash scripts/connect-gemini.sh"
+echo ""
+echo "   # 或直接使用 AI skills:"
+echo "   node skills/AgentChat-WebExtended/index.js '你的问题'"
