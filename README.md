@@ -57,9 +57,8 @@ Chrome → Gemini / ChatGPT / Claude / Qwen / Kimi / MiniMax / MiMo / DeepSeek
 ```bash
 git clone https://github.com/ziwang-Physics/AgentChat.git && cd AgentChat
 
-# Python 依赖（Chrome daemon）
+# Python 依赖（Chrome daemon — 使用系统 Chrome，不需要 Playwright Chromium）
 pip3 install playwright websocket-client
-python3 -m playwright install chromium
 
 # Node.js 依赖（AI bridge — 根目录统一管理 + WebExtended skill）
 npm install
@@ -195,8 +194,7 @@ AgentChat/
 |------|------|
 | **Node.js 18+** | [nodejs.org](https://nodejs.org/) |
 | Python 3.8+ | 系统自带 |
-| Playwright (Python) | `pip3 install playwright` |
-| Playwright Chromium | `python3 -m playwright install chromium` |
+| Playwright (Python) | `pip3 install playwright`（daemon 用其 API 启动系统 Chrome） |
 | websocket-client | `pip3 install websocket-client` |
 | playwright-core (npm) | 根目录 `npm install`（共享 lib 依赖） |
 
@@ -207,7 +205,7 @@ AgentChat/
 | `CDP_PORT` | `9222` | Chrome DevTools Protocol 端口 |
 | `PROXY_SERVER` | `http://127.0.0.1:7897` | 代理地址（中国大陆**必须**） |
 | `CHROME_PROFILE` | `~/.chrome-debug-profile` | Chrome 持久化 Profile |
-| `CHROMIUM_PATH` | 自动检测 | 手动指定 Chrome 路径 |
+| `CHROMIUM_PATH` | 无（必须手动设置） | 系统 Chrome 可执行文件路径 |
 | `LOG_FILE` | `/tmp/chrome-debug.log` | 诊断日志 |
 
 ### 🔐 AI 网页登录

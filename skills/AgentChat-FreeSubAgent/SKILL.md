@@ -83,25 +83,21 @@ Chrome → Gemini / ChatGPT / Claude / Qwen / Kimi / MiniMax / MiMo / DeepSeek
 
 ### Step 3: 并发调度
 
-**默认命令**（4 workers 并发，完成后自动关闭标签页）：
+**默认命令**（4 workers 并发，标签页始终保留）：
 
 ```bash
 node skills/AgentChat-FreeSubAgent/index.js --timeout=900 '<DAG_JSON_STRING>'
 ```
 
-**保留标签页**（AI 回答后保留浏览器标签页，方便查看原始对话）：
+`--keep-tabs` 已硬编码为始终开启（安全策略：永不关闭用户 Chrome），可省略该参数。
 
-```bash
-node skills/AgentChat-FreeSubAgent/index.js --timeout=900 --keep-tabs '<DAG_JSON_STRING>'
-```
-
-或写入临时文件：
+也可写入临时文件：
 
 ```bash
 cat > /tmp/ai_plan.json << 'ENDJSON'
 {...JSON计划...}
 ENDJSON
-node skills/AgentChat-FreeSubAgent/index.js --timeout=900 --keep-tabs "$(cat /tmp/ai_plan.json)"
+node skills/AgentChat-FreeSubAgent/index.js --timeout=900 "$(cat /tmp/ai_plan.json)"
 ```
 
 ### Step 4: 解读结果 & 呈现给用户
