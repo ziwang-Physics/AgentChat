@@ -37,6 +37,20 @@ const REASONS = Object.freeze({
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
+// Adapter error codes — providers throw `Object.assign(new Error(...), {code})`
+// (see lib/providers/adapters/gemini.js) to signal a specific failure kind from
+// inside a hook (preInputHook/postResponseHook). This maps those codes to the
+// REASONS the orchestrator understands. Without this map, any such .code was
+// silently discarded and every hook-thrown error collapsed into 'error'.
+// ══════════════════════════════════════════════════════════════════════════════
+
+const CODE_TO_REASON = Object.freeze({
+    ERR_SAFETY_REJECTED: REASONS.SAFETY,
+    ERR_MODEL_DEGRADED:  REASONS.ERROR,
+    ERR_WRONG_PAGE:      REASONS.ERROR,
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
 // ProviderError — captures full diagnostic context
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -53,20 +67,28 @@ class ProviderError extends Error {
         this.name = 'ProviderError';
         this.originalName = (cause && cause.name) || 'Error';
         this.originalStack = (cause && cause.stack) || '';
+        this.code = (cause && cause.code) || null;
         this.stage = opts.stage || 'unknown';
         this.provider = opts.provider || 'unknown';
     }
 
     /**
      * Convert to the { success: false, ... } result shape expected by tryAllProviders.
+     *
+     * Reason resolution order: explicit `reason` arg > CODE_TO_REASON[this.code] > 'error'.
+     * This lets adapter hooks (e.g. Gemini's postResponseHook throwing with
+     * `code: 'ERR_SAFETY_REJECTED'`) surface as reason='safety' without every call
+     * site having to know about every adapter's custom error codes.
      */
-    toResult(reason = REASONS.ERROR) {
+    toResult(reason) {
+        const resolvedReason = reason || CODE_TO_REASON[this.code] || REASONS.ERROR;
         return {
             success: false,
-            reason,
+            reason: resolvedReason,
             error_details: {
                 name: this.originalName,
                 message: this.message,
+                code: this.code,
                 stage: this.stage,
                 provider: this.provider,
                 // Truncated stack — full stack in telemetry
@@ -91,7 +113,7 @@ class ProviderError extends Error {
  */
 function classifyError(err, stage, provider, reason) {
     const pe = new ProviderError(err, { stage, provider });
-    return pe.toResult(reason || REASONS.ERROR);
+    return pe.toResult(reason);
 }
 
 module.exports = {
@@ -99,4 +121,5 @@ module.exports = {
     classifyError,
     STAGES,
     REASONS,
+    CODE_TO_REASON,
 };

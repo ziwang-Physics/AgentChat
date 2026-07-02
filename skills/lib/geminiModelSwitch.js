@@ -17,6 +17,23 @@
 
 const MAX_RETRIES = 2;
 
+// BUGFIX: the model-selector button query already matched both Traditional
+// ('模式挑選器') and Simplified ('模式选择器') Chinese labels, but the checks that
+// decide *whether Extended/Pro is already active* only ever tested the
+// Traditional forms ('延長' / '進階' / '標準'). On a Simplified Chinese UI those
+// checks never matched, so ensureProExtended() would loop until maxRetries and
+// report ERR_MODEL_DEGRADED even when Extended was already active. Centralize
+// both variants here so every call site stays in sync.
+function includesExtended(t) {
+    return t.includes('延長') || t.includes('延长') || t.includes('Extended');
+}
+function includesAdvanced(t) {
+    return t.includes('進階') || t.includes('进阶');
+}
+function includesStandard(t) {
+    return t.includes('標準') || t.includes('标准');
+}
+
 // Helper: wait for menu items to have actual text content (Angular CDK overlay fix)
 async function waitForMenuItemsFilled(page, timeoutMs = 5000) {
     const start = Date.now();
@@ -69,7 +86,7 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
         });
         log(`gemini attempt ${attempt}: current mode = "${currentAria}"`);
 
-        if (currentAria.includes('延長') || currentAria.includes('Extended')) {
+        if (includesExtended(currentAria)) {
             log('gemini: Pro Extended Thinking already active');
             return true;
         }
@@ -107,7 +124,7 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
                     const items = document.querySelectorAll('gem-menu-item, [role="menuitem"]');
                     for (let i = 0; i < items.length; i++) {
                         const t = items[i].innerText || '';
-                        if (t.includes('Pro') && t.includes('進階') && !t.includes('Flash')) return i;
+                        if (t.includes('Pro') && (t.includes('進階') || t.includes('进阶')) && !t.includes('Flash')) return i;
                     }
                     return -1;
                 });
@@ -137,7 +154,7 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
             const items = document.querySelectorAll('gem-menu-item, [role="menuitem"]');
             for (let i = 0; i < items.length; i++) {
                 const t = items[i].innerText || '';
-                if ((t.includes('延長') || t.includes('Extended')) &&
+                if ((t.includes('延長') || t.includes('延长') || t.includes('Extended')) &&
                     !t.includes('思考') && !t.includes('Thought') &&
                     items[i].offsetParent !== null) {
                     return i;
@@ -168,8 +185,8 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
                     const items = document.querySelectorAll('gem-menu-item, [role="menuitem"]');
                     for (let i = 0; i < items.length; i++) {
                         const t = items[i].innerText || '';
-                        if ((t.includes('延長') || t.includes('Extended')) &&
-                            !t.includes('標準') && items[i].offsetParent !== null) return i;
+                        if ((t.includes('延長') || t.includes('延长') || t.includes('Extended')) &&
+                            !t.includes('標準') && !t.includes('标准') && items[i].offsetParent !== null) return i;
                     }
                     return -1;
                 });
@@ -203,7 +220,7 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
             );
             if (!btn) return false;
             const aria = btn.getAttribute('aria-label') || btn.textContent || '';
-            return aria.includes('延長') || aria.includes('Extended');
+            return aria.includes('延長') || aria.includes('延长') || aria.includes('Extended');
         }, null, { timeout: 5000 }).catch(() => false);
 
         if (isActive) {

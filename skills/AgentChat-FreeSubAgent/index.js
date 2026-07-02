@@ -663,8 +663,13 @@ async function main() {
       i++;
     } else if (args[i] === "--smoke") smoke = true;
     else if (args[i] === "--doctor") doctor = true;
+    // --keep-tabs is always-on (no longer configurable — we never close user's Chrome).
+    // It must still be recognized and swallowed here, otherwise it falls into the
+    // `else` branch below and gets concatenated into `prompt`, corrupting the
+    // pre-decomposed JSON plan (see SKILL.md's `--keep-tabs '<DAG_JSON_STRING>'`
+    // invocation) and breaking tryParsePreDecomposedPlan()'s JSON.parse.
+    else if (args[i] === "--keep-tabs") { /* no-op — always on */ }
     else prompt += args[i] + " ";
-  // --keep-tabs is now always-on (no longer configurable — we never close user's Chrome)
   }
   prompt = prompt.trim();
   if (!prompt && !smoke && !doctor && !process.stdin.isTTY) {

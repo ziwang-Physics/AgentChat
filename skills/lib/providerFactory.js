@@ -283,46 +283,67 @@ async function waitForCompletion(page, config, startTime, timeoutMs) {
     const tick = onProgress || (() => {});
 
     // Phase 1: wait for stop button to appear then disappear
+    //
+    // BUGFIX (was: always broke after the first selector regardless of match —
+    // `.catch(() => {})` on the awaited waitFor() swallowed timeouts *before* the
+    // outer try/catch ever saw a rejection, so `break` ran unconditionally on
+    // iteration 1). Fix: probe each selector for a short window first; only the
+    // selector that actually matches gets the full detection sequence.
     const stopMode = config.stopWaitMode || 'hidden';
     const stopExt = config.stopBtnExtensionMs || 0;
+    const STOP_PROBE_TIMEOUT_MS = 3000;
     if (stopSelectors && stopSelectors.length > 0) {
         for (const sel of stopSelectors) {
-            try {
-                const stopBtn = page.locator(sel).first();
-                if (stopMode === 'detached') {
-                    // Qwen: stop button is removed from DOM when done, not just hidden
-                    await stopBtn.waitFor({ state: 'detached', timeout: Math.min(timeoutMs, 300000) }).catch(() => {});
-                } else {
-                    await stopBtn.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
-                    const remaining = Math.max(30000, timeoutMs - (Date.now() - startTime));
-                    await stopBtn.waitFor({ state: 'hidden', timeout: remaining }).catch(() => {});
+            const stopBtn = page.locator(sel).first();
 
-                    // Extension for long-generation models (e.g. Pro Extended Thinking)
-                    if (stopExt > 0) {
-                        const stillWorking = await stopBtn.isVisible().catch(() => false);
-                        if (stillWorking) {
-                            const extra = Math.min(stopExt, Math.max(20000, timeoutMs - (Date.now() - startTime) - 5000));
-                            if (extra > 20000) {
-                                await stopBtn.waitFor({ state: 'hidden', timeout: extra }).catch(() => {});
-                            }
+            // Quick probe: did *this* selector's stop button actually show up?
+            const appeared = await stopBtn
+                .waitFor({ state: 'visible', timeout: STOP_PROBE_TIMEOUT_MS })
+                .then(() => true)
+                .catch(() => false);
+            if (!appeared) continue; // this selector never matched — try the next one
+
+            if (stopMode === 'detached') {
+                // Qwen: stop button is removed from DOM when done, not just hidden
+                await stopBtn.waitFor({ state: 'detached', timeout: Math.min(timeoutMs, 300000) }).catch(() => {});
+            } else {
+                const remaining = Math.max(30000, timeoutMs - (Date.now() - startTime));
+                await stopBtn.waitFor({ state: 'hidden', timeout: remaining }).catch(() => {});
+
+                // Extension for long-generation models (e.g. Pro Extended Thinking)
+                if (stopExt > 0) {
+                    const stillWorking = await stopBtn.isVisible().catch(() => false);
+                    if (stillWorking) {
+                        const extra = Math.min(stopExt, Math.max(20000, timeoutMs - (Date.now() - startTime) - 5000));
+                        if (extra > 20000) {
+                            await stopBtn.waitFor({ state: 'hidden', timeout: extra }).catch(() => {});
                         }
                     }
                 }
-                break;
-            } catch (_) { /* next selector */ }
+            }
+            break; // handled the matching stop button — done with phase 1
         }
+        // If no selector ever matched, that's fine (e.g. a fast response that never
+        // showed a stop button) — fall through to phase 2 as before.
     }
 
     // Phase 2: find response element
+    //
+    // BUGFIX: same dead-fallback pattern as phase 1 — capture the resolved
+    // boolean instead of discarding it, so unmatched selectors actually get
+    // skipped instead of the loop always keeping the first one.
     const selTimeout = config.responseSelectorTimeout || 30_000;
     let responseEl = null;
     for (const sel of config.responseSelectors) {
-        try {
-            const loc = page.locator(sel).last();
-            await loc.waitFor({ state: 'attached', timeout: Math.min(selTimeout, timeoutMs) }).catch(() => {});
+        const loc = page.locator(sel).last();
+        const attached = await loc
+            .waitFor({ state: 'attached', timeout: Math.min(selTimeout, timeoutMs) })
+            .then(() => true)
+            .catch(() => false);
+        if (attached) {
             responseEl = loc;
             break;
-        } catch (_) { /* next */ }
+        }
     }
 
     if (!responseEl) return null;
@@ -355,17 +376,24 @@ async function waitForCompletion(page, config, startTime, timeoutMs) {
     }
 
     // Phase 4 (optional): completion anchor — definitive "done" signal
+    //
+    // BUGFIX: previously gave the *first* anchor selector the entire remaining
+    // timeout budget and broke unconditionally afterwards (same swallowed-catch
+    // pattern as phases 1-2), so locale variants after the first (e.g. Simplified
+    // Chinese / English "Copy" button) were never actually tried — and an
+    // unmatched first selector could silently burn the whole remaining budget.
+    // Fix: split the remaining budget across candidates; only a real match breaks.
     const anchors = config.completionAnchor;
     if (anchors) {
         const anchorList = Array.isArray(anchors) ? anchors : [anchors];
+        const remainingBudget = Math.max(10000, timeoutMs - (Date.now() - startTime));
+        const perAnchorTimeout = Math.max(5000, Math.floor(remainingBudget / anchorList.length));
         for (const sel of anchorList) {
-            try {
-                await page.locator(sel).last().waitFor({
-                    state: 'visible',
-                    timeout: Math.max(10000, timeoutMs - (Date.now() - startTime)),
-                }).catch(() => {});
-                break; // first matching anchor wins
-            } catch (_) { /* next */ }
+            const found = await page.locator(sel).last().waitFor({
+                state: 'visible',
+                timeout: perAnchorTimeout,
+            }).then(() => true).catch(() => false);
+            if (found) break; // first matching anchor wins
         }
     }
 
@@ -597,7 +625,16 @@ function createProviderRunner(cfg) {
         }
 
         // ── Step 9: Extract + post-process ──
-        const response = await extractResponse(page, responseEl, C);
+        // BUGFIX: previously not wrapped in try/catch, so a postResponseHook throw
+        // (e.g. Gemini's ERR_SAFETY_REJECTED) bypassed classifyError entirely here
+        // and only got caught by the generic outer catch in tryAllProviders, which
+        // used to always collapse to reason='error' — losing the safety signal.
+        let response;
+        try {
+            response = await extractResponse(page, responseEl, C);
+        } catch (e) {
+            return classifyError(e, STAGES.EXTRACT, C.key);
+        }
         if (!response) {
             return classifyError(
                 new Error('Response too short or empty'),

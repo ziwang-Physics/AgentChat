@@ -345,6 +345,9 @@ async function main() {
             if (!isNaN(v) && v > 0) customProvTimeout = v;
         } else if (a === '--keep-tabs') {
             keepTabs = true;
+        } else if (a === '--close' || a === '--close-browser') {
+            // Only closes our own tab on success (page.close()) — never browser.close().
+            keepTabs = false;
         } else if (a.startsWith('--from=')) {
             startFrom = a.split('=')[1];
         } else if (!a.startsWith('--')) {
@@ -362,7 +365,7 @@ async function main() {
         prompt = chunks.join('').trim();
     }
     if (!prompt && !args.includes('--smoke')) {
-        console.error('Usage: node index.js [--timeout=N] [--from=NAME] [--keep-tabs] [--smoke] [--doctor] "Your prompt"');
+        console.error('Usage: node index.js [--timeout=N] [--from=NAME] [--keep-tabs] [--close] [--smoke] [--doctor] "Your prompt"');
         console.error('       echo "prompt" | node index.js [flags]');
         process.exit(1);
     }

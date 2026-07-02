@@ -23,19 +23,27 @@ module.exports = {
         'textarea[placeholder*="有问题，尽管问"]',
         'textarea[placeholder*="Shift + Enter"]',
     ],
-    // MiMo's send button is found via DOM traversal from textarea, not CSS selectors
+    // MiMo's send button is found via DOM traversal from textarea, not CSS selectors.
+    // Tries both editorSelectors placeholder variants — the textarea that actually
+    // matched during Step 5 (Chinese or English UI) may be either one.
     customSend: async (page, _editor) => {
         let sent = false;
-        try {
-            const sendBtn = page.locator('textarea[placeholder*="有问题，尽管问"]')
-                .locator('..').locator('..')  // grandparent container
-                .locator('button:not([disabled])')
-                .filter({ has: page.locator('svg') }).last();
-            if (await sendBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
-                await sendBtn.click();
-                sent = true;
-            }
-        } catch (_) { /* fall through to Enter */ }
+        for (const textareaSel of [
+            'textarea[placeholder*="有问题，尽管问"]',
+            'textarea[placeholder*="Shift + Enter"]',
+        ]) {
+            try {
+                const sendBtn = page.locator(textareaSel)
+                    .locator('..').locator('..')  // grandparent container
+                    .locator('button:not([disabled])')
+                    .filter({ has: page.locator('svg') }).last();
+                if (await sendBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+                    await sendBtn.click();
+                    sent = true;
+                    break;
+                }
+            } catch (_) { /* try next placeholder variant */ }
+        }
         if (!sent) await page.keyboard.press('Enter');
     },
     responseSelectors: ['.markdown-prose', '.Markdown_markdown__', '[class*="markdown"]'],
