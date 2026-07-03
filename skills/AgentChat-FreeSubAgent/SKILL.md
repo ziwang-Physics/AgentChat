@@ -15,7 +15,7 @@
 ```
 AgentChat-FreeSubAgent (本 skill, ~630 行)
     │
-    │  child_process.spawn('node', ['../AgentChat-WebExtended/index.js', '--from=X', prompt])
+    │  child_process.spawn('node', ['../AgentChat-WebExtended/index.js', '--only=X', prompt])
     ▼
 AgentChat-WebExtended (Provider 唯一实现, 8 providers, 已验证 DOM 选择器)
     │
@@ -105,7 +105,7 @@ node skills/AgentChat-FreeSubAgent/index.js --timeout=900000 '<DAG_JSON_STRING>'
 cat > /tmp/ai_plan.json << 'ENDJSON'
 {...JSON计划...}
 ENDJSON
-node skills/AgentChat-FreeSubAgent/index.js --timeout=900 "$(cat /tmp/ai_plan.json)"
+node skills/AgentChat-FreeSubAgent/index.js --timeout=900000 "$(cat /tmp/ai_plan.json)"
 ```
 
 ### Step 4: 解读结果 & 呈现给用户
@@ -114,7 +114,7 @@ node skills/AgentChat-FreeSubAgent/index.js --timeout=900 "$(cat /tmp/ai_plan.js
 
 ## Fallback Chain
 
-任意 provider 不可用时自动降级（由 AgentChat-WebExtended 处理）：
+任意 provider 不可用时自动降级（由 FreeSubAgent 编排层处理；子进程用 `--only`/`--single` 只跑单个 provider，降级控制只存在于这一层）：
 
 ```
 Gemini → ChatGPT → Claude → Qwen → Kimi → MiniMax → MiMo → DeepSeek

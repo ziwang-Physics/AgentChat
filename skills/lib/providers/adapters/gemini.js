@@ -16,6 +16,12 @@
  */
 
 const { ensureProExtended, ensureFlash } = require('../../geminiModelSwitch');
+const { log: _tlog } = require('../../terminal');
+
+// Default logger — the factory calls preInputHook(page, C) with no third arg,
+// so the old `logFn || (() => {})` default silently swallowed every model
+// activation log line, making Pro/Flash switching impossible to debug.
+const glog = (msg) => _tlog('gemini', msg);
 
 // ── Helpers (replicated from WebExtended for self-contained adapter) ──
 
@@ -80,9 +86,22 @@ module.exports = {
     url: 'https://gemini.google.com/u/0/app',
     authDomains: ['accounts.google.com'],
 
+    // Gemini previously had NO quotaPatterns — free-tier exhaustion could never
+    // be classified as reason='quota' (breaking exit code 5 aggregation).
+    // Patterns are deliberately narrow: the Gemini page shows permanent
+    // "Upgrade"/"Advanced" upsell banners, so anything matching bare
+    // /upgrade/ would false-positive on every visit.
+    quotaPatterns: [
+        /reached your (?:daily )?limit/i,
+        /limit\s+(?:resets|refreshes)/i,
+        /you'?ve\s+hit\s+your\s+.*limit/i,
+        /已达到.*(?:上限|限额|限制)/i,
+        /已達到.*(?:上限|限額|限制)/i,
+    ],
+
     // ── Pre-input: tiered model activation (Pro Extended → Flash → fail) ──
     preInputHook: async (page, cfg, logFn) => {
-        const log = logFn || (() => {});
+        const log = logFn || glog;
         // Extra URL validation — must be on gemini.google.com
         const url = page.url();
         if (!url.includes('gemini.google.com')) {
@@ -177,11 +196,22 @@ module.exports = {
 
         // Input text
         if (prompt.length > INSERT_TEXT_LIMIT) {
+            // Only Ctrl+V if OUR clipboard write succeeded — otherwise we'd paste
+            // the user's private clipboard contents into the Gemini page.
+            let clipOk = true;
             try {
                 await page.evaluate(t => navigator.clipboard.writeText(t), prompt);
-            } catch (_) { /* clipboard may fail in headless */ }
-            await page.keyboard.press('ControlOrMeta+v');
-            await page.waitForTimeout(500);
+            } catch (_) { clipOk = false; /* clipboard may fail in headless */ }
+            if (clipOk) {
+                await page.keyboard.press('ControlOrMeta+v');
+                await page.waitForTimeout(500);
+            } else {
+                // Fallback: chunked insertText (O(n) but reliable, no clipboard)
+                for (let i = 0; i < prompt.length; i += 150) {
+                    await page.keyboard.insertText(prompt.substring(i, i + 150));
+                    await page.waitForTimeout(40);
+                }
+            }
         } else {
             await page.keyboard.insertText(prompt);
         }
@@ -200,8 +230,16 @@ module.exports = {
 
     // ── Post-response: validate + detect safety rejection ──
     postResponseHook: async (page, text) => {
-        // Check for safety rejection
-        if (/can'?t help|unable to|against policy|I cannot fulfill|safety guidelines/i.test(text)) {
+        // Check for safety rejection.
+        // BUGFIX (false positive): the old pattern matched substrings like
+        // "unable to" ANYWHERE in the full text — a scientific answer containing
+        // "the ligand is unable to passivate..." threw away the entire valid
+        // response as ERR_SAFETY_REJECTED. Real refusals are SHORT and state the
+        // refusal UP FRONT, so: (a) only inspect the first 200 chars, (b) require
+        // the total response to be short, (c) anchor phrases to first person.
+        const head = text.slice(0, 200);
+        const REFUSAL_RE = /(?:I\s+can'?t\s+help|I'?m\s+(?:sorry.{0,40})?unable\s+to|against\s+(?:my\s+|our\s+)?polic(?:y|ies)|I\s+cannot\s+fulfill|violates?\s+.{0,30}safety\s+guidelines|我(?:无法|不能)(?:帮助|协助|提供))/i;
+        if (text.length < 600 && REFUSAL_RE.test(head)) {
             throw Object.assign(
                 new Error('Gemini safety filter rejected prompt'),
                 { code: 'ERR_SAFETY_REJECTED' }

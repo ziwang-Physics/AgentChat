@@ -211,10 +211,18 @@ def launch_browser(p):
     args = [
         "--no-sandbox",
         "--disable-gpu",
-        "--ignore-certificate-errors",
+        # SECURITY: "--ignore-certificate-errors" removed — clash tunnels TLS
+        # without MITM, so cert errors shouldn't occur; the flag only made a
+        # real MITM invisible on a profile full of logged-in sessions.
         f"--remote-debugging-port={CDP_PORT}",
         "--remote-debugging-address=127.0.0.1",
-        "--remote-allow-origins=*",
+        # SECURITY: "--remote-allow-origins=*" removed. Even bound to 127.0.0.1,
+        # that flag let ANY webpage open in ANY local browser connect to
+        # ws://127.0.0.1:9222 and take over this fully-logged-in profile
+        # (cookie theft for Google/OpenAI/Anthropic/... in one shot).
+        # Playwright's Node/Python WebSocket clients send no Origin header, so
+        # they are accepted without it. If a future client ever gets a 403,
+        # re-add the narrow form: f"--remote-allow-origins=http://127.0.0.1:{CDP_PORT}"
         "--disable-dev-shm-usage",
         "--disable-breakpad",
         "--disable-component-update",
@@ -272,15 +280,17 @@ def launch_browser(p):
     return context, page
 
 
-def heartbeat(page) -> bool:
-    """Check browser health with CDP TIMEOUT. Returns True if healthy.
+def heartbeat() -> bool:
+    """Check browser health. Returns True if healthy.
 
-    Key fix over v2: page.evaluate() now has a 10s timeout so the daemon
-    itself cannot hang on a deadlocked Chrome renderer process.
-    Additionally, we evaluate a real expression that exercises the JS
-    engine and CDP round-trip, not just about:blank's static state.
+    POLICY FIX ("never close the user's Chrome"): the monitor page being
+    closed (e.g. the user closed our about:blank tab) is NOT a crash. It
+    previously failed the heartbeat, which triggered restart_browser() →
+    context.close() → destruction of ALL the user's tabs. Now a missing or
+    stale monitor page is simply reopened; only a genuinely disconnected
+    browser counts as a crash.
     """
-    global context
+    global context, page
     try:
         if not context:
             log.error("Browser context is None!")
@@ -294,6 +304,16 @@ def heartbeat(page) -> bool:
                 return False
         except Exception:
             log.error("Cannot access browser from context!")
+            return False
+
+        # Monitor page closed by the user? Reopen — the browser is fine.
+        try:
+            if page is None or page.is_closed():
+                log.warning("Monitor page closed — reopening (not a crash)")
+                page = context.new_page()
+                page.goto("about:blank", timeout=5000)
+        except Exception as e:
+            log.error(f"Cannot reopen monitor page: {e}")
             return False
 
         # Active health probe — exercises CDP round-trip.
@@ -319,7 +339,16 @@ def heartbeat(page) -> bool:
             return True  # page is responsive even if not 'complete'
         except Exception as e:
             log.error(f"Heartbeat evaluate failed: {e}")
-            return False
+            # The page may have gone stale mid-check while the browser itself
+            # is fine (e.g. user closed our tab between is_closed() and
+            # evaluate()). One retry with a fresh page before declaring crash.
+            try:
+                page = context.new_page()
+                page.goto("about:blank", timeout=5000)
+                log.info("Heartbeat recovered with a fresh monitor page")
+                return True
+            except Exception:
+                return False
 
     except Exception as e:
         log.error(f"Heartbeat failed: {e}")
@@ -390,7 +419,7 @@ def main():
             if got_signal:
                 log.error("Browser disconnected event received!")
                 crash_count += 1
-            elif not heartbeat(page):
+            elif not heartbeat():
                 log.error("Heartbeat check failed!")
                 crash_count += 1
             else:

@@ -16,7 +16,10 @@ module.exports = {
         /out\s*of\s*messages/i,
         /messages?\s*remaining[:\s]*0/i,
         /usage\s*limit/i,
-        /please\s*wait/i,
+        // BUGFIX: bare /please\s*wait/i matched generic "Please wait..." loading
+        // text and misclassified a perfectly available Claude as quota-exhausted.
+        // Only treat it as quota when tied to a rate-limit context.
+        /please\s*wait\s*(?:\d+|a few|until|before\s+sending)/i,
     ],
     dismissPatterns: [
         /what'?s\s*new/i, /new\s*feature/i, /try\s*(?:the\s*)?new/i,

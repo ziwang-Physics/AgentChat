@@ -20,6 +20,8 @@ const STAGES = Object.freeze({
     OVERLAY_CHECK:  'overlay_check',   // modal/dialog blocking editor
     PRE_EDITOR:     'pre_editor',      // e.g., Gemini Pro Extended activation
     EDITOR_FIND:    'editor_find',
+    INPUT:          'input',           // typing/pasting the prompt into the editor
+    SEND:           'send',            // clicking send / pressing fallback key
     WAIT_RESPONSE:  'wait_response',
     EXTRACT:        'extract',
 });

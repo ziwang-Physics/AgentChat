@@ -201,11 +201,24 @@ async function inputViaKeyboard(page, editor, prompt, { chunkSize = 150, yieldMs
  */
 async function defaultInput(page, editor, prompt, { insertTextLimit = INSERT_TEXT_LIMIT } = {}) {
     if (prompt.length > insertTextLimit) {
-        try { await page.evaluate(t => navigator.clipboard.writeText(t), prompt); } catch (_) {}
-        await page.keyboard.press('ControlOrMeta+v');
-        await page.waitForTimeout(500);
-        const len = await editor.evaluate(el => (el.innerText || el.textContent || '').length);
-        return len > prompt.length * 0.8;
+        // PRIVACY FIX: only press Ctrl+V if OUR write to the clipboard succeeded.
+        // Previously, a failed writeText (permission denied) was swallowed and
+        // Ctrl+V pasted whatever the USER had on their clipboard into a
+        // third-party AI page — and could even send it if it passed the 0.8
+        // length check. On clipboard failure, fall back to non-clipboard paths.
+        let clipOk = true;
+        try { await page.evaluate(t => navigator.clipboard.writeText(t), prompt); }
+        catch (_) { clipOk = false; }
+        if (clipOk) {
+            await page.keyboard.press('ControlOrMeta+v');
+            await page.waitForTimeout(500);
+            const len = await editor.evaluate(el => (el.innerText || el.textContent || '').length);
+            if (len > prompt.length * 0.8) return true;
+        }
+        // Clipboard unavailable or paste didn't land → simulated ClipboardEvent,
+        // then chunked keyboard as the last resort.
+        if (await inputViaSimulatedPaste(page, editor, prompt)) return true;
+        return inputViaKeyboard(page, editor, prompt);
     } else {
         await page.keyboard.insertText(prompt);
         await page.waitForTimeout(300);
@@ -603,20 +616,22 @@ function createProviderRunner(cfg) {
         }
 
         // ── Step 6: Clear + input text ──
+        // Stage label fixed: input failures were previously mislabeled EDITOR_FIND,
+        // skewing telemetry-based failure analysis.
         try {
             await clearEditor(page, editor);
             const inputOk = await C.input(page, editor, prompt, { timeoutMs });
             if (!inputOk) {
                 return classifyError(
                     new Error('Failed to input text'),
-                    STAGES.EDITOR_FIND, C.key, 'error'
+                    STAGES.INPUT, C.key, 'error'
                 );
             }
         } catch (e) {
-            return classifyError(e, STAGES.EDITOR_FIND, C.key);
+            return classifyError(e, STAGES.INPUT, C.key);
         }
 
-        // ── Step 7: Send ──
+        // ── Step 7: Send ── (stage label fixed: was mislabeled WAIT_RESPONSE)
         try {
             if (C.customSend) {
                 await C.customSend(page, editor);
@@ -624,7 +639,7 @@ function createProviderRunner(cfg) {
                 await clickSend(page, editor, C.sendSelectors, C.sendFallback);
             }
         } catch (e) {
-            return classifyError(e, STAGES.WAIT_RESPONSE, C.key);
+            return classifyError(e, STAGES.SEND, C.key);
         }
 
         // ── Step 8: Wait for response ──

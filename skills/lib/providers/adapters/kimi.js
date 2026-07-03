@@ -53,13 +53,21 @@ module.exports = {
     customSend: async (page) => {
         const sendBtn = page.locator('.send-button-container').first();
         await page.waitForTimeout(800);
+        // BUGFIX: catch default was inverted. If the button doesn't exist,
+        // evaluate() rejects → .catch(() => false) claimed "not disabled" →
+        // sendBtn.click() then burned a 30s locator timeout and failed the
+        // whole provider. A missing/unknown button must route to Enter.
         const isDisabled = await sendBtn.evaluate(
             el => el.className.includes('disabled')
-        ).catch(() => false);
+        ).catch(() => true);
         if (isDisabled) {
             await page.keyboard.press('Enter');
         } else {
-            await sendBtn.click();
+            try {
+                await sendBtn.click({ timeout: 5000 });
+            } catch (_) {
+                await page.keyboard.press('Enter'); // click failed → Enter fallback
+            }
         }
     },
 

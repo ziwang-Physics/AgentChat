@@ -83,16 +83,9 @@ class InvocationContext {
 // PROVIDER CHAIN (priority order — first available wins)
 // ══════════════════════════════════════════════════════════════════════════════
 
-const PROVIDER_CHAIN = [
-    { key: 'gemini',   name: 'Gemini',   url: 'https://gemini.google.com/u/0/app', authDomains: ['accounts.google.com'] },
-    { key: 'chatgpt',  name: 'ChatGPT',  url: 'https://chatgpt.com/',               authDomains: ['auth.openai.com', 'chat.openai.com/auth'] },
-    { key: 'claude',   name: 'Claude',   url: 'https://claude.ai/',                 authDomains: ['claude.ai/login', 'auth.anthropic.com'] },
-    { key: 'qwen',     name: 'Qwen',     url: 'https://www.qianwen.com/?source=tongyigw', authDomains: ['qianwen.com/login', 'login.aliyun.com', 'signin.aliyun.com'] },
-    { key: 'kimi',     name: 'Kimi',     url: 'https://kimi.moonshot.cn/',          authDomains: ['kimi.moonshot.cn/login', 'kimi.com/login', 'moonshot.cn/login'], tabHosts: ['kimi.moonshot.cn', 'kimi.com'] },
-    { key: 'minimax',  name: 'MiniMax',  url: 'https://agent.minimaxi.com/',        authDomains: ['agent.minimaxi.com/login', 'minimax.com/login'] },
-    { key: 'mimo',     name: 'MiMo',     url: 'https://aistudio.xiaomimimo.com/',   authDomains: ['aistudio.xiaomimimo.com/login', 'auth0.com'] },
-    { key: 'deepseek', name: 'DeepSeek', url: 'https://chat.deepseek.com/',         authDomains: ['chat.deepseek.com/login', 'deepseek.com/login'] },
-];
+// Single source of truth: lib/providers/chain.js (also consumed by FreeSubAgent,
+// which must NOT require this file — that would load playwright-core + 8 adapters).
+const { PROVIDER_CHAIN } = require('../lib/providers/chain');
 
 // ══════════════════════════════════════════════════════════════════════════════
 // PROVIDER RUNNERS — factory-built from adapter configs in lib/providers/adapters/
@@ -123,16 +116,29 @@ function getProviderHosts(provider) {
     try { return [new URL(provider.url).hostname]; } catch { return []; }
 }
 
-/** Check whether any browser tab is already open for a given provider. */
-function isProviderTabOpen(context, provider) {
+/**
+ * Find an already-open tab for a given provider (or null).
+ *
+ * BUGFIX (self-DoS): the previous isProviderTabOpen() + "skip if open" logic,
+ * combined with keep-tabs-always-on, made sequential invocations block
+ * themselves: run 1 succeeds on Gemini and keeps the tab → run 2 sees the tab,
+ * classifies Gemini as "in use", and falls to ChatGPT → after a few runs all
+ * 8 providers are permanently blocked by their own historical tabs (exit 9).
+ *
+ * Fix: REUSE the existing tab instead of skipping the provider. page.goto(url)
+ * on the existing tab starts a fresh chat, so reuse is functionally identical
+ * to a new tab and also stops tab accumulation. Concurrent-worker isolation is
+ * the job of FreeSubAgent's file locks (and --single), not tab heuristics.
+ */
+function findProviderPage(context, provider) {
     const hosts = getProviderHosts(provider);
-    return context.pages().some(p => {
+    return context.pages().find(p => {
         try {
             const pu = p.url();
             if (pu.includes('about:blank')) return false;
             return hosts.some(h => pu.includes(h));
         } catch { return false; }
-    });
+    }) || null;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -205,17 +211,17 @@ async function tryAllProviders(browser, prompt, ctx, options = {}) {
 
         let page;
         let result;
+        let createdPage = false;
         try {
-            // ── Dedup: skip providers that already have an open tab ──
-            if (isProviderTabOpen(context, provider)) {
-                log(`  ${provider.name}: tab already open → skipping (provider in use by another session)`);
-                fallbackReasons[provider.key] = { reason: 'tab_already_open' };
-                triedProviders.push(provider.key);
-                continue;
+            // ── Reuse an existing tab for this provider, or create a new one ──
+            // (see findProviderPage() for why reuse replaced the old skip logic)
+            page = findProviderPage(context, provider);
+            if (page) {
+                log(`  ${provider.name}: reusing existing tab`);
+            } else {
+                page = await context.newPage();
+                createdPage = true;
             }
-
-            // Create dedicated page for this provider
-            page = await context.newPage();
 
             // Grant clipboard permissions
             try { await context.grantPermissions(['clipboard-read', 'clipboard-write']); } catch (_) { }
@@ -235,8 +241,9 @@ async function tryAllProviders(browser, prompt, ctx, options = {}) {
 
         triedProviders.push(provider.key);
         if (!result.success) {
-            // Close failed provider's tab — useless clutter regardless of --keep-tabs
-            if (page && !page.isClosed()) {
+            // Close failed provider's tab ONLY if we created it — a reused tab
+            // belongs to the user / a previous session and must be left alone.
+            if (createdPage && page && !page.isClosed()) {
                 try { await page.close(); } catch (_) { }
             }
             fallbackReasons[provider.key] = {
@@ -247,8 +254,8 @@ async function tryAllProviders(browser, prompt, ctx, options = {}) {
             continue;
         }
 
-        // SUCCESS: keep or close tab based on --keep-tabs flag
-        if (page && !page.isClosed() && !options.keepTabs) {
+        // SUCCESS: keep or close tab based on --keep-tabs flag (self-created only)
+        if (createdPage && page && !page.isClosed() && !options.keepTabs) {
             try { await page.close(); } catch (_) { }
         }
 
@@ -297,9 +304,9 @@ async function smokeTest(browser) {
     for (const provider of PROVIDER_CHAIN) {
         let page;
         try {
-            // Skip if a tab for this provider is already open from a prior session
-            if (isProviderTabOpen(context, provider)) {
-                log(`  ${provider.name}: tab already open → skipping`);
+            // An already-open tab is itself proof of reachability
+            if (findProviderPage(context, provider)) {
+                log(`  ${provider.name}: ✅ REACHABLE (existing tab)`);
                 continue;
             }
 
@@ -345,6 +352,17 @@ async function main() {
     let keepTabs = true; // Always keep tabs — never close user's browser
     let singleAttempt = false; // --single: try exactly one provider, no cascade
 
+    // Timeouts are milliseconds. Values < 10000 are almost certainly seconds
+    // typed by a human (--timeout=900) — normalize instead of silently giving
+    // the whole chain a sub-second budget.
+    const normalizeTimeout = (v) => {
+        if (v < 10_000) {
+            log(`WARN: --timeout=${v} interpreted as ${v}s (${v * 1000}ms). Timeouts are in milliseconds.`);
+            return v * 1000;
+        }
+        return v;
+    };
+
     // NOTE: --doctor is already handled above with an early return, so it never
     // reaches this loop. --smoke is detected separately via args.includes('--smoke')
     // further below. Neither should be pushed into `remaining` — previously both
@@ -357,16 +375,21 @@ async function main() {
             // handled via args.includes('--smoke') below — swallow, don't push
         } else if (a.startsWith('--timeout=')) {
             const v = parseInt(a.split('=')[1], 10);
-            if (!isNaN(v) && v > 0) customTimeout = v;
+            if (!isNaN(v) && v > 0) customTimeout = normalizeTimeout(v);
         } else if (a.startsWith('--timeout-per-provider=')) {
             const v = parseInt(a.split('=')[1], 10);
-            if (!isNaN(v) && v > 0) customProvTimeout = v;
+            if (!isNaN(v) && v > 0) customProvTimeout = normalizeTimeout(v);
         } else if (a === '--keep-tabs') {
             keepTabs = true;
         } else if (a === '--close' || a === '--close-browser') {
             // Only closes our own tab on success (page.close()) — never browser.close().
             keepTabs = false;
         } else if (a === '--single') {
+            singleAttempt = true;
+        } else if (a.startsWith('--only=')) {
+            // Try exactly ONE provider — no internal fallback. Used by FreeSubAgent
+            // so that fallback control lives solely in the orchestrator layer.
+            startFrom = a.split('=')[1];
             singleAttempt = true;
         } else if (a.startsWith('--from=')) {
             startFrom = a.split('=')[1];
@@ -377,15 +400,16 @@ async function main() {
 
     // Read prompt
     let prompt = remaining.join(' ').trim();
-    if (!prompt && !args.includes('--smoke')) {
-        // Try stdin
+    if (!prompt && !args.includes('--smoke') && !process.stdin.isTTY) {
+        // Try stdin — but only when something is actually piped in.
+        // On an interactive TTY this used to hang forever instead of printing usage.
         const chunks = [];
         process.stdin.setEncoding('utf-8');
         for await (const chunk of process.stdin) chunks.push(chunk);
         prompt = chunks.join('').trim();
     }
     if (!prompt && !args.includes('--smoke')) {
-        console.error('Usage: node index.js [--timeout=N] [--from=NAME] [--single] [--keep-tabs] [--close] [--smoke] [--doctor] "Your prompt"');
+        console.error('Usage: node index.js [--timeout=MS] [--from=NAME] [--only=NAME] [--single] [--keep-tabs] [--close] [--smoke] [--doctor] "Your prompt"');
         console.error('       echo "prompt" | node index.js [flags]');
         process.exit(1);
     }
@@ -446,6 +470,14 @@ async function main() {
         if (hasSafety) {
             ctx.recordTelemetry(3);
             process.exit(3);
+        }
+        // Exit 10 (ERR_TIMEOUT) was documented but never emitted — the chain
+        // stopping on total_timeout previously collapsed into exit 9.
+        const hasTotalTimeout = reasonValues.some(r => r.includes('total_timeout'));
+        if (hasTotalTimeout) {
+            log('Total timeout reached before the chain could complete.');
+            ctx.recordTelemetry(10);
+            process.exit(10);
         }
         ctx.recordTelemetry(9);
         process.exit(9);

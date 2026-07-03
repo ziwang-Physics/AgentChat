@@ -86,9 +86,10 @@ process.on("SIGINT", () => { cleanupAllLocks(); process.exit(); });
 process.on("SIGTERM", () => { cleanupAllLocks(); process.exit(); });
 
 const WEBEXT = path.resolve(__dirname, "..", "AgentChat-WebExtended", "index.js");
-// Single source of truth: derived from WebExtended's PROVIDER_CHAIN order.
-// No manual sync needed — if WebExtended reorders, FreeSubAgent follows automatically.
-const { PROVIDER_CHAIN } = require('../AgentChat-WebExtended/index.js');
+// Single source of truth: lib/providers/chain.js (shared with WebExtended).
+// Previously this required WebExtended's index.js just to read a constant,
+// dragging in playwright-core + all 8 adapter modules at orchestrator startup.
+const { PROVIDER_CHAIN } = require('../lib/providers/chain');
 const FALLBACK_CHAIN = PROVIDER_CHAIN.map(p => p.key);
 
 function buildFallbackChain(primaryKey, skipList = []) {
@@ -209,14 +210,29 @@ function callProvider(prompt, provider, timeoutMs) {
 // FALLBACK EXECUTOR — try primary first, then chain
 // ═══════════════════════════════════════════════════════════════════
 
+const PER_CALL_CAP_MS = 180_000;   // ceiling for a single provider attempt
+const MIN_CALL_BUDGET_MS = 30_000; // below this, an attempt can't succeed anyway
+
 async function executeWithFallback(primaryKey, prompt, budgetMs, skipList = []) {
   const start = Date.now();
   const chain = buildFallbackChain(primaryKey, skipList);
   const tried = [];
   const myLocks = []; // track which providers we locked
-  const perCallBudget = Math.max(120000, Math.floor(budgetMs / (Math.min(chain.length, 4) + 1)));
 
   for (const key of chain) {
+    // BUDGET FIX: the old perCallBudget used Math.max(120000, ...) — a FLOOR,
+    // so a single call could exceed the node's entire budget, and the loop
+    // never compared elapsed time against budgetMs at all. Worst case one
+    // worker ran 8 × 150s ≈ 20 min regardless of --timeout. Budget is now
+    // checked every iteration and the cap is a ceiling.
+    const remaining = budgetMs - (Date.now() - start);
+    if (remaining < MIN_CALL_BUDGET_MS) {
+      log(`    [fallback] Budget exhausted (${Math.round(remaining / 1000)}s left) — stopping chain.`);
+      tried.push({ key, reason: "budget_exhausted" });
+      break;
+    }
+    const perCallBudget = Math.min(remaining, PER_CALL_CAP_MS);
+
     // File lock: skip if another worker already has this provider open
     if (!acquireLock(key)) {
       log(`    [fallback] Skipping ${key} (locked by another worker)`);
@@ -225,16 +241,21 @@ async function executeWithFallback(primaryKey, prompt, budgetMs, skipList = []) 
     }
     myLocks.push(key);
 
-    log(`    [fallback] Trying ${key}...`);
+    log(`    [fallback] Trying ${key} (${Math.round(perCallBudget / 1000)}s budget)...`);
 
     const result = await callProvider(prompt, key, perCallBudget);
 
     if (result.ok) {
       // Keep lock — marks provider as "in use" so other workers skip it
+      // Degradation = the provider that actually answered ≠ intended primary.
+      // With --single these are equivalent to (key !== primaryKey), but comparing
+      // provider_used keeps arbitration honest even if subprocess semantics
+      // ever change again.
+      const actualProvider = result.provider || key;
       return {
-        provider_used: result.provider || key,
+        provider_used: actualProvider,
         primary_intended: primaryKey,
-        degradation: key !== primaryKey ? {
+        degradation: actualProvider !== primaryKey ? {
           reason: tried.map(t => `${t.key}:${t.reason}`).join("; "),
           fallback_chain: tried.map(t => t.key),
           confidence_adjustment: -0.15,
@@ -271,8 +292,11 @@ const UI_CHROME_PATTERNS = [
   /^Kimi\s*说[：:\s]*/gim,
   /Thought\s*for\s*\d+s?\s*/gi,
   /^You said[：:\s]*.*?\n/gim,
-  /^Zi[，,]\s*(?:接著要做什麼|在想什麼|我們進入正題|你好).*/gim,
+  // Generic conversational-filler openers (was a hardcoded personal-name
+  // pattern — leaked personal context and didn't generalize).
+  /^[^\n，,]{1,12}[，,]\s*(?:接著要做什麼|接下来要做什么|在想什麼|在想什么|我們進入正題|我们进入正题)[^\n]*/gim,
   /^我隨時待命[！!。.]?\s*/gim,
+  /^我随时待命[！!。.]?\s*/gim,
 ];
 
 function cleanResponse(text) {
@@ -333,16 +357,19 @@ async function buildDAG(userTask, budgetMs) {
 
   const prompt = DAG_DECOMPOSER_PROMPT.replace("<TASK>", userTask);
 
-  // Try each provider for decomposition.
-  // BUGFIX: previously Math.floor(budgetMs * 0.4) had no floor, unlike the budget
-  // math in dispatchParallel()/executeWithFallback() below, which both clamp to a
-  // sane minimum. A misconfigured small --timeout (e.g. a units mistake) collapsed
-  // this to a few hundred ms, guaranteeing every provider times out and silently
-  // degrading to the rule-based fallback DAG below instead of a real decomposition.
-  const perDecomposerBudget = Math.max(60000, Math.floor(budgetMs * 0.4));
+  // Try each provider for decomposition — under a hard deadline.
+  // BUDGET FIX: previously each of up to 8 attempts got a fresh 0.4×budget
+  // slice with no elapsed-time check, so M1 alone could consume the entire
+  // --timeout before dispatch ever started.
+  const deadline = Date.now() + budgetMs;
   for (const key of FALLBACK_CHAIN) {
+    const remaining = deadline - Date.now();
+    if (remaining < 20_000) {
+      log("  Decomposer: budget exhausted — falling back to rule-based DAG");
+      break;
+    }
     log(`  Decomposer: trying ${key}...`);
-    const result = await callProvider(prompt, key, perDecomposerBudget);
+    const result = await callProvider(prompt, key, Math.min(remaining, Math.floor(budgetMs * 0.4)));
     if (!result.ok) { log(`  Decomposer: ${key} failed (${result.reason})`); continue; }
 
     const m = result.text.match(/\{[\s\S]*"dag"[\s\S]*\}/);
@@ -708,6 +735,14 @@ async function main() {
     process.exit(1);
   }
 
+  // UNIT FIX: timeouts are milliseconds, but SKILL.md examples were written in
+  // seconds (--timeout=900 → 900ms → M1 got a 270ms budget and always failed).
+  // Normalize implausibly small values instead of silently starving the run.
+  if (timeout > 0 && timeout < 10_000) {
+    log(`WARN: --timeout=${timeout} interpreted as ${timeout}s (${timeout * 1000}ms). Timeouts are in milliseconds.`);
+    timeout *= 1000;
+  }
+
   // Verify WebExtended exists
   if (!fs.existsSync(WEBEXT)) {
     log(`FATAL: AgentChat-WebExtended not found at: ${WEBEXT}`);
@@ -742,7 +777,11 @@ async function main() {
   log(`  DAG: ${dag.nodes.map(n => `${n.id}(${n.ai}/${n.role})`).join(" → ")}`);
 
   // M2: Parallel dispatch
-  const results = await dispatchParallel(dag, Math.floor(timeout * 0.55));
+  // BUDGET FIX: M2 now gets 85% of the time ACTUALLY remaining after M1
+  // (with a floor so workers are never starved), instead of a fixed 0.55×
+  // slice that ignored any M1 overrun.
+  const m2Budget = Math.max(120_000, Math.floor((timeout - (Date.now() - T0)) * 0.85));
+  const results = await dispatchParallel(dag, m2Budget);
 
   // M3: Arbitrate
   const arbitration = arbitrateResults(dag, results);
