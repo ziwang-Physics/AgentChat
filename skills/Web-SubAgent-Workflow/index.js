@@ -54,8 +54,9 @@ function callProvider(prompt, provider, timeoutMs) {
             "--keep-tabs", "--single",
         ], { stdio: ["pipe", "pipe", "pipe"] });
 
-        child.stdin.write(prompt);
-        child.stdin.end();
+        child.stdin.on("error", () => { /* EPIPE: child exited before stdin drained */ });
+        try { child.stdin.write(prompt); } catch (_) { /* child already gone */ }
+        try { child.stdin.end(); } catch (_) { /* child already gone */ }
 
         let stdout = "", stderr = "";
         const MAX = 1024 * 1024;

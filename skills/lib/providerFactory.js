@@ -53,6 +53,28 @@ const { appendWithRotation } = require('./telemetry');
 // }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// SHARED PATTERNS — extracted from duplicated adapter configs (~60 lines saved)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Chinese-language quota patterns shared across 5+ providers (Qwen, Kimi,
+// MiniMax, MiMo, DeepSeek, ChatGPT). Each adapter's quotaPatterns = its own
+// provider-specific patterns + [...COMMON_CN_QUOTA_PATTERNS].
+const COMMON_CN_QUOTA_PATTERNS = [
+    /额度.*(?:已|用).*(?:完|尽|满)/i,
+    /quota\s*(?:exceeded|limit)/i,
+    /次数.*(?:已|用).*(?:完|尽)/i,
+    /请.*(?:充值|升级|续费)/i,
+];
+
+// Dismissable overlay patterns shared across providers. New-feature popups,
+// announcements, and welcome modals that are safe to close via CLOSE_BTN_SEL.
+const COMMON_DISMISS_PATTERNS = [
+    /新功能/i, /公告/i, /欢迎/i, /更新.*(?:说明|日志)/i,
+    /what'?s\s*new/i, /new\s*feature/i, /welcome/i,
+    /try\s*(?:the\s*)?new/i, /introducing/i,
+];
+
+// ══════════════════════════════════════════════════════════════════════════════
 // DEFAULT VALUES
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -318,23 +340,31 @@ async function waitForCompletion(page, config, startTime, timeoutMs) {
 
             if (stopMode === 'detached') {
                 // Qwen: stop button is removed from DOM when done, not just hidden.
-                // BUGFIX: previously used a flat Math.min(timeoutMs, 300000) here,
-                // ignoring time already spent on nav/quota/editor/input/send + the
-                // probe above — could let this single phase overrun the provider's
-                // remaining budget. Now mirrors the 'hidden' branch below.
                 const cap = Math.min(timeoutMs, 300000);
-                const remaining = Math.max(30000, cap - (Date.now() - startTime));
-                await stopBtn.waitFor({ state: 'detached', timeout: remaining }).catch(() => {});
+                const elapsed = Date.now() - startTime;
+                const remaining = cap - elapsed;
+                // P1-7: clamp to actual remaining budget — Math.max(30000, ...)
+                // could force an extra 30s wait even when budget is already
+                // exhausted, causing single-provider overrun that chains into
+                // totalTimeout overflow. Budget exhausted → return immediately.
+                if (remaining < 5000) break; // not enough time to wait meaningfully
+                await stopBtn.waitFor({ state: 'detached', timeout: Math.max(5000, remaining) }).catch(() => {});
             } else {
-                const remaining = Math.max(30000, timeoutMs - (Date.now() - startTime));
-                await stopBtn.waitFor({ state: 'hidden', timeout: remaining }).catch(() => {});
+                const elapsed = Date.now() - startTime;
+                const remaining = timeoutMs - elapsed;
+                if (remaining < 5000) break;
+                await stopBtn.waitFor({ state: 'hidden', timeout: Math.max(5000, remaining) }).catch(() => {});
 
                 // Extension for long-generation models (e.g. Pro Extended Thinking)
                 if (stopExt > 0) {
                     const stillWorking = await stopBtn.isVisible().catch(() => false);
                     if (stillWorking) {
-                        const extra = Math.min(stopExt, Math.max(20000, timeoutMs - (Date.now() - startTime) - 5000));
-                        if (extra > 20000) {
+                        const elapsed2 = Date.now() - startTime;
+                        const remaining2 = timeoutMs - elapsed2;
+                        // P1-7: clamp extension to remaining budget; don't force
+                        // a 20s floor when budget is already gone.
+                        const extra = Math.min(stopExt, Math.max(0, remaining2 - 5000));
+                        if (extra > 0) {
                             await stopBtn.waitFor({ state: 'hidden', timeout: extra }).catch(() => {});
                         }
                     }
@@ -643,8 +673,11 @@ function createProviderRunner(cfg) {
         }
 
         // ── Step 8: Wait for response ──
-        const respStart = Date.now();
-        const responseEl = await waitForCompletion(page, C, respStart, timeoutMs);
+        // BUGFIX: pass provStart (full provider budget start) instead of respStart
+        // (post-input reset). waitForCompletion's phase-1 comment already assumes
+        // startTime covers pre-send elapsed time; the old code gave waiting a fresh
+        // clock, letting one provider consume up to ~2× its budget.
+        const responseEl = await waitForCompletion(page, C, provStart, timeoutMs);
         if (!responseEl) {
             return classifyError(
                 new Error('No response element appeared'),
@@ -697,4 +730,7 @@ module.exports = {
     clickSend,
     waitForCompletion,
     extractResponse,
+    // Shared patterns — avoid duplicating common CN quota/dismiss regexes
+    COMMON_CN_QUOTA_PATTERNS,
+    COMMON_DISMISS_PATTERNS,
 };

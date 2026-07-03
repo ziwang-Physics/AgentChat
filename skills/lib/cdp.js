@@ -50,11 +50,13 @@ async function doctorCheck(exitOnFail = true, onLog) {
     const log = onLog || console.error;
     try {
         const res = await new Promise((resolve, reject) => {
-            http.get(CDP_URL + '/json/version', (res) => {
+            const req = http.get(CDP_URL + '/json/version', (res) => {
                 let data = '';
                 res.on('data', c => data += c);
                 res.on('end', () => resolve({ ok: true, data }));
-            }).on('error', reject);
+            });
+            req.on('error', reject);
+            req.setTimeout(5000, () => { req.destroy(); reject(new Error('CDP GET timeout')); });
         });
         log(`Chrome CDP reachable: ${res.data.substring(0, 100)}`);
         return true;

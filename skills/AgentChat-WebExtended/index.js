@@ -20,7 +20,7 @@
  * Exit codes:
  *   0 - Success (response on stdout)
  *   1 - Chrome CDP not reachable (ERR_NO_CDP)
- *   2 - No provider reachable — all auth-gated or page load failed (ERR_NO_PROVIDER)
+ *   2 - No provider reachable — all auth-gated (ERR_NO_PROVIDER)
  *   3 - Safety rejected by all providers (ERR_SAFETY_REJECTED)
  *   4 - Internal error (ERR_INTERNAL)
  *   5 - All providers rate-limited (ERR_RATE_LIMITED)
@@ -159,7 +159,10 @@ async function tryAllProviders(browser, prompt, ctx, options = {}) {
     // Only manage our own tabs — page.close() for cleanup, but NEVER browser.close().
     const { keepTabs = true } = options;
     const totalTimeout = options.totalTimeout || DEFAULT_TOTAL_TIMEOUT;
-    const providerTimeout = options.providerTimeout || Math.min(DEFAULT_PROVIDER_TIMEOUT, Math.floor(totalTimeout / 2));
+    const providerTimeout = options.providerTimeout
+        || (options.singleAttempt
+            ? Math.min(DEFAULT_PROVIDER_TIMEOUT, totalTimeout)
+            : Math.min(DEFAULT_PROVIDER_TIMEOUT, Math.floor(totalTimeout / 2)));
     const overallStart = Date.now();
 
     // Determine starting index
@@ -255,7 +258,11 @@ async function tryAllProviders(browser, prompt, ctx, options = {}) {
         }
 
         // SUCCESS: keep or close tab based on --keep-tabs flag (self-created only)
-        if (createdPage && page && !page.isClosed() && !options.keepTabs) {
+        // P0-4: use the destructured `keepTabs` (defaults to true) instead of
+        // `!options.keepTabs` — options.keepTabs is undefined when the caller
+        // doesn't pass it explicitly, and !undefined === true, which CLOSES the
+        // tab despite the documented default being "keep."
+        if (createdPage && page && !page.isClosed() && !keepTabs) {
             try { await page.close(); } catch (_) { }
         }
 
@@ -455,7 +462,9 @@ async function main() {
         );
         const allAuth = reasonValues.every(r => r.includes('auth') || r.includes('AUTH'));
         const allQuota = reasonValues.every(r => r.includes('quota') || r.includes('QUOTA') || r.includes('rate') || r.includes('RATE'));
-        const hasSafety = reasonValues.some(r => r.includes('safety') || r.includes('SAFETY'));
+        // P0-6: was .some() — "1 safety + 7 other failures" would exit 3, contradicting
+        // the documented "Safety rejected by ALL providers" semantics. Now .every().
+        const allSafety = reasonValues.every(r => r.includes('safety') || r.includes('SAFETY'));
 
         if (allAuth) {
             log('All providers require authentication. Log into at least one service in Chrome.');
@@ -467,7 +476,7 @@ async function main() {
             ctx.recordTelemetry(5);
             process.exit(5);
         }
-        if (hasSafety) {
+        if (allSafety) {
             ctx.recordTelemetry(3);
             process.exit(3);
         }

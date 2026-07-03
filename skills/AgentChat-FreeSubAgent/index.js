@@ -23,67 +23,10 @@ const fs = require("fs");
 // ═══════════════════════════════════════════════════════════════════
 // CONSTANTS
 // ═══════════════════════════════════════════════════════════════════
-const LOCK_DIR = path.join(require("os").tmpdir(), "ai_locks");
-try { fs.mkdirSync(LOCK_DIR, { recursive: true }); } catch (_) {}
-
-// Atomic mkdir-based mutex — fs.mkdirSync() is atomic on all POSIX filesystems.
-// Each provider gets a directory under LOCK_DIR; only the process that successfully
-// creates the directory holds the lock. PID is written into <dir>/pid for stale detection.
-// This eliminates the TOCTOU race between existsSync/unlinkSync/writeFileSync('wx').
-function acquireLock(provider) {
-    const lockDir = path.join(LOCK_DIR, provider);
-    try {
-        fs.mkdirSync(lockDir);  // atomic — exactly one process wins
-        fs.writeFileSync(path.join(lockDir, "pid"), String(process.pid));
-        return true;
-    } catch (_) {
-        // Directory exists — check if the owning process is still alive
-        try {
-            const pidFile = path.join(lockDir, "pid");
-            const oldPid = parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
-            try { process.kill(oldPid, 0); } catch (_) {
-                // Stale lock — remove and retry atomically
-                fs.rmSync(lockDir, { recursive: true, force: true });
-                try {
-                    fs.mkdirSync(lockDir);
-                    fs.writeFileSync(path.join(lockDir, "pid"), String(process.pid));
-                    return true;
-                } catch (_) { /* another process beat us */ }
-            }
-        } catch (_) { /* can't read pid file */ }
-        return false;
-    }
-}
-
-function releaseLock(provider) {
-    const lockDir = path.join(LOCK_DIR, provider);
-    try {
-        const pidFile = path.join(lockDir, "pid");
-        const data = fs.readFileSync(pidFile, "utf8").trim();
-        if (parseInt(data, 10) === process.pid) {
-            fs.rmSync(lockDir, { recursive: true, force: true });
-        }
-    } catch (_) {}
-}
-
-// Cleanup all locks owned by this process on exit (prevent stale locks)
-function cleanupAllLocks() {
-    let entries;
-    try { entries = fs.readdirSync(LOCK_DIR); } catch (_) { return; }
-    for (const name of entries) {
-        const lockDir = path.join(LOCK_DIR, name);
-        try {
-            const pidFile = path.join(lockDir, "pid");
-            const data = fs.readFileSync(pidFile, "utf8").trim();
-            if (parseInt(data, 10) === process.pid) {
-                fs.rmSync(lockDir, { recursive: true, force: true });
-            }
-        } catch (_) { /* skip non-lock directories */ }
-    }
-}
+const { acquireLock, releaseLock, cleanupAllLocks } = require('../lib/locks');
 process.on("exit", cleanupAllLocks);
-process.on("SIGINT", () => { cleanupAllLocks(); process.exit(); });
-process.on("SIGTERM", () => { cleanupAllLocks(); process.exit(); });
+process.on("SIGINT", () => { cleanupAllLocks(); process.exit(130); });
+process.on("SIGTERM", () => { cleanupAllLocks(); process.exit(143); });
 
 const WEBEXT = path.resolve(__dirname, "..", "AgentChat-WebExtended", "index.js");
 // Single source of truth: lib/providers/chain.js (shared with WebExtended).
@@ -128,6 +71,7 @@ function callProvider(prompt, provider, timeoutMs) {
       WEBEXT,
       `--from=${provider}`,
       `--timeout=${timeoutMs}`,
+      `--timeout-per-provider=${timeoutMs}`,
     ];
     spawnArgs.push("--keep-tabs"); // Always — never let child process close tabs
     // BUGFIX: without --single, WebExtended's --from only sets the starting index —
@@ -402,7 +346,7 @@ async function buildDAG(userTask, budgetMs) {
 // MODULE 2: PARALLEL DISPATCH + QUALITY GATE
 // ═══════════════════════════════════════════════════════════════════
 
-function qualityGate(node, result) {
+function qualityGate(result) {
   const issues = [];
   if (!result.response || result.response.length < 10) {
     issues.push("EMPTY_OR_TOO_SHORT");
@@ -423,7 +367,7 @@ async function runOneWorker(node, budgetMs, skipList = []) {
 
   try {
     const result = await executeWithFallback(primaryKey, node.prompt, budgetMs, skipList);
-    const qr = qualityGate(node, result);
+    const qr = qualityGate(result);
     const degNote = result.degradation
       ? ` ⚠ ${result.provider_used} (intended ${primaryKey})`
       : ` ✓ ${result.provider_used}`;
@@ -445,22 +389,30 @@ async function dispatchParallel(dag, budgetMs) {
   log(`━━━ Module 2: Parallel Dispatch — ${nodes.length} workers ━━━`);
   log(`  Roles: ${nodes.map(n => `${n.id}→${n.ai}(${n.role})`).join(" | ")}`);
 
-  // P1-6: Subtract stagger overhead from budget before dividing equally
+  // P0-1: Workers run in PARALLEL — wall-clock time ≈ max(single worker), not sum.
+  // Dividing by nodes.length meant --timeout=900000 gave each worker only ~160s,
+  // less than PER_CALL_CAP_MS (180s), so a single provider attempt couldn't even
+  // complete one full degradation cycle. Each worker now gets the full effective
+  // budget (minus its own stagger offset). Provider contention is already handled
+  // by file locks — no need to slice the budget further.
   const totalStaggerOverhead = (nodes.length - 1) * STAGGER_MS;
   const effectiveBudget = Math.max(nodes.length * 60000, budgetMs - totalStaggerOverhead);
-  const perNodeBudget = Math.floor(effectiveBudget / nodes.length);
 
   // Collect all primary providers so each worker avoids stepping on others' toes
   const allPrimaries = nodes.map(n => normalizeAI(n.ai));
   const uniquePrimaries = [...new Set(allPrimaries)];
 
-  // Launch all workers with stagger, each with equal budget from its own start time
+  // Launch all workers with stagger, each with the full effective budget.
+  // Workers run in parallel — each gets the remaining wall-clock budget from its
+  // own start time (minus its stagger delay to keep all workers aligned to the
+  // same deadline).
   const tasks = nodes.map((node, i) => {
     const delay = i * STAGGER_MS;
     const myPrimary = normalizeAI(node.ai);
     const skipList = uniquePrimaries.filter(p => p !== myPrimary);
+    const workerBudget = effectiveBudget - delay; // each worker's share of the wall clock
     return new Promise(resolve => setTimeout(async () => {
-      const r = await runOneWorker(node, perNodeBudget, skipList);
+      const r = await runOneWorker(node, workerBudget, skipList);
       resolve(r);
     }, delay));
   });
@@ -497,10 +449,16 @@ function keyPhrases(text) {
   for (const m of text.matchAll(/([\d.]+)\s*(eV|Å|kcal\/mol|kJ\/mol|nm|pm|kcal|kJ|％|%|degree|K\b)/gi)) {
     found.add(m[0].toLowerCase());
   }
-  // chemical formulas (Ag, HCl, H₂O, Cu(111), etc.)
+  // P1-15: chemical formulas — require at least one lowercase letter OR a
+  // digit/parenthesis to avoid matching all-caps English words (JSON, USA, AI,
+  // THE, etc.). Still catches real formulas: Ag, HCl, H₂O, Cu(111), Fe2O3.
   for (const m of text.matchAll(/\b(?:[A-Z][a-z]?(?:\d+)?(?:\([^)]*\))?){1,4}\b/g)) {
     const t = m[0].trim();
-    if (t.length >= 2 && !/^(The|This|In|On|We|It|Is|No|To|He|She|They|For|And|But|Or|A|An)$/i.test(t)) {
+    const hasLower = /[a-z]/.test(t);
+    const hasNumOrParen = /[\d()]/.test(t);
+    const isSingleUpper = /^[A-Z]$/.test(t);
+    if (t.length >= 2 && (hasLower || hasNumOrParen) && !isSingleUpper &&
+        !/^(The|This|In|On|We|It|Is|No|To|He|She|They|For|And|But|Or|A|An)$/i.test(t)) {
       found.add(t.toLowerCase());
     }
   }
@@ -762,7 +720,9 @@ async function main() {
         continue;
       }
       testedLocks.push(key);
-      const result = await callProvider("Respond with just the word OK.", key, 120000);
+      // P0-5: "OK" (2 chars) fails minResponseLength (5-10) in most adapters.
+      // Use a fixed phrase ≥10 chars so smoke tests don't systematically false-fail.
+      const result = await callProvider("Respond with exactly: Hello World", key, 120000);
       log(`  ${key}: ${result.ok ? `✓ (${result.text.length} chars)` : `✗ ${result.reason}`}`);
       // Release lock on failure — keep on success so concurrent workers skip it
       if (!result.ok) { releaseLock(key); testedLocks.pop(); }
