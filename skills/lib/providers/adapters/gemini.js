@@ -15,7 +15,7 @@
  * Dependencies: lib/geminiModelSwitch.js (ensureProExtended), lib/providerFactory.js (input helpers)
  */
 
-const { ensureProExtended } = require('../../geminiModelSwitch');
+const { ensureProExtended, ensureFlash } = require('../../geminiModelSwitch');
 
 // ── Helpers (replicated from WebExtended for self-contained adapter) ──
 
@@ -80,8 +80,9 @@ module.exports = {
     url: 'https://gemini.google.com/u/0/app',
     authDomains: ['accounts.google.com'],
 
-    // ── Pre-input: ensure Pro Extended + validate URL ──
-    preInputHook: async (page) => {
+    // ── Pre-input: tiered model activation (Pro Extended → Flash → fail) ──
+    preInputHook: async (page, cfg, logFn) => {
+        const log = logFn || (() => {});
         // Extra URL validation — must be on gemini.google.com
         const url = page.url();
         if (!url.includes('gemini.google.com')) {
@@ -91,14 +92,26 @@ module.exports = {
             );
         }
 
-        // Ensure Pro Extended Thinking is active
-        const ok = await ensureProExtended(page);
-        if (!ok) {
-            throw Object.assign(
-                new Error('Pro Extended Thinking failed to activate'),
-                { code: 'ERR_MODEL_DEGRADED' }
-            );
+        // Tier 1: Try Pro Extended Thinking (requires Gemini Pro subscription)
+        let ok = await ensureProExtended(page, 1, log);
+        if (ok) {
+            log('gemini: Pro Extended Thinking active (Pro subscription)');
+            return;
         }
+
+        // Tier 2: Pro Extended failed — fall back to Flash model (free tier)
+        log('gemini: Pro Extended unavailable, falling back to Flash (free tier)...');
+        ok = await ensureFlash(page, log);
+        if (ok) {
+            log('gemini: Flash model active (free tier fallback)');
+            return;
+        }
+
+        // Tier 3: Flash also failed — let provider chain fall to ChatGPT
+        throw Object.assign(
+            new Error('Gemini model activation failed — Pro Extended and Flash both unavailable'),
+            { code: 'ERR_MODEL_DEGRADED' }
+        );
     },
 
     // ── Editor ──

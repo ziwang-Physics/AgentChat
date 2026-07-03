@@ -25,7 +25,7 @@ const MAX_RETRIES = 2;
 // report ERR_MODEL_DEGRADED even when Extended was already active. Centralize
 // both variants here so every call site stays in sync.
 function includesExtended(t) {
-    return t.includes('延長') || t.includes('延长') || t.includes('Extended');
+    return t.includes('延長') || t.includes('延长') || t.includes('扩展') || t.includes('Extended');
 }
 function includesAdvanced(t) {
     return t.includes('進階') || t.includes('进阶');
@@ -124,7 +124,7 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
                     const items = document.querySelectorAll('gem-menu-item, [role="menuitem"]');
                     for (let i = 0; i < items.length; i++) {
                         const t = items[i].innerText || '';
-                        if (t.includes('Pro') && (t.includes('進階') || t.includes('进阶')) && !t.includes('Flash')) return i;
+                        if (t.includes('Pro') && (t.includes('進階') || t.includes('进阶') || t.includes('高等数学')) && !t.includes('Flash')) return i;
                     }
                     return -1;
                 });
@@ -154,7 +154,7 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
             const items = document.querySelectorAll('gem-menu-item, [role="menuitem"]');
             for (let i = 0; i < items.length; i++) {
                 const t = items[i].innerText || '';
-                if ((t.includes('延長') || t.includes('延长') || t.includes('Extended')) &&
+                if ((t.includes('延長') || t.includes('延长') || t.includes('扩展') || t.includes('Extended')) &&
                     !t.includes('思考') && !t.includes('Thought') &&
                     items[i].offsetParent !== null) {
                     return i;
@@ -170,7 +170,7 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
                     const items = document.querySelectorAll('gem-menu-item, [role="menuitem"]');
                     for (let i = 0; i < items.length; i++) {
                         const t = items[i].innerText || '';
-                        if ((t.includes('思考程度') || t.includes('Thinking') || t.includes('Thought')) &&
+                        if ((t.includes('思考程度') || t.includes('思考等级') || t.includes('Thinking') || t.includes('Thought')) &&
                             items[i].offsetParent !== null) return i;
                     }
                     return -1;
@@ -185,7 +185,7 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
                     const items = document.querySelectorAll('gem-menu-item, [role="menuitem"]');
                     for (let i = 0; i < items.length; i++) {
                         const t = items[i].innerText || '';
-                        if ((t.includes('延長') || t.includes('延长') || t.includes('Extended')) &&
+                        if ((t.includes('延長') || t.includes('延长') || t.includes('扩展') || t.includes('Extended')) &&
                             !t.includes('標準') && !t.includes('标准') && items[i].offsetParent !== null) return i;
                     }
                     return -1;
@@ -220,7 +220,7 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
             );
             if (!btn) return false;
             const aria = btn.getAttribute('aria-label') || btn.textContent || '';
-            return aria.includes('延長') || aria.includes('延长') || aria.includes('Extended');
+            return aria.includes('延長') || aria.includes('延长') || aria.includes('扩展') || aria.includes('Extended');
         }, null, { timeout: 5000 }).catch(() => false);
 
         if (isActive) {
@@ -233,4 +233,108 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
     return false;
 }
 
-module.exports = { ensureProExtended, waitForMenuItemsFilled };
+/**
+ * Switch Gemini to Flash model with standard thinking (free tier).
+ * Used as fallback when Pro Extended is unavailable (no subscription).
+ *
+ * @param {Page} page — Playwright page on gemini.google.com
+ * @param {(msg: string) => void} [onLog] — log callback
+ * @returns {Promise<boolean>} true if Flash model is active
+ */
+async function ensureFlash(page, onLog) {
+    const log = onLog || (() => {});
+
+    // Check if Flash is already active
+    const currentAria = await page.evaluate(() => {
+        const btn = document.querySelector(
+            'button[aria-label*="模式挑選器"], button[aria-label*="Model selector"], button[aria-label*="模式选择器"]'
+        );
+        return btn ? (btn.getAttribute('aria-label') || btn.textContent || '').trim() : 'UNKNOWN';
+    });
+
+    if (currentAria.includes('Flash')) {
+        log('gemini: Flash model already active');
+        return true;
+    }
+
+    // Step 1: Open model selector
+    try {
+        const btn = page.locator(
+            'button[aria-label*="模式挑選器"], button[aria-label*="Model selector"], button[aria-label*="模式选择器"]'
+        ).first();
+        await btn.waitFor({ state: 'visible', timeout: 5000 });
+        await btn.click();
+    } catch {
+        log('gemini WARN: Cannot open model selector for Flash switch.');
+        return false;
+    }
+
+    // Wait for menu to render
+    try {
+        await page.locator('[role="menu"]').waitFor({ state: 'visible', timeout: 5000 });
+    } catch {
+        log('gemini WARN: Menu did not appear.');
+        return false;
+    }
+
+    if (!(await waitForMenuItemsFilled(page))) {
+        log('gemini WARN: Menu items never filled for Flash switch.');
+        return false;
+    }
+
+    // Step 2: Find and click Flash (prefer "3.5 Flash" over "3.1 Flash-Lite")
+    // Flash menu items contain "Flash" but NOT "Pro"
+    // Prioritize the non-Lite variant: "3.5 Flash" > "3.1 Flash-Lite"
+    const flashIdx = await page.evaluate(() => {
+        const items = document.querySelectorAll('gem-menu-item, [role="menuitem"]');
+        // First pass: look for "Flash" without "Lite"
+        for (let i = 0; i < items.length; i++) {
+            const t = items[i].innerText || '';
+            if (t.includes('Flash') && !t.includes('Lite') && !t.includes('极速')) return i;
+        }
+        // Second pass: accept Flash-Lite as fallback
+        for (let i = 0; i < items.length; i++) {
+            const t = items[i].innerText || '';
+            if (t.includes('Flash') && !t.includes('Pro')) return i;
+        }
+        return -1;
+    });
+
+    if (flashIdx < 0) {
+        log('gemini WARN: Flash menu item not found.');
+        await page.keyboard.press('Escape');
+        return false;
+    }
+
+    try {
+        await page.locator('gem-menu-item, [role="menuitem"]').nth(flashIdx).click();
+        log('gemini: selected Flash model');
+    } catch {
+        log('gemini WARN: Flash menu item not clickable.');
+        await page.keyboard.press('Escape');
+        return false;
+    }
+
+    // Step 3: Ensure thinking level is Standard (not Extended, because Flash doesn't support it)
+    await page.waitForTimeout(1500);
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(500);
+
+    // Verify Flash is active
+    const finalAria = await page.evaluate(() => {
+        const btn = document.querySelector(
+            'button[aria-label*="模式挑選器"], button[aria-label*="Model selector"], button[aria-label*="模式选择器"]'
+        );
+        return btn ? (btn.getAttribute('aria-label') || btn.textContent || '').trim() : 'UNKNOWN';
+    });
+
+    if (finalAria.includes('Flash')) {
+        log(`gemini: Verified Flash model active (${finalAria}).`);
+        return true;
+    }
+
+    log(`gemini: Flash switch not confirmed. Current: "${finalAria}"`);
+    return false;
+}
+
+module.exports = { ensureProExtended, ensureFlash, waitForMenuItemsFilled };
