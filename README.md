@@ -13,42 +13,23 @@
 
 ## 什么是 Free Web-SubAgent ？
 
-- 一套零成本的 Claude Code 技能套件，通过接管本地 Chrome 浏览器桥接 8 个免费网页 AI
-- 支持串行降级（单模型自动切换）与并行编排（角色分工+证据仲裁)
-- 免费额度用尽后自动切换到下一个免费模型
+- 🎭一套零成本的 Claude Code 技能套件，通过接管本地 Chrome 浏览器桥接 8 个免费网页 AI
+- 🛡支持串行降级（单模型自动切换）与并行编排（角色分工+证据仲裁)
+- 💸免费额度用尽后自动切换到下一个免费模型
 
-## 为什么用这个？
+## 📂 Skills 概览
 
-1. 💸 **零 API 成本** — 桥接 8 个免费网页版 AI，生成的数万 token 思考过程不花一分钱
-2. 🎭 **AI 角色分工体系** — Kimi=研究员 · Gemini=深度推理 · Qwen=事实核查 · ChatGPT=创意构建，互补不重叠
-3. 🛡️ **8-Provider 智能降级** — `Gemini → ChatGPT → Claude → Qwen → Kimi → MiniMax → MiMo → DeepSeek`
-4. ⚖️ **证据仲裁机制** — 多 worker 并发结果经过质量门 + 长度差异检测 + 置信度计算，不盲目合并
-5. 🎯 **薄编排器架构** — `FreeSubAgent` 零 provider 代码重复，所有 AI 调用委托给 `WebExtended`
+| Skill | 类型 | 职责 | 何时用 |
+|-------|------|------|--------|
+| **AgentChat-WebExtended** | 串行降级链 | 只使用一个你最喜欢的ai，免费额度耗尽自动切换，8-Provider 自动 fallback
+| **AgentChat-FreeSubAgent** | 并行编排 | 适合大量独立性较高的任务，如16个独立任务让8个Web 端分别执行两个任务
+| **Web-SubAgent-Workflow** | 串行管道 | 核心Skill（架构图如下），6 步 AI 管道：你的Agent规划→Kimi 搜索→Gemini 推理→Agent 合成→ChatGPT或Claude 审查 | 深度推理 + 质量审查 |
 
 ---
 
 ## 🏗️ Architecture
 
 ![AgentChat Architecture](1.png)
-
-**三层设计（零代码重复）**：
-
-```
-AgentChat-FreeSubAgent  (编排层)
-    │  child_process.spawn()
-    ▼
-AgentChat-WebExtended   (Provider 唯一实现)
-    │  createProviderRunner() ← lib/providers/adapters/*.js (8 config, ~666 lines)
-    │  playwright-core → Chrome CDP :9222
-    ▼
-Chrome → Gemini / ChatGPT / Claude / Qwen / Kimi / MiniMax / MiMo / DeepSeek
-```
-
-- **编排层**只负责拆任务、派发、仲裁，不含任何 provider 实现
-- **Provider 层**是单源真相——新增一个 AI 只需写一个 adapter config（~30-200 行），`FreeSubAgent` 自动受益
-- **Provider 差异**全部外置在 `lib/providers/adapters/*.js`，核心管线 `providerFactory.js` 零重复
-
----
 
 ## 🚀 Quick Start（5 分钟）
 
@@ -149,38 +130,51 @@ node skills/AgentChat-WebExtended/index.js --smoke
 ```
 AgentChat/
 ├── .env.example                         # 配置模板
+├── .gitignore
+├── LICENSE                              # MIT
 ├── package.json                         # 根依赖（playwright-core，共享 lib 使用）
-├── README.md                            # 👤 人类文档（你正在看）
+├── README.md                            # 👤 人类文档
+├── 1.png                                # 架构图
 ├── scripts/
-│   ├── setup.sh                         # 环境检查
-│   ├── start-chrome-debug.sh            # Chrome daemon（idempotent）
-│   ├── start-chrome-debug.py            # Playwright daemon
-│   └── connect-gemini.sh                # 一键连接 Gemini
+│   ├── setup.sh / setup.bat             # 环境一键检查
+│   ├── start-chrome-debug.sh            # Chrome CDP daemon（idempotent, Linux）
+│   ├── start-chrome-debug.py            # Python daemon v3 — 事件驱动 Chrome 生命周期管理
+│   ├── start-chrome.ps1                 # Windows PowerShell 启动
+│   └── connect-gemini.sh / .ps1         # 一键连接 Gemini
 └── skills/
-    ├── lib/                               # 共享库（15 files, ~1800 lines）
-    │   ├── providerFactory.js             #   核心管线 — DRY 10-step pipeline
-    │   ├── errors.js                      #   错误分类 + ProviderError
-    │   ├── cdp.js                         #   CDP 连接 + 重试
-    │   ├── terminal.js                    #   终端 spinner + 进度
+    ├── lib/                               # 🔗 共享库（零代码重复的核心）
+    │   ├── execute.js                     #   统一子进程执行器（callProvider / runChain）
+    │   ├── providerFactory.js             #   10-step config-driven pipeline
+    │   ├── errors.js                      #   ProviderError + 管道阶段追踪
+    │   ├── cdp.js                         #   CDP 连接 + 重试 + doctor
+    │   ├── terminal.js                    #   终端 spinner + 计时器
     │   ├── telemetry.js                   #   遥测日志轮转
-    │   ├── geminiModelSwitch.js           #   Gemini Pro Extended 模型切换
-    │   ├── prompts.js                     #   Prompt 模板
-    │   └── providers/adapters/            #   8 个 provider config（"单源真相"）
-    │       ├── gemini.js                  #     Pro Extended + bursty 检测
-    │       ├── chatgpt.js                 #     3-tier 输入 + React send-btn
-    │       ├── claude.js                  #     ProseMirror + Thinking 过滤
-    │       ├── qwen.js                    #     React SPA + stop-btn detached
-    │       ├── kimi.js                    #     新建会话 + 自适应稳定性
-    │       ├── minimax.js                 #     TipTap 异步挂载
-    │       ├── mimo.js                    #     DOM 遍历 send button
-    │       └── deepseek.js                #     标准管线
+    │   ├── locks.js                       #   文件锁（mkdir 原子性，provider 互斥）
+    │   ├── geminiModelSwitch.js           #   Gemini Pro Extended / Flash 模型切换
+    │   ├── prompts.js                     #   DAG 拆解 prompt 模板
+    │   └── providers/
+    │       ├── chain.js                   #   Provider 优先级链（单一真相源）
+    │       └── adapters/                  #   8 个 provider config（"单源真相"）
+    │           ├── gemini.js              #     Pro Extended + bursty 检测 + safety 过滤
+    │           ├── chatgpt.js             #     3-tier 输入 + React send-btn 验证
+    │           ├── claude.js              #     ProseMirror + Thinking 占位符过滤
+    │           ├── qwen.js                #     React SPA + stop-btn detached
+    │           ├── kimi.js                #     新建会话 + 自适应稳定性窗口
+    │           ├── minimax.js             #     TipTap 异步挂载
+    │           ├── mimo.js                #     DOM 遍历 send button
+    │           └── deepseek.js            #     标准管线
     ├── AgentChat-WebExtended/           # 8-Provider Fallback Chain
     │   ├── SKILL.md                     # 🤖 AI 操作指南
-    │   ├── index.js                     # 编排入口（~450 lines，零 provider 代码）
-    │   └── package.json
-    └── AgentChat-FreeSubAgent/          # 并行编排器
-        ├── SKILL.md                     # 🤖 AI 操作指南 + 角色分工
-        └── index.js                     # 薄编排器，零 provider 代码
+    │   ├── index.js                     # 编排入口（~530 行，零 provider 代码）
+    │   ├── CHANGELOG.md                 # 变更日志
+    │   ├── package.json
+    │   └── data/                        # 遥测数据
+    ├── AgentChat-FreeSubAgent/          # 并行编排器（DAG + 波次调度 + 证据仲裁）
+    │   ├── SKILL.md                     # 🤖 AI 操作指南 + 角色分工
+    │   └── index.js                     # 薄编排器（~710 行，零 provider 代码）
+    └── Web-SubAgent-Workflow/           # 串行 6 步管道
+        ├── SKILL.md                     # 🤖 AI 操作指南
+        └── index.js                     # 管道 helper（~160 行，零 provider 代码）
 ```
 
 ---
