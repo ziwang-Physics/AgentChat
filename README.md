@@ -54,18 +54,17 @@ bash scripts/setup.sh          # 环境检查
 bash scripts/start-chrome-debug.sh  # 启动 Chrome daemon
 ```
 
-### 3. 使用
+### 3. 使用场景
 
 ```bash
-# 单 prompt — 自动选择 provider（内置 fallback）
-/AgentChat-WebExtended 什么是量子点（默认使用Gemini）
+# 单 prompt 高可用 — 自动 fallback
+/AgentChat-WebExtended 帮我写Python脚本/根据文字生成视频
 
-# 指定 provider
-/AgentChat-WebExtended 使用Claude解释量子限域效应（可指定Ai）
+# 8 路并发 — 大量高独立性任务
+/AgentChat-FreeSubAgent 高独立性的多个任务：根据我的任务调用8个ai生成8个脚本/8个视频
 
-# 4 路并发编排 — 任务自动拆解 + 证据仲裁
-/AgentChat-FreeSubAgent 量子点做什么容易发Nature（Kimi查+Gemini推+Qwen核+ChatGPT写）
-
+# 串行深度管道 — 规划→搜索→推理→合成→审查→修复
+/Web-SubAgent-Workflow 帮我设计一个高并发消息队列的架构方案
 ```
 
 ## 🧠 Claude Code Integration
@@ -81,21 +80,6 @@ bash scripts/start-chrome-debug.sh  # 启动 Chrome daemon
 > 通过 symlink 将 `skills/` 目录链接到 `~/.claude/skills/`，Claude Code 即可自主调度这些免费资源。
 
 ---
-
-## 📊 使用场景
-
-### Claude Code 中（Slash Command）
-
-```bash
-# 单 prompt 高可用 — 自动 fallback
-/AgentChat-WebExtended 帮我写Python脚本/根据文字生成视频
-
-# 4 路并发 — 角色分工 + 证据仲裁
-/AgentChat-FreeSubAgent 高独立性的多个任务：根据我的任务调用8个ai生成8个脚本/8个视频
-
-# 串行深度管道 — 规划→搜索→推理→合成→审查→修复
-/Web-SubAgent-Workflow 帮我设计一个高并发消息队列的架构方案
-```
 
 ### 环境诊断
 
