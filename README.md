@@ -87,27 +87,23 @@ bash scripts/start-chrome-debug.sh  # 启动 Chrome daemon
 ### Claude Code 中（Slash Command）
 
 ```bash
-# 单 prompt — 自动 fallback，第一个可用 provider 返回
-/AgentChat-WebExtended 解释量子限域效应
-
-# 指定 provider 起始
-/AgentChat-WebExtended --from=ChatGPT 帮我写一段 Python 脚本
+# 单 prompt 高可用 — 自动 fallback
+/AgentChat-WebExtended 帮我写Python脚本/根据文字生成视频
 
 # 4 路并发 — 角色分工 + 证据仲裁
-/AgentChat-FreeSubAgent 复杂问题拆分如：量子点理论计算方向做什么容易发文章
+/AgentChat-FreeSubAgent 复杂问题：根据我的任务调用8个ai生成8个脚本/8个视频
+
+# 串行深度管道 — 规划→搜索→推理→合成→审查→修复
+/Web-SubAgent-Workflow 帮我设计一个高并发消息队列的架构方案
 ```
 
-### 终端直接调用
+### 环境诊断
 
 ```bash
-# 🔬 学术研究 — 4 路并发
-node skills/AgentChat-FreeSubAgent/index.js "量子点理论计算方向做什么最好发文章"
-
-# 💻 代码审查 — 单路高可用，自动降级保证不挂
-node skills/AgentChat-WebExtended/index.js "Review this diff for bugs and suggest improvements"
-
-# 🩺 环境检查
-node skills/AgentChat-WebExtended/index.js --smoke
+node skills/AgentChat-WebExtended/index.js --smoke     # 遍历 8 个 provider
+node skills/AgentChat-WebExtended/index.js --doctor    # CDP 端口连通性检查
+node skills/AgentChat-FreeSubAgent/index.js --smoke    # 并行编排环境检查
+node skills/Web-SubAgent-Workflow/index.js --doctor    # 串行管道环境检查
 ```
 
 ---
