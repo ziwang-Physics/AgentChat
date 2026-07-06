@@ -217,11 +217,13 @@ class GeminiSession:
 
         # 提取降级链
         for line in stderr.split("\n"):
-            # "Fallback chain: gemini → chatgpt → claude → qwen"
+            # "Fallback chain: gemini → chatgpt → claude → qwen (3 provider(s) skipped)"
             m = re.search(r"Fallback chain:\s*(.+)", line)
             if m:
+                # 去掉末尾的 "(N provider(s) skipped)" 括号说明
+                raw = re.sub(r"\s*\(\d+\s*provider\(s\)\s*skipped\)", "", m.group(1))
                 result.fallback_chain = [
-                    p.strip() for p in m.group(1).split("→")
+                    p.strip() for p in raw.split("→") if p.strip()
                 ]
                 # 如果有降级链，设置 provider_used 为最后一个
                 if result.fallback_chain and not result.provider_used:
