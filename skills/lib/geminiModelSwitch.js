@@ -17,16 +17,17 @@
 
 const MAX_RETRIES = 2;
 
-// BUGFIX: the model-selector button query already matched both Traditional
-// ('模式挑選器') and Simplified ('模式选择器') Chinese labels, but the checks that
-// decide *whether Extended/Pro is already active* only ever tested the
-// Traditional forms ('延長' / '進階' / '標準'). On a Simplified Chinese UI those
-// checks never matched, so ensureProExtended() would loop until maxRetries and
-// report ERR_MODEL_DEGRADED even when Extended was already active. Centralize
-// both variants here so every call site stays in sync.
-function includesExtended(t) {
-    return t.includes('延長') || t.includes('延长') || t.includes('扩展') || t.includes('Extended');
-}
+// v7: 选择器集中管理。所有语言相关文本从 locales/gemini.js 读取，
+// 不再硬编码任何 zh-TW / zh-CN / en / ja 关键字。
+// 新增语言只需在 locales/gemini.js 追加一个 profile。
+const L = require('./locales/gemini');
+
+// locale-aware helpers — delegate to the profiles loaded above
+const includesExtended  = (t) => L.txt('extended').test(t);
+const includesStandard  = (t) => L.txt('standard').test(t);
+// Pro model check: innerText 含 "Pro" 且含当前 locale 的 proDesc
+const proDesc           = () => L.txt('proDesc');
+const modelBtnSelector  = () => L.modelBtnCSS();
 
 // Helper: wait for menu items to have actual text content (Angular CDK overlay fix)
 async function waitForMenuItemsFilled(page, timeoutMs = 5000) {
@@ -57,6 +58,13 @@ async function waitForMenuItemsFilled(page, timeoutMs = 5000) {
 async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
     const log = onLog || (() => {});
 
+    // Auto-detect Gemini UI locale on first call
+    if (!L.locale) {
+        const detected = await L.detectLocale(page);
+        L.setLocale(detected);
+        if (detected) log(`gemini: detected locale ${detected}`);
+    }
+
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         if (attempt > 0) {
             log(`gemini: retry ${attempt}/${maxRetries} — reloading page`);
@@ -72,12 +80,11 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
         await page.waitForTimeout(500);
 
         // Check current mode via aria-label (authoritative, not textContent)
-        const currentAria = await page.evaluate(() => {
-            const btn = document.querySelector(
-                'button[aria-label*="模式挑選器"], button[aria-label*="Model selector"], button[aria-label*="模式选择器"]'
-            );
+        const _mbs = modelBtnSelector();
+        const currentAria = await page.evaluate((sel) => {
+            const btn = document.querySelector(sel);
             return btn ? (btn.getAttribute('aria-label') || btn.textContent || '').trim() : 'UNKNOWN';
-        });
+        }, _mbs);
         log(`gemini attempt ${attempt}: current mode = "${currentAria}"`);
 
         if (includesExtended(currentAria)) {
@@ -88,7 +95,7 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
         // Step 1: Open model selector
         try {
             const selectorBtn = page.locator(
-                'button[aria-label*="模式挑選器"], button[aria-label*="Model selector"], button[aria-label*="模式选择器"]'
+                modelBtnSelector()
             ).first();
             await selectorBtn.waitFor({ state: 'visible', timeout: 5000 });
             await selectorBtn.click();
@@ -114,14 +121,16 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
         if (!modeIsPro) {
             log('gemini: switching to Pro model');
             try {
-                const proIdx = await page.evaluate(() => {
+                const _pd = proDesc();
+                const proIdx = await page.evaluate((pd) => {
                     const items = document.querySelectorAll('gem-menu-item, [role="menuitem"]');
+                    const re = new RegExp(pd.source, pd.flags);
                     for (let i = 0; i < items.length; i++) {
                         const t = items[i].innerText || '';
-                        if (t.includes('Pro') && (t.includes('進階') || t.includes('进阶') || t.includes('高等数学')) && !t.includes('Flash')) return i;
+                        if (t.includes('Pro') && re.test(t) && !t.includes('Flash')) return i;
                     }
                     return -1;
-                });
+                }, { source: _pd.source, flags: _pd.flags });
                 if (proIdx < 0) throw new Error('Pro item not found');
 
                 await page.locator('gem-menu-item, [role="menuitem"]').nth(proIdx).click();
@@ -129,7 +138,7 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
 
                 // Model switch often closes menu — reopen for thinking level
                 const selectorBtn2 = page.locator(
-                    'button[aria-label*="模式挑選器"], button[aria-label*="Model selector"], button[aria-label*="模式选择器"]'
+                    modelBtnSelector()
                 ).first();
                 await selectorBtn2.click();
                 await page.locator('[role="menu"]').waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
@@ -144,46 +153,48 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
         }
 
         // Step 3: Expand thinking level submenu
-        let extendedIdx = await page.evaluate(() => {
+        const _extRe = L.txt('extended'); const _thinkRe = L.txt('thinking');
+        let extendedIdx = await page.evaluate(({extSrc, extFlags, thinkSrc, thinkFlags}) => {
             const items = document.querySelectorAll('gem-menu-item, [role="menuitem"]');
+            const extRe = new RegExp(extSrc, extFlags);
+            const thinkRe = new RegExp(thinkSrc, thinkFlags);
             for (let i = 0; i < items.length; i++) {
                 const t = items[i].innerText || '';
-                if ((t.includes('延長') || t.includes('延长') || t.includes('扩展') || t.includes('Extended')) &&
-                    !t.includes('思考') && !t.includes('Thought') &&
-                    items[i].offsetParent !== null) {
-                    return i;
-                }
+                if (extRe.test(t) && !thinkRe.test(t) && items[i].offsetParent !== null) return i;
             }
             return -1;
-        });
+        }, {extSrc: _extRe.source, extFlags: _extRe.flags, thinkSrc: _thinkRe.source, thinkFlags: _thinkRe.flags});
 
         if (extendedIdx < 0) {
             log('gemini: expanding thinking-level choices');
             try {
-                const thinkIdx = await page.evaluate(() => {
+                const _tr = L.txt('thinking');
+                const thinkIdx = await page.evaluate(({thinkSrc, thinkFlags}) => {
                     const items = document.querySelectorAll('gem-menu-item, [role="menuitem"]');
+                    const re = new RegExp(thinkSrc, thinkFlags);
                     for (let i = 0; i < items.length; i++) {
                         const t = items[i].innerText || '';
-                        if ((t.includes('思考程度') || t.includes('思考等级') || t.includes('Thinking') || t.includes('Thought')) &&
-                            items[i].offsetParent !== null) return i;
+                        if (re.test(t) && items[i].offsetParent !== null) return i;
                     }
                     return -1;
-                });
+                }, {thinkSrc: _tr.source, thinkFlags: _tr.flags});
                 if (thinkIdx < 0) throw new Error('Thinking level item not found');
 
                 await page.locator('gem-menu-item, [role="menuitem"]').nth(thinkIdx).click();
                 await page.waitForTimeout(2000);
 
-                // Re-query: now the L1 "延長" item should be visible
-                extendedIdx = await page.evaluate(() => {
+                // Re-query: Extended should now be visible in submenu
+                const _ext2 = L.txt('extended'); const _std2 = L.txt('standard');
+                extendedIdx = await page.evaluate(({extSrc, extFlags, stdSrc, stdFlags}) => {
                     const items = document.querySelectorAll('gem-menu-item, [role="menuitem"]');
+                    const extRe = new RegExp(extSrc, extFlags);
+                    const stdRe = new RegExp(stdSrc, stdFlags);
                     for (let i = 0; i < items.length; i++) {
                         const t = items[i].innerText || '';
-                        if ((t.includes('延長') || t.includes('延长') || t.includes('扩展') || t.includes('Extended')) &&
-                            !t.includes('標準') && !t.includes('标准') && items[i].offsetParent !== null) return i;
+                        if (extRe.test(t) && !stdRe.test(t) && items[i].offsetParent !== null) return i;
                     }
                     return -1;
-                });
+                }, {extSrc: _ext2.source, extFlags: _ext2.flags, stdSrc: _std2.source, stdFlags: _std2.flags});
                 if (extendedIdx < 0) throw new Error('Extended option not found after expanding');
             } catch {
                 log('gemini WARN: Could not expand thinking level menu.');
@@ -210,11 +221,11 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
         // Verify via aria-label (authoritative source)
         const isActive = await page.waitForFunction(() => {
             const btn = document.querySelector(
-                'button[aria-label*="模式挑選器"], button[aria-label*="Model selector"], button[aria-label*="模式选择器"]'
+                modelBtnSelector()
             );
             if (!btn) return false;
             const aria = btn.getAttribute('aria-label') || btn.textContent || '';
-            return aria.includes('延長') || aria.includes('延长') || aria.includes('扩展') || aria.includes('Extended');
+            return includesExtended(aria);
         }, null, { timeout: 5000 }).catch(() => false);
 
         if (isActive) {
@@ -238,10 +249,17 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
 async function ensureFlash(page, onLog) {
     const log = onLog || (() => {});
 
+    // Auto-detect locale if not yet set
+    if (!L.locale) {
+        const detected = await L.detectLocale(page);
+        L.setLocale(detected);
+        if (detected) log(`gemini: detected locale ${detected}`);
+    }
+
     // Check if Flash is already active
     const currentAria = await page.evaluate(() => {
         const btn = document.querySelector(
-            'button[aria-label*="模式挑選器"], button[aria-label*="Model selector"], button[aria-label*="模式选择器"]'
+            modelBtnSelector()
         );
         return btn ? (btn.getAttribute('aria-label') || btn.textContent || '').trim() : 'UNKNOWN';
     });
@@ -254,7 +272,7 @@ async function ensureFlash(page, onLog) {
     // Step 1: Open model selector
     try {
         const btn = page.locator(
-            'button[aria-label*="模式挑選器"], button[aria-label*="Model selector"], button[aria-label*="模式选择器"]'
+            modelBtnSelector()
         ).first();
         await btn.waitFor({ state: 'visible', timeout: 5000 });
         await btn.click();
@@ -317,7 +335,7 @@ async function ensureFlash(page, onLog) {
     // Verify Flash is active
     const finalAria = await page.evaluate(() => {
         const btn = document.querySelector(
-            'button[aria-label*="模式挑選器"], button[aria-label*="Model selector"], button[aria-label*="模式选择器"]'
+            modelBtnSelector()
         );
         return btn ? (btn.getAttribute('aria-label') || btn.textContent || '').trim() : 'UNKNOWN';
     });
@@ -331,4 +349,4 @@ async function ensureFlash(page, onLog) {
     return false;
 }
 
-module.exports = { ensureProExtended, ensureFlash, waitForMenuItemsFilled };
+module.exports = { ensureProExtended, ensureFlash, waitForMenuItemsFilled, locales: L };
