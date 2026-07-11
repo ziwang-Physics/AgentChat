@@ -28,6 +28,7 @@ const fs = require("fs");
 // CONSTANTS
 // ═══════════════════════════════════════════════════════════════════
 const { acquireLock, releaseLock, cleanupAllLocks } = require('../lib/locks');
+const { makeRunId, emitReceipt } = require('../lib/receipt');
 process.on("exit", cleanupAllLocks);
 process.on("SIGINT", () => { cleanupAllLocks(); process.exit(130); });
 process.on("SIGTERM", () => { cleanupAllLocks(); process.exit(143); });
@@ -681,6 +682,7 @@ async function main() {
   }
 
   const T0 = Date.now();
+  const RUN_ID = makeRunId(); // execution receipt id (see lib/receipt.js)
 
   if (smoke) {
     log("Smoke test: checking all providers via WebExtended...");
@@ -722,6 +724,31 @@ async function main() {
   printStructuredOutput(dag, results, arbitration, Date.now() - T0);
 
   const failCount = Object.values(results).filter(r => !r?.output?.response).length;
+  const exitCode = failCount === dag.nodes.length ? 2 : 0;
+
+  // Execution receipt — appended to STDOUT (this file's stdout is an
+  // agent-readable report, not a machine contract). The calling agent must
+  // quote this line in its final answer as proof of execution; the random
+  // run_id is also persisted to data/receipts.jsonl for user-side grep
+  // verification. Emitted for failure runs too (exit=2): "executed but all
+  // workers failed" must be reported with evidence, never silently replaced
+  // by the agent's own answer.
+  emitReceipt({
+    skillDir: __dirname,
+    skill: 'AgentChat-FreeSubAgent',
+    runId: RUN_ID,
+    fields: {
+      exit: exitCode,
+      nodes: dag.nodes.length,
+      failed: failCount,
+      providers_used: Object.fromEntries(
+        Object.entries(results).map(([id, r]) => [id, r?.output?.provider_used || null])
+      ),
+      total_ms: Date.now() - T0,
+    },
+    stream: 'stdout',
+  });
+
   // P0 FLUSH FIX: process.exit() right after console.log() truncates piped
   // stdout at the pipe-buffer boundary (~128KB Linux, less on Windows) — the
   // SYNTHESIS BRIEF + raw responses easily exceed that when Claude Code
@@ -729,7 +756,7 @@ async function main() {
   // reaped, executor timers cleared), so setting exitCode and returning lets
   // Node drain stdout completely and exit naturally. The process.on("exit")
   // cleanupAllLocks handler still fires.
-  process.exitCode = failCount === dag.nodes.length ? 2 : 0;
+  process.exitCode = exitCode;
 }
 
 // BUGFIX: previously called main() unconditionally, so simply require()'ing this

@@ -1,6 +1,6 @@
 ---
 name: AgentChat-FreeSubAgent
-description: Parallel AI task decomposition orchestrator — Claude Code decomposes tasks & writes prompts → Node.js concurrent dispatch to AgentChat-WebExtended → quality gates + evidence arbitration. Use for parallel AI processing, multi-model orchestration, task decomposition, concurrent AI workers, or "ask multiple AIs at once".
+description: Parallel AI task decomposition orchestrator — Claude Code decomposes tasks & writes prompts → Node.js concurrent dispatch to AgentChat-WebExtended → quality gates + evidence arbitration. Use for parallel AI processing, multi-model orchestration, task decomposition, concurrent AI workers, or "ask multiple AIs at once". MANDATORY EXECUTION - invoking this skill REQUIRES writing the JSON plan and running `node skills/AgentChat-FreeSubAgent/index.js --timeout=900000 '<JSON>'`, then quoting the `[receipt] AGENTCHAT_RUN` line from its output in the final answer; describing the workflow or answering from model knowledge without a receipt is a violation.
 ---
 
 # Parallel AI Decompose — Thin Orchestrator over AgentChat-WebExtended
@@ -10,13 +10,38 @@ description: Parallel AI task decomposition orchestrator — Claude Code decompo
 > **🛡 安全策略**: 永远不关闭用户 Chrome。`--keep-tabs` 硬编码为 true。
 > **Provider 层**: 单一源 — `AgentChat-WebExtended` (8 providers, 零代码重复)
 
-## ⚠️ 强制规则 — 调用即执行
+## ⚠️ 强制规则 — 调用即执行（首要动作契约）
 
-**本 skill 被调用时，必须执行 `node` 命令将任务派发到多个 AI。禁止只解释流程而不执行。**
+**本 skill 被调用（如 `/AgentChat-FreeSubAgent <任务>`）时，必须把任务真实派发到多个 web AI。禁止只解释流程而不执行，禁止用模型自身知识替代各 worker 的产出。**
 
-- ❌ 禁止：读完 SKILL.md 后讲解 4 角色分工、描述 DAG 并发原理——却不跑 `node index.js`
-- ✅ 必须：拆解任务 → 写 JSON plan → `node skills/AgentChat-FreeSubAgent/index.js --timeout=900000 '<JSON>'` 作为核心动作。结果返回后才可补充你的解读
-- 例外：`--smoke`、`--doctor`，或用户明确要求"只检查环境不发送"
+### 1. 首要动作契约
+读完本 SKILL.md 后，唯一允许的中间步骤是 Step 1-2（拆解任务、写 JSON plan）。写完 plan 后的**下一个工具调用**必须是：
+
+```bash
+node skills/AgentChat-FreeSubAgent/index.js --timeout=900000 '<DAG_JSON_STRING>'
+```
+
+结果返回后才可补充你的解读。禁止在拆解之后转而自己回答各子任务。
+
+### 2. 执行回执（receipt）— 是否执行以此为准，不以叙述为准
+每次真实执行（含失败）都会在 **stdout 报告末尾**输出一行机器生成的回执：
+
+```
+[receipt] AGENTCHAT_RUN {"run_id":"ac-xxxxxxxxxxxx","skill":"AgentChat-FreeSubAgent","exit":0,"nodes":4,"failed":0,"providers_used":{...},...}
+```
+
+- **最终回答必须原样引用这行 receipt**（至少包含 run_id、nodes、failed、providers_used）。
+- 没有 receipt = 没有执行 = 违规，必须回去执行。
+- `run_id` 随机生成并落盘 `skills/AgentChat-FreeSubAgent/data/receipts.jsonl`，用户可 `grep <run_id>` 核对，凭空编造无法通过核对。
+- **全部 worker 失败（exit=2）同样有 receipt**：引用失败回执、说明各 provider 失败原因，之后才允许用模型自身能力回答，并明确标注"web AI 未参与"。
+
+### 3. 违规模式（全部禁止）
+- ❌ 读完 SKILL.md 后讲解 4 角色分工、描述 DAG 并发原理——却不跑 `node index.js`
+- ❌ 写完 JSON plan 后不派发，转而自己逐个"扮演"各角色作答
+- ❌ 回答中没有 `[receipt] AGENTCHAT_RUN` 行却声称"已由多个 AI 并行处理"
+
+### 4. 例外
+仅限：`--smoke`、`--doctor`，或用户明确要求"只检查环境不发送"。这两种模式不产生 receipt，属预期行为。
 
 ## Architecture
 
@@ -127,7 +152,8 @@ node skills/AgentChat-FreeSubAgent/index.js --timeout=900000 "$(cat /tmp/ai_plan
 
 ### Step 4: 解读结果 & 呈现给用户
 
-脚本输出结构化仲裁报告 + 各 worker 完整响应。Claude Code 解读并呈现给用户。
+脚本输出结构化仲裁报告 + 各 worker 完整响应 + 末尾一行 `[receipt] AGENTCHAT_RUN {...}`。
+Claude Code 解读并呈现给用户，**最终回答末尾必须原样附上该 receipt 行**（强制规则 §2）。
 
 ## Fallback Chain
 

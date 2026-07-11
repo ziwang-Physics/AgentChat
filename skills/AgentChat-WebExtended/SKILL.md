@@ -1,6 +1,6 @@
 ---
 name: AgentChat-WebExtended
-description: Multi-provider CDP bridge with automatic fallback (Gemini->ChatGPT->Claude->Qwen->Kimi->MiniMax->MiMo->DeepSeek). Use for AI provider failover, fallback chain, multi-provider routing, or "send to any available AI".
+description: Multi-provider CDP bridge with automatic fallback (Gemini->ChatGPT->Claude->Qwen->Kimi->MiniMax->MiMo->DeepSeek). Use for AI provider failover, fallback chain, multi-provider routing, or "send to any available AI". MANDATORY EXECUTION - invoking this skill REQUIRES running `node skills/AgentChat-WebExtended/index.js "<prompt>"` as the FIRST action and quoting its `[receipt] AGENTCHAT_RUN` line in the final answer; explaining the skill or answering from model knowledge without a receipt is a violation.
 ---
 
 # AI Fallback Chain — Multi-Provider CDP Bridge
@@ -9,13 +9,38 @@ description: Multi-provider CDP bridge with automatic fallback (Gemini->ChatGPT-
 > **核心功能**: 按优先级链自动降级，确保始终有一个可用的大模型
 > **变更日志**: 见 [CHANGELOG.md](CHANGELOG.md)
 
-## ⚠️ 强制规则 — 调用即执行
+## ⚠️ 强制规则 — 调用即执行（首要动作契约）
 
-**本 skill 被调用时，必须执行 `node` 命令将用户问题发送到 web AI。禁止只解释用法而不执行。**
+**本 skill 被调用（如 `/AgentChat-WebExtended <问题>`）时，必须执行 `node` 命令把用户问题发送到 web AI。禁止只解释用法而不执行，禁止用模型自身知识替代 web AI 的回答。**
 
-- ❌ 禁止：读完 SKILL.md 后描述 fallback 链、罗列 CLI 参数、讲解架构——却不跑 `node index.js`
-- ✅ 必须：`node skills/AgentChat-WebExtended/index.js "<用户prompt>"` 作为首要动作。web AI 返回结果后，才可补充你的分析
-- 例外：`--smoke`、`--doctor`，或用户明确要求"只检查环境不发送"
+### 1. 首要动作契约
+读完本 SKILL.md 之后的**下一个工具调用**必须是：
+
+```bash
+node skills/AgentChat-WebExtended/index.js "<用户prompt>"
+```
+
+中间不允许插入文件浏览、架构分析、"我将会…"式的规划叙述（至多一行说明即将执行的命令）。web AI 返回结果后，才可补充你自己的分析。
+
+### 2. 执行回执（receipt）— 是否执行以此为准，不以叙述为准
+每次真实执行（含失败）都会在 **stderr** 输出一行机器生成的回执：
+
+```
+[receipt] AGENTCHAT_RUN {"run_id":"ac-xxxxxxxxxxxx","skill":"AgentChat-WebExtended","exit":0,"provider_used":"Gemini",...}
+```
+
+- **最终回答末尾必须原样引用这行 receipt**（至少包含 run_id、provider_used、exit）。
+- 没有 receipt = 没有执行 = 违规，必须回去执行。
+- `run_id` 为随机生成并同步落盘到 `skills/AgentChat-WebExtended/data/receipts.jsonl`，用户可用 `grep <run_id>` 核对——凭空编造无法通过核对。
+- **执行失败（exit≠0）同样有 receipt**：必须引用失败回执并说明原因（限流/未登录/超时…），在此之后才允许用模型自身能力回答，且必须明确标注"web AI 未参与本次回答"。
+
+### 3. 违规模式（全部禁止）
+- ❌ 读完 SKILL.md 后描述 fallback 链、罗列 CLI 参数、讲解架构——却不跑 `node index.js`
+- ❌ 以"问题太简单/我已经知道答案"为由跳过执行，直接用模型知识回答
+- ❌ 回答中没有 `[receipt] AGENTCHAT_RUN` 行却声称"已通过 web AI 处理"
+
+### 4. 例外
+仅限：`--smoke`、`--doctor`，或用户明确要求"只检查环境不发送"。这两种模式不产生 receipt，属预期行为。
 
 ---
 

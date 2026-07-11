@@ -34,6 +34,7 @@ const path = require('path');
 
 const { ProviderError, classifyError } = require('../lib/errors');
 const { createProviderRunner, appendWithRotation } = require('../lib/providerFactory');
+const { makeRunId, emitReceipt } = require('../lib/receipt');
 const { log: _log, startTimer: _startTimer, spinner } = require('../lib/terminal');
 const { connectWithRetry: _connectWithRetry, doctorCheck: _doctorCheck } = require('../lib/cdp');
 
@@ -59,7 +60,11 @@ const SKILL_DIR = path.dirname(__filename); // skill directory for telemetry
 
 class InvocationContext {
     constructor() {
+        // Execution receipt id — random per run, quoted by the calling agent
+        // as proof the skill actually executed (see lib/receipt.js).
+        this.runId = makeRunId();
         this.telemetry = {
+            run_id: this.runId,
             timestamp: new Date().toISOString(),
             provider_used: null,
             providers_tried: [],
@@ -76,6 +81,23 @@ class InvocationContext {
         this.telemetry.exit_code = code;
         const f = path.join(SKILL_DIR, 'data', 'fallback-telemetry.jsonl');
         appendWithRotation(f, JSON.stringify(this.telemetry) + '\n');
+        // Execution receipt — single choke point covering every exit path
+        // (success AND failure both prove "the skill ran"). STDERR on purpose:
+        // this file's stdout is the raw-response machine contract consumed
+        // verbatim by lib/execute.js / the Python SDK / the MCP server, and a
+        // receipt line there would be embedded into the answer text.
+        emitReceipt({
+            skillDir: SKILL_DIR,
+            skill: 'AgentChat-WebExtended',
+            runId: this.runId,
+            fields: {
+                exit: code,
+                provider_used: this.telemetry.provider_used,
+                providers_tried: this.telemetry.providers_tried,
+                total_ms: this.telemetry.total_ms,
+            },
+            stream: 'stderr',
+        });
     }
 }
 

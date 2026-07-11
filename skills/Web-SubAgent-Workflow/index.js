@@ -17,6 +17,7 @@
 const path = require("path");
 const fs = require("fs");
 const { acquireLock, releaseLock, cleanupAllLocks } = require("../lib/locks");
+const { makeRunId, emitReceipt } = require("../lib/receipt");
 
 process.on("exit", cleanupAllLocks);
 process.on("SIGINT", () => { cleanupAllLocks(); process.exit(130); });
@@ -146,9 +147,28 @@ async function main() {
     log(`Mode: ${mode || "custom"} | Chain: ${chain.join(" → ")} | Budget: ${Math.round(timeout / 1000)}s`);
     const result = await executeWithFallback(chain, prompt, timeout);
 
+    // Execution receipt — embedded INSIDE the output JSON (this file's stdout
+    // contract is "one JSON object"; a trailing plain-text line would break
+    // that). A stderr copy keeps the `[receipt] AGENTCHAT_RUN` grep pattern
+    // uniform across all three skills. The calling agent must quote the
+    // receipt (or its run_id) per step in its final report; run_ids are
+    // persisted to data/receipts.jsonl for user-side verification.
+    const receipt = emitReceipt({
+        skillDir: __dirname,
+        skill: "Web-SubAgent-Workflow",
+        runId: makeRunId(),
+        fields: {
+            mode: mode || "custom",
+            exit: result.success ? 0 : 2,
+            provider_used: result.provider_used,
+            elapsed_ms: result.elapsed_ms,
+        },
+        stream: "stderr",
+    });
+
     console.log(JSON.stringify({
         mode: mode || "custom", chain_used: chain,
-        timestamp: new Date().toISOString(), ...result,
+        timestamp: new Date().toISOString(), receipt, ...result,
     }, null, 2));
 
     // P0 FLUSH FIX: exit() immediately after console.log() truncates piped

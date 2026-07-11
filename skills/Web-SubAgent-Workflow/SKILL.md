@@ -1,6 +1,6 @@
 ---
 name: Web-SubAgent-Workflow
-description: Sequential 6-step AI pipeline — Claude Code plans→Kimi searches→(complex? Gemini reasons)→Claude synthesizes→ChatGPT reviews→Claude fixes. Use for complex software engineering tasks needing web research + deep reasoning + quality review.
+description: Sequential 6-step AI pipeline — Claude Code plans→Kimi searches→(complex? Gemini reasons)→Claude synthesizes→ChatGPT reviews→Claude fixes. Use for complex software engineering tasks needing web research + deep reasoning + quality review. MANDATORY EXECUTION - invoking this skill REQUIRES actually running `node skills/Web-SubAgent-Workflow/index.js` for Step 2 (--search) and Step 5 (--review) unconditionally (Step 3 --reason if complex), and listing each step's receipt.run_id from the returned JSON in the final report; narrating the pipeline or answering from model knowledge without receipts is a violation.
 ---
 
 # Web-SubAgent-Workflow
@@ -21,13 +21,27 @@ description: Sequential 6-step AI pipeline — Claude Code plans→Kimi searches
 - ✅ 必须：Step 2 和 Step 5 **无条件执行**。复杂度判定仅影响 Step 3（Gemini 推理）是否跳过
 - ✅ 必须：每步产生可验证的 `node index.js` JSON 输出，结果返回后才可补充你的解读
 
+### 执行回执（receipt）— 是否执行以此为准，不以叙述为准
+每次 `node index.js --search/--reason/--review` 的输出 JSON 中都包含机器生成的 `receipt` 字段
+（同时 stderr 打印一行 `[receipt] AGENTCHAT_RUN {...}`）：
+
+```json
+"receipt": { "run_id": "ac-xxxxxxxxxxxx", "skill": "Web-SubAgent-Workflow", "mode": "search", "exit": 0, "provider_used": "kimi", ... }
+```
+
+- **最终报告必须逐步列出每次执行的 `receipt.run_id`**（Step 2 一个；Step 3 如执行一个；Step 5 一个）。
+- 缺少某一步的 run_id = 该步没有执行 = 违规，必须补跑。
+- run_id 随机生成并落盘 `skills/Web-SubAgent-Workflow/data/receipts.jsonl`，用户可 `grep <run_id>` 核对，凭空编造无法通过核对。
+- **失败执行（exit≠0）同样有 receipt**：引用失败回执、说明降级/失败原因后，才允许以模型自身能力继续该步，并明确标注"web AI 未参与该步"。
+
 **反绕过原则**: 如果某个步骤"看起来不需要 web AI"，正确的做法是仍然通过 `node index.js` 把本地发现发给 web AI 做验证/补充/交叉检查——而不是跳过该步骤。Step 2 的搜索 prompt 和 Step 5 的审查内容必须包含 Claude 已做的本地分析结果，让 web AI 做二次确认。
 
 **自检清单** (Claude Code 在最终输出前必须确认全部完成):
-- [ ] Step 2: `node index.js --search` 已执行，返回了 JSON？
-- [ ] Step 3: (复杂时) `node index.js --reason` 已执行？(简单时) 已明确记录跳过理由？
-- [ ] Step 5: `node index.js --review` 已执行，返回了 JSON？
+- [ ] Step 2: `node index.js --search` 已执行，返回了 JSON？receipt.run_id = ______
+- [ ] Step 3: (复杂时) `node index.js --reason` 已执行？receipt.run_id = ______ (简单时) 已明确记录跳过理由？
+- [ ] Step 5: `node index.js --review` 已执行，返回了 JSON？receipt.run_id = ______
 - [ ] Step 6: 审查意见已逐条处理？
+- [ ] 最终报告已列出以上全部 run_id？
 
 例外: `--smoke`、`--doctor`，或用户明确要求"只检查环境不发送"
 
