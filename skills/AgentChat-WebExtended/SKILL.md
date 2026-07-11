@@ -133,6 +133,8 @@ node skills/AgentChat-WebExtended/index.js --from=ChatGPT "prompt"
 | `--timeout-per-provider=N` | 单个 provider 超时 (ms)，默认取 `timeout / 2` 或 180000 |
 | `--from=NAME` | 从指定 provider 开始，跳过链中前面的。NAME 可缩写不区分大小写 |
 | `--single` | 只尝试 `--from` 指定的那一个 provider，失败即返回，不级联到链中后续 provider。给需要自己做跨 provider 降级+加锁的调用方用（如 AgentChat-FreeSubAgent），避免子进程内部级联绕开调用方的互斥锁 |
+| `--only=NAME` | `--from=NAME --single` 的合并简写（程序化调用方使用；未知 NAME 会 fail loudly 而非静默回退） |
+| `--locale=xx_XX` | 强制 Gemini UI 语言 profile（`zh_CN` / `zh_TW` / `en` / `ja`），跳过自动检测。Python SDK 的 `locale=` 参数即透传此 flag |
 | `--smoke` | 环境检查：遍历所有 provider 确认至少一个可达 |
 | `--doctor` | CDP 端口连通性检查 |
 | `--close` / `--close-browser` | 执行完毕后关闭所有 tab 和浏览器连接（默认保留） |

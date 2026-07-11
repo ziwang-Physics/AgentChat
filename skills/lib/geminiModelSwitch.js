@@ -22,11 +22,29 @@ const MAX_RETRIES = 2;
 // 新增语言只需在 locales/gemini.js 追加一个 profile。
 const L = require('./locales/gemini');
 
+// ── txt() normalization ──────────────────────────────────────────────────────
+// P0 FIX (profile-mode type confusion): L.txt(key) returns a plain STRING when
+// an exact locale profile is active (e.g. '扩展' after detectLocale() maps
+// navigator.language zh-CN → zh_CN) and a RegExp ONLY in fuzzy-fallback mode.
+// This file used RegExp-only APIs on that value unconditionally:
+//   - includesExtended(t) → TypeError ('扩展'.test is not a function) the moment
+//     locale detection SUCCEEDS — thrown out of ensureProExtended, through the
+//     gemini adapter's preInputHook, failing the ENTIRE Gemini provider at
+//     PRE_EDITOR. Fuzzy mode (detection failure) was the only path that worked.
+//   - _re.source / _re.flags on a string → undefined → new RegExp(undefined)
+//     inside page.evaluate is /(?:)/ (matches EVERYTHING), so profile-mode menu
+//     matching degenerated: `extRe.test(t) && !thinkRe.test(t)` is always false,
+//     and the submenu-expansion path clicked the first arbitrary menu item.
+// asRe() converts either form to a case-insensitive RegExp; profile strings are
+// literal UI text, so regex metacharacters are escaped.
+const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const asRe = (v) => (v instanceof RegExp ? v : new RegExp(escapeRe(v), 'i'));
+
 // locale-aware helpers — delegate to the profiles loaded above
-const includesExtended  = (t) => L.txt('extended').test(t);
-const includesStandard  = (t) => L.txt('standard').test(t);
+const includesExtended  = (t) => asRe(L.txt('extended')).test(t);
+const includesStandard  = (t) => asRe(L.txt('standard')).test(t);
 // Pro model check: innerText 含 "Pro" 且含当前 locale 的 proDesc
-const proDesc           = () => L.txt('proDesc');
+const proDesc           = () => asRe(L.txt('proDesc'));
 const modelBtnSelector  = () => L.modelBtnCSS();
 
 // Helper: wait for menu items to have actual text content (Angular CDK overlay fix)
@@ -153,7 +171,7 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
         }
 
         // Step 3: Expand thinking level submenu
-        const _extRe = L.txt('extended'); const _thinkRe = L.txt('thinking');
+        const _extRe = asRe(L.txt('extended')); const _thinkRe = asRe(L.txt('thinking'));
         let extendedIdx = await page.evaluate(({extSrc, extFlags, thinkSrc, thinkFlags}) => {
             const items = document.querySelectorAll('gem-menu-item, [role="menuitem"]');
             const extRe = new RegExp(extSrc, extFlags);
@@ -168,7 +186,7 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
         if (extendedIdx < 0) {
             log('gemini: expanding thinking-level choices');
             try {
-                const _tr = L.txt('thinking');
+                const _tr = asRe(L.txt('thinking'));
                 const thinkIdx = await page.evaluate(({thinkSrc, thinkFlags}) => {
                     const items = document.querySelectorAll('gem-menu-item, [role="menuitem"]');
                     const re = new RegExp(thinkSrc, thinkFlags);
@@ -184,7 +202,7 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
                 await page.waitForTimeout(2000);
 
                 // Re-query: Extended should now be visible in submenu
-                const _ext2 = L.txt('extended'); const _std2 = L.txt('standard');
+                const _ext2 = asRe(L.txt('extended')); const _std2 = asRe(L.txt('standard'));
                 extendedIdx = await page.evaluate(({extSrc, extFlags, stdSrc, stdFlags}) => {
                     const items = document.querySelectorAll('gem-menu-item, [role="menuitem"]');
                     const extRe = new RegExp(extSrc, extFlags);
@@ -219,14 +237,24 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
         await page.waitForTimeout(1000);
 
         // Verify via aria-label (authoritative source)
-        const isActive = await page.waitForFunction(() => {
-            const btn = document.querySelector(
-                modelBtnSelector()
-            );
+        //
+        // P0 FIX (browser-context closure capture): the old predicate called
+        // modelBtnSelector() and includesExtended() INSIDE waitForFunction —
+        // Playwright serializes the predicate and runs it in the PAGE, where
+        // neither Node-scope function exists. The very first evaluation threw
+        // ReferenceError, waitForFunction rejected, and the .catch collapsed it
+        // to false: verification could NEVER succeed, burning every retry
+        // (success was only ever detected by the NEXT attempt's top-of-loop
+        // aria check, after a wasteful page reload). Selector and pattern are
+        // now serialized in as arguments.
+        const _vSel = modelBtnSelector();
+        const _vExt = asRe(L.txt('extended'));
+        const isActive = await page.waitForFunction(({ sel, extSrc, extFlags }) => {
+            const btn = document.querySelector(sel);
             if (!btn) return false;
             const aria = btn.getAttribute('aria-label') || btn.textContent || '';
-            return includesExtended(aria);
-        }, null, { timeout: 5000 }).catch(() => false);
+            return new RegExp(extSrc, extFlags).test(aria);
+        }, { sel: _vSel, extSrc: _vExt.source, extFlags: _vExt.flags }, { timeout: 5000 }).catch(() => false);
 
         if (isActive) {
             log('gemini: Verified Pro Extended Thinking active.');
@@ -257,12 +285,19 @@ async function ensureFlash(page, onLog) {
     }
 
     // Check if Flash is already active
-    const currentAria = await page.evaluate(() => {
-        const btn = document.querySelector(
-            modelBtnSelector()
-        );
+    //
+    // P0 FIX (browser-context closure capture): modelBtnSelector() was called
+    // INSIDE page.evaluate — undefined in the page, so the evaluate rejected
+    // with ReferenceError on every call. Unlike Step 5's swallowed variant,
+    // this one was UNCAUGHT: ensureFlash threw, the gemini adapter's Tier-2
+    // Flash fallback died before doing anything, and the factory classified it
+    // as a PRE_EDITOR error. Net effect: the documented Pro→Flash degradation
+    // tier was dead code — free-tier users could never use Gemini at all; the
+    // chain always skipped straight to ChatGPT. Selector now passed as an arg.
+    const currentAria = await page.evaluate((sel) => {
+        const btn = document.querySelector(sel);
         return btn ? (btn.getAttribute('aria-label') || btn.textContent || '').trim() : 'UNKNOWN';
-    });
+    }, modelBtnSelector()).catch(() => 'UNKNOWN');
 
     if (currentAria.includes('Flash')) {
         log('gemini: Flash model already active');
@@ -333,12 +368,11 @@ async function ensureFlash(page, onLog) {
     await page.waitForTimeout(500);
 
     // Verify Flash is active
-    const finalAria = await page.evaluate(() => {
-        const btn = document.querySelector(
-            modelBtnSelector()
-        );
+    // (same browser-context capture fix as the initial check above)
+    const finalAria = await page.evaluate((sel) => {
+        const btn = document.querySelector(sel);
         return btn ? (btn.getAttribute('aria-label') || btn.textContent || '').trim() : 'UNKNOWN';
-    });
+    }, modelBtnSelector()).catch(() => 'UNKNOWN');
 
     if (finalAria.includes('Flash')) {
         log(`gemini: Verified Flash model active (${finalAria}).`);

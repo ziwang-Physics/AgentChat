@@ -55,6 +55,12 @@ function callWebext(prompt, opts = {}) {
             `--timeout-per-provider=${opts.provTimeout || DEFAULT_PROV_TIMEOUT}`,
         ];
         if (opts.from) args.push(`--from=${opts.from}`);
+        // --single: try ONLY the named provider — no internal cascade. Without
+        // it, gemini_think could exhaust Gemini's quota, silently fall through
+        // to ChatGPT/Qwen/…, and return THAT text labeled as "Gemini 推理" —
+        // the silent-wrong-provider class WebExtended's --single exists to
+        // prevent. Provider-named tools must fail loudly, not impersonate.
+        if (opts.single) args.push("--single");
         if (opts.keepTabs) args.push("--keep-tabs");
 
         const child = spawn(NODE_EXE, args, {
@@ -142,6 +148,7 @@ server.tool(
         try {
             const result = await callWebext(prompt, {
                 from: "gemini",
+                single: true, // Gemini-named tool must never return another provider's output
                 timeout: t,
                 provTimeout: pt,
             });
@@ -161,7 +168,12 @@ server.tool(
 
 server.tool(
     "gemini_chat",
-    "与 Gemini 多轮对话（复用已有 tab，保留对话上下文）。首次调用创建新对话，后续调用在同一 tab 中继续。",
+    // DESCRIPTION FIX: previously claimed "保留对话上下文" — false. WebExtended
+    // reuses the Gemini tab but page.goto()'s the app URL, which STARTS A NEW
+    // CHAT every invocation (see findProviderPage's comment in its index.js).
+    // Cross-call context was never retained; the tool description must not
+    // promise it. Callers needing context must embed prior turns in `prompt`.
+    "向 Gemini 发送单轮消息（复用已有 tab，但每次调用开启新对话，不保留跨调用上下文；如需上下文请把之前的问答拼进 prompt）。",
     {
         prompt: z.string().describe("对话内容"),
     },
@@ -169,6 +181,7 @@ server.tool(
         try {
             const result = await callWebext(prompt, {
                 from: "gemini",
+                single: true, // Gemini-named tool must never return another provider's output
                 keepTabs: true,
                 timeout: DEFAULT_TIMEOUT,
                 provTimeout: DEFAULT_PROV_TIMEOUT,

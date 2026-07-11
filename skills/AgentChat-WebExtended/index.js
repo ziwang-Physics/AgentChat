@@ -434,6 +434,20 @@ async function main() {
             singleAttempt = true;
         } else if (a.startsWith('--from=')) {
             startFrom = a.split('=')[1];
+        } else if (a.startsWith('--locale=')) {
+            // FEATURE GAP FIX: --locale was documented (lib/locales/gemini.js
+            // header: "CLI 传 --locale=xx_XX") and passed by the Python SDK
+            // (session.py appends --locale=<key> whenever locale= is given),
+            // but this parser had no branch for it — unknown --flags are
+            // silently dropped, so the Python `locale` parameter has been a
+            // no-op since it shipped. Wire it to the Gemini locale profiles.
+            const locKey = a.split('=')[1];
+            const applied = require('../lib/locales/gemini').setLocale(locKey);
+            if (applied === 'fuzzy' && locKey) {
+                log(`WARN: unknown --locale "${locKey}" — falling back to auto-detect/fuzzy matching`);
+            } else {
+                log(`Gemini UI locale forced to ${applied}`);
+            }
         } else if (!a.startsWith('--')) {
             remaining.push(a);
         }
@@ -450,7 +464,7 @@ async function main() {
         prompt = chunks.join('').trim();
     }
     if (!prompt && !args.includes('--smoke')) {
-        console.error('Usage: node index.js [--timeout=MS] [--from=NAME] [--only=NAME] [--single] [--keep-tabs] [--close] [--smoke] [--doctor] "Your prompt"');
+        console.error('Usage: node index.js [--timeout=MS] [--from=NAME] [--only=NAME] [--single] [--locale=xx_XX] [--keep-tabs] [--close] [--smoke] [--doctor] "Your prompt"');
         console.error('       echo "prompt" | node index.js [flags]');
         process.exit(1);
     }

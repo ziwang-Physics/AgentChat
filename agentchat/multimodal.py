@@ -80,6 +80,7 @@ async def ask_with_image(
 
             # 找到/创建 Gemini tab
             page = None
+            created_page = False  # keep-tabs policy: only close tabs WE created
             for ctx in b.contexts:
                 for pg in ctx.pages:
                     if "gemini.google.com" in pg.url and pg.title() not in (
@@ -95,6 +96,7 @@ async def ask_with_image(
                 if not page:
                     b.close()
                     return None
+                created_page = True
                 page.goto(
                     "https://gemini.google.com/u/0/app",
                     wait_until="domcontentloaded", timeout=30000,
@@ -176,7 +178,14 @@ async def ask_with_image(
             except Exception:
                 pass
 
-            page.close()
+            # POLICY FIX: unconditional page.close() violated the project-wide
+            # "never close the user's tabs" rule — when the Gemini tab was
+            # REUSED (found among existing pages), it belonged to the user's
+            # session and closing it destroyed their conversation. Close only
+            # the tab we created ourselves; b.close() merely disconnects the
+            # CDP client for connect_over_cdp, it does not kill the browser.
+            if created_page:
+                page.close()
             b.close()
             return response_text
 
@@ -229,11 +238,16 @@ $img = [System.Drawing.Image]::FromFile('{image_path}')
 $img.Dispose()
 """
     try:
-        subprocess.run(
+        # PRIVACY FIX: verify the clipboard write actually succeeded. Returning
+        # True unconditionally meant a failed SetImage left the USER'S previous
+        # clipboard content in place — and the subsequent Ctrl+V pasted (and
+        # potentially sent) their private data to the Gemini page. Same class
+        # as the defaultInput clipboard fix in lib/providerFactory.js.
+        r = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_script],
             capture_output=True, timeout=10,
         )
-        return True
+        return r.returncode == 0
     except Exception:
         return False
 
@@ -245,11 +259,12 @@ set theImage to (read (POSIX file "{image_path}") as «class PNGf»)
 set the clipboard to theImage
 '''
     try:
-        subprocess.run(
+        # PRIVACY FIX: same returncode verification as _copy_windows.
+        r = subprocess.run(
             ["osascript", "-e", script],
             capture_output=True, timeout=10,
         )
-        return True
+        return r.returncode == 0
     except Exception:
         return False
 
@@ -257,19 +272,25 @@ set the clipboard to theImage
 def _copy_linux(image_path: str) -> bool:
     """xclip 设置剪贴板图片"""
     try:
-        subprocess.run(
+        # PRIVACY FIX: same returncode verification as _copy_windows. A failed
+        # xclip (e.g. no X display over SSH) previously returned True and let
+        # Ctrl+V paste the user's private clipboard into the Gemini page.
+        r = subprocess.run(
             ["xclip", "-selection", "clipboard", "-t", "image/png", "-i", image_path],
             capture_output=True, timeout=10,
         )
-        return True
+        if r.returncode == 0:
+            return True
     except FileNotFoundError:
         pass
-    # fallback: wl-copy
+    except Exception:
+        pass
+    # fallback: wl-copy (Wayland)
     try:
-        subprocess.run(
+        r = subprocess.run(
             ["wl-copy", "-t", "image/png", image_path],
             capture_output=True, timeout=10,
         )
-        return True
+        return r.returncode == 0
     except Exception:
         return False

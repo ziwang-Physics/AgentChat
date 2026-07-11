@@ -52,7 +52,11 @@ async def ask_structured(
         ValueError: 所有重试后仍无法解析
     """
     try:
-        schema_json = _build_schema_json(schema)
+        # P0 FIX: was `_build_schema_json(schema)` — that name is never defined
+        # (the function below is `_build_json_schema`), so EVERY call raised
+        # NameError, wrapped as "Invalid Pydantic schema: name '_build_schema_json'
+        # is not defined". ask_structured() has never worked.
+        schema_json = _build_json_schema(schema)
     except Exception as e:
         raise ValueError(f"Invalid Pydantic schema: {e}") from e
 
@@ -76,13 +80,25 @@ async def ask_structured(
         except Exception as e:
             last_error = e
             if attempt < max_retries - 1:
-                # 告诉 LLM 哪里出错
+                # P1 FIX: the old correction prompt was JUST "你的上一个回复格式
+                # 有误：…" and relied on "复用同一个 session tab，LLM 能看到上下文"。
+                # That assumption is false: each session.ask() spawns a fresh
+                # WebExtended subprocess, and WebExtended's tab reuse does a
+                # page.goto(url) that STARTS A NEW CHAT (see findProviderPage's
+                # comment in AgentChat-WebExtended/index.js). The model receiving
+                # the retry had never seen the original prompt, the schema, or
+                # its "previous" reply — retries 2..N were guaranteed garbage.
+                # The correction must therefore be fully self-contained.
+                bad_snippet = (result.response or "")[:800]
                 correction = (
-                    f"你的上一个回复格式有误：{e}。"
-                    f"请修正后只输出纯 JSON 对象，不要包含 markdown 标记。"
+                    f"{prompt}\n\n{json_instruction}\n\n"
+                    f"注意：针对同样的问题，之前的一次回复未能通过格式校验。\n"
+                    f"校验错误：{e}\n"
+                    f"未通过校验的回复片段：\n{bad_snippet}\n\n"
+                    f"请重新回答，只输出一个符合上述格式的纯 JSON 对象，"
+                    f"不要 markdown 代码块标记，不要任何额外文字。"
                 )
                 full_prompt = correction
-                # 注意：这里复用同一个 session tab，LLM 能看到上下文
 
     raise ValueError(f"Failed after {max_retries} retries. Last error: {last_error}")
 
