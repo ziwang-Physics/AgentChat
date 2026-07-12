@@ -9,7 +9,10 @@
  */
 
 const PROVIDER_CHAIN = [
-    { key: 'gemini',   name: 'Gemini',   url: 'https://gemini.google.com/u/0/app', authDomains: ['accounts.google.com'] },
+    { key: 'gemini',   name: 'Gemini',   url: 'https://gemini.google.com/u/0/app', authDomains: ['accounts.google.com'],
+      // Surfaced on reason='auth' failures — the ONE command that restores a
+      // missing/logged-out Gemini tab in the shared Chrome (see connect-gemini.sh).
+      recoveryHint: 'bash scripts/connect-gemini.sh  # 重连一次恢复 Gemini 登录态' },
     { key: 'chatgpt',  name: 'ChatGPT',  url: 'https://chatgpt.com/',               authDomains: ['auth.openai.com', 'chat.openai.com/auth'] },
     { key: 'claude',   name: 'Claude',   url: 'https://claude.ai/',                 authDomains: ['claude.ai/login', 'auth.anthropic.com'] },
     { key: 'qwen',     name: 'Qwen',     url: 'https://www.qianwen.com/?source=tongyigw', authDomains: ['qianwen.com/login', 'login.aliyun.com', 'signin.aliyun.com'] },

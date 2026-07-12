@@ -29,6 +29,14 @@
 const { spawn } = require("child_process");
 const { acquireLock, releaseLock } = require("./locks");
 const { log: _log } = require("./terminal");
+const { PROVIDER_CHAIN } = require("./providers/chain");
+
+// provider → operator-actionable recovery command (single source: chain.js).
+// Surfaced when a call fails with reason 'auth' so orchestrator logs and the
+// degradation payload carry the FIX, not just "gemini:all_exhausted".
+const RECOVERY_HINTS = Object.fromEntries(
+    PROVIDER_CHAIN.filter(p => p.recoveryHint).map(p => [p.key, p.recoveryHint])
+);
 
 // ── Defaults ──────────────────────────────────────────────────────────────
 
@@ -264,6 +272,11 @@ function createExecutor({
                     degradation: actualProvider !== chain[0] ? {
                         reason: tried.map(t => `${t.provider}:${t.reason}`).join("; "),
                         fallback_chain: tried.map(t => t.provider),
+                        // e.g. ["gemini: bash scripts/connect-gemini.sh …"] —
+                        // lets the calling agent RELAY the fix to the user.
+                        ...(tried.some(t => t.fix)
+                            ? { fixes: tried.filter(t => t.fix).map(t => `${t.provider}: ${t.fix}`) }
+                            : {}),
                         confidence_adjustment: -0.15,
                     } : null,
                     response: cleaned,
@@ -274,7 +287,12 @@ function createExecutor({
             }
 
             releaseLock(key);
-            tried.push({ provider: key, reason: result.reason || "unknown" });
+            const entry = { provider: key, reason: result.reason || "unknown" };
+            if (result.reason === "auth" && RECOVERY_HINTS[key]) {
+                entry.fix = RECOVERY_HINTS[key];
+                log(`[fallback] ${key}: auth — fix: ${entry.fix}`);
+            }
+            tried.push(entry);
 
             // no_cdp (exit 1) is fatal for the whole chain — every provider
             // shares the same browser. Don't burn subprocess launches on the rest.

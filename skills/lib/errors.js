@@ -49,7 +49,11 @@ const REASONS = Object.freeze({
 const CODE_TO_REASON = Object.freeze({
     ERR_SAFETY_REJECTED: REASONS.SAFETY,
     ERR_MODEL_DEGRADED:  REASONS.ERROR,
-    ERR_WRONG_PAGE:      REASONS.ERROR,
+    // Landing on the wrong page after navigating to the RIGHT url means a
+    // human must intervene in the shared browser (CAPTCHA/consent/redirect) —
+    // operationally identical to auth. Was ERROR, which collapsed into
+    // exit 9 (all_exhausted) and hid the recovery action.
+    ERR_WRONG_PAGE:      REASONS.AUTH,
 });
 
 // ══════════════════════════════════════════════════════════════════════════════

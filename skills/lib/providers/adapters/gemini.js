@@ -9,7 +9,9 @@
  *   - Stop button 120s extension for long-thinking prompts (3-5 min)
  *   - Angular-specific: fill() for clearing, dispatchEvent('input') after typing
  *   - Pre-generation filter: "Thinking...", search queries not counted as real text
- *   - Extra URL validation: must be on gemini.google.com (not upgrade/error pages)
+ *   - Declarative auth hardening: blockedUrlPatterns (must stay on
+ *     gemini.google.com — CAPTCHA/consent/upsell → 'auth') + signedOutSelectors
+ *     (signed-out landing page served ON gemini.google.com → 'auth')
  *   - Safety rejection + short-response validation in postResponseHook
  *
  * Dependencies: lib/geminiModelSwitch.js (ensureProExtended), lib/providerFactory.js (input helpers)
@@ -97,6 +99,25 @@ module.exports = {
     url: 'https://gemini.google.com/u/0/app',
     authDomains: ['accounts.google.com'],
 
+    // Post-nav URL allow-list — replaces the imperative ERR_WRONG_PAGE check
+    // that lived in preInputHook (where it classified as generic 'error' →
+    // exit 9 / all_exhausted). Anything NOT on gemini.google.com after nav
+    // (google.com/sorry CAPTCHA, consent.google.com, one.google upsell) needs
+    // a human in the browser — same operator action as auth.
+    blockedUrlPatterns: [/^https?:\/\/(?!gemini\.google\.com\/)/i],
+
+    // Gemini serves a signed-out landing page ON gemini.google.com with NO
+    // login redirect — the editor may even render, so the old pipeline burned
+    // the entire per-call budget (model activation retries + send + response
+    // wait) before dying as 'error'. Href-anchored selectors only: a bare
+    // a[href*="accounts.google.com"] would false-positive on the signed-in
+    // avatar's SignOutOptions link.
+    signedOutSelectors: [
+        'a[href*="accounts.google.com/ServiceLogin"]',
+        'a[href*="accounts.google.com/signin"]',
+        'a[href*="accounts.google.com/AccountChooser"]',
+    ],
+
     // Gemini previously had NO quotaPatterns — free-tier exhaustion could never
     // be classified as reason='quota' (breaking exit code 5 aggregation).
     // Patterns are deliberately narrow: the Gemini page shows permanent
@@ -118,14 +139,8 @@ module.exports = {
         // mode), a streak left at MAX from the previous run would make
         // looksLikePreGeneration() reject fresh filler on the very first poll.
         _preGenStreak = 0;
-        // Extra URL validation — must be on gemini.google.com
-        const url = page.url();
-        if (!url.includes('gemini.google.com')) {
-            throw Object.assign(
-                new Error(`Unexpected Gemini URL: ${url}`),
-                { code: 'ERR_WRONG_PAGE' }
-            );
-        }
+        // (URL validation moved to the factory's Step-2 auth check via
+        //  blockedUrlPatterns — a wrong page is now 'auth', not 'error'.)
 
         // Tier 1: Try Pro Extended Thinking (requires Gemini Pro subscription)
         let ok = await ensureProExtended(page, 1, log);

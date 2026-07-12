@@ -30,6 +30,8 @@ const { appendWithRotation } = require('./telemetry');
 //   navTimeout?: number,      // page.goto timeout (default: 45000)
 //   navWaitUntil?: string,    // page.goto waitUntil (default: 'domcontentloaded')
 //   authDomains: string[],    // URL substrings that indicate login redirect
+//   blockedUrlPatterns?: RegExp[], // post-nav URL regexes needing a human in the browser (CAPTCHA/consent/upsell) → 'auth'
+//   signedOutSelectors?: string[], // selector visible ⇒ signed-out landing page ON the provider domain → 'auth'
 //   quotaPatterns: RegExp[],  // body-text patterns for rate-limit detection
 //   editorSelectors: string[],// CSS selectors for input element (tried in order)
 //   validateEditor?: (el: Element) => Promise<boolean>,  // extra validation
@@ -99,6 +101,8 @@ const DEFAULTS = {
     insertTextLimit: INSERT_TEXT_LIMIT,
     input: null, // set below after atomic ops are defined
     dismissPatterns: [], // overlays matching these are safe to dismiss (close button click)
+    blockedUrlPatterns: [], // post-nav URLs classified as 'auth' (CAPTCHA/consent/interstitial)
+    signedOutSelectors: [], // visible ⇒ signed-out landing page — fail fast as 'auth'
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -704,13 +708,34 @@ function createProviderRunner(cfg) {
         // ── Step 2: Auth check ──
         try {
             const url = page.url();
+            // Signed-out failure surfaces THREE ways, all needing the same
+            // operator action (re-auth in the shared browser):
+            //   1. redirect to a login domain           → authDomains
+            //   2. redirect to CAPTCHA/consent/upsell   → blockedUrlPatterns
+            //   3. signed-out landing page served ON the provider domain
+            //      (Gemini does this — URL looks fine)  → signedOutSelectors
+            // Cases 2–3 previously fell through to model-activation / editor /
+            // send failures → reason 'error' → exit 9 (all_exhausted): the
+            // caller burned the full per-call budget and never learned the
+            // real fix. Classify all three as 'auth' within seconds of nav.
             const isAuth = C.authDomains.some(d => url.includes(d))
                         || url.includes('/auth')
-                        || url.includes('/login');
+                        || url.includes('/login')
+                        || (C.blockedUrlPatterns || []).some(re => re.test(url));
             if (isAuth) {
                 return classifyError(
-                    new Error('Login required'), STAGES.AUTH_CHECK, C.key, 'auth'
+                    new Error(`Login required (landed on ${url.slice(0, 100)})`),
+                    STAGES.AUTH_CHECK, C.key, 'auth'
                 );
+            }
+            for (const sel of (C.signedOutSelectors || [])) {
+                if (await page.locator(sel).first()
+                        .isVisible({ timeout: 500 }).catch(() => false)) {
+                    return classifyError(
+                        new Error(`Signed-out UI present: ${sel}`),
+                        STAGES.AUTH_CHECK, C.key, 'auth'
+                    );
+                }
             }
         } catch (e) {
             return classifyError(e, STAGES.AUTH_CHECK, C.key);

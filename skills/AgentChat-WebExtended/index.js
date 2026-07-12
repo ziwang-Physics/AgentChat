@@ -310,6 +310,11 @@ async function tryAllProviders(browser, prompt, ctx, options = {}) {
                 error_details: result.error_details || null,
             };
             log(`✗ ${provider.name}: FAILED — ${result.reason} → falling to next provider`);
+            // Auth-class failures are operator-fixable — print the fix instead
+            // of leaving only an opaque reason string in the logs.
+            if (result.reason === 'auth' && provider.recoveryHint) {
+                log(`  ↳ fix: ${provider.recoveryHint}`);
+            }
             continue;
         }
 
