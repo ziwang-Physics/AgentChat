@@ -24,6 +24,13 @@ module.exports = {
         /(?:额度|次数|用完|用尽|已达|上限).{0,30}免费版.*升级/i,
     ],
     dismissPatterns: [...COMMON_DISMISS_PATTERNS],
+    // MiMo shows a permanent footer disclaimer ("本网站为面向开发者的模型能力演示平台，
+    // 非正式 AI 助手，内容由 AI 生成仅供参考。") that sits inside a container which
+    // matches OVERLAY_SEL ([class*="dialog"] etc.) but is NOT a dismissable modal.
+    // Skip it so the overlay check doesn't falsely block the provider.
+    skipOverlayPatterns: [
+        /本网站为面向开发者的模型能力演示平台/i,
+    ],
     editorSelectors: [
         'textarea[placeholder*="有问题，尽管问"]',
         'textarea[placeholder*="Shift + Enter"]',

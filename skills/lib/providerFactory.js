@@ -601,6 +601,11 @@ async function checkOverlays(page, C) {
         const text = await el.evaluate(n => (n.innerText || n.textContent || '').trim()).catch(() => '');
         if (text.length < 5) continue;
 
+        // Skip: known non-blocking page furniture (footer disclaimers, permanent
+        // info bars) that happen to sit inside an overlay-like container.
+        const skipPatterns = C.skipOverlayPatterns || [];
+        if (skipPatterns.some(p => p.test(text))) continue;
+
         // Hard block: quota
         for (const pat of (C.quotaPatterns || [])) {
             if (pat.test(text)) return { block: 'quota', detail: text.slice(0, 120) };
@@ -633,6 +638,7 @@ async function checkOverlays(page, C) {
 }
 
 async function tryDismissOverlay(page, el) {
+    // Phase 1: search within overlay element
     for (const sel of CLOSE_BTN_SEL) {
         try {
             const btn = el.locator(sel).first();
@@ -640,6 +646,18 @@ async function tryDismissOverlay(page, el) {
                 await btn.click();
                 await page.waitForTimeout(800);
                 // Check: overlay gone?
+                if (!(await el.isVisible({ timeout: 500 }).catch(() => true))) return true;
+            }
+        } catch (_) { /* next selector */ }
+    }
+    // Phase 2: fallback — page-wide search (MiMo-style overlays may position
+    // the dismiss button outside the overlay container's DOM hierarchy)
+    for (const sel of CLOSE_BTN_SEL) {
+        try {
+            const btn = page.locator(sel).first();
+            if (await btn.isVisible({ timeout: 500 }).catch(() => false)) {
+                await btn.click();
+                await page.waitForTimeout(800);
                 if (!(await el.isVisible({ timeout: 500 }).catch(() => true))) return true;
             }
         } catch (_) { /* next selector */ }

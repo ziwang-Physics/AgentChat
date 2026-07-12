@@ -25,10 +25,10 @@ const PROFILES = {
         modelVerify:     'Pro扩展',
         // Pro 菜单项描述文本（区别于 Flash）
         proDesc:         '高等数学',
-        // 思考等级/程度 菜单项文本
+        // 思考等级/程度 菜单项文本（v9 扁平菜单中不再使用，保留兼容旧 UI）
         thinking:        '思考等级',
-        // Extended / 扩展 文本（菜单项中不含 "思考"）
-        extended:        '扩展',
+        // Extended / 扩展思考 菜单项文本（v9 扁平菜单：直接点击）
+        extended:        '扩展思考',
         // Standard 文本
         standard:        '标准',
         // 发送按钮
@@ -45,10 +45,10 @@ const PROFILES = {
 
     zh_TW: {
         modelAria:       '開啟模式挑選器',
-        modelVerify:     'Pro延長',
+        modelVerify:     'Pro 延伸',   // v9: 新 UI 用「延伸」替代「延長」
         proDesc:         '進階',
         thinking:        '思考程度',
-        extended:        '延長',
+        extended:        '延伸思考',   // v9 扁平菜单：直接点击项
         standard:        '標準',
         send:            '傳送',
         stop:            '停止',
@@ -62,7 +62,7 @@ const PROFILES = {
         modelVerify:     'Pro Extended',
         proDesc:         'Advanced',
         thinking:        'Thinking',
-        extended:        'Extended',
+        extended:        'Extended thinking',  // v9 flat menu
         standard:        'Standard',
         send:            'Send',
         stop:            'Stop',
@@ -76,7 +76,7 @@ const PROFILES = {
         modelVerify:     'Pro 拡張',
         proDesc:         '高度な数学',
         thinking:        '思考レベル',
-        extended:        '拡張',
+        extended:        '拡張思考',  // v9 flat menu
         standard:        '標準',
         send:            '送信',
         stop:            '停止',
@@ -95,7 +95,7 @@ const FUZZY = {
     modelVerify:  /Pro\s*(扩展|延長|Extended|拡張)/i,
     proDesc:      /進階|进阶|高等数学|Advanced|高度な数学/i,
     thinking:     /思考等级|思考程度|Thinking|Thought|思考レベル/i,
-    extended:     /扩展|延長|Extended|拡張/i,
+    extended:     /扩展思考|延伸思考|Extended thinking|拡張思考|扩展|延長|Extended|拡張/i,
     standard:     /标准|標準|Standard|標準/i,
     send:         /发送|傳送|Send|送信/i,
     stop:         /停止|Stop|停止/i,
@@ -133,29 +133,43 @@ let _profile = null;  // 当前使用的精确 profile（null = 回退 fuzzy）
  */
 async function detectLocale(page) {
     try {
-        // 方法 1：navigator.language
+        // 方法 3（提升为验证步骤）：从模型选择器按钮的 aria-label + textContent 反向推断。
+        // 按钮文本是 Gemini UI 实际语言的权威来源。navigator.language 可能与页面 UI
+        // 不一致（如浏览器设置为 zh-CN 但 Gemini 页面是 zh-TW），此时以按钮文本为准
+        // ——否则所有菜单项匹配（thinking/extended/proDesc）都会因 locale 错配而失败。
+        const btnText = await page.evaluate(() => {
+            const el = document.querySelector(
+                'button[aria-label*="模式"], button[aria-label*="Model"], button[aria-label*="モデル"]'
+            );
+            if (!el) return '';
+            return (el.getAttribute('aria-label') || '') + ' ' + (el.textContent || '');
+        });
+
+        const btnLocale = (() => {
+            if (!btnText.trim()) return null;
+            // aria-label 最可靠：'開啟模式挑選器' = zh_TW, '打开模式选择器' = zh_CN
+            if (/開啟|挑選|延長/.test(btnText)) return 'zh_TW';
+            if (/打开|选择|扩展/.test(btnText)) return 'zh_CN';
+            if (/Model selector|Extended/.test(btnText)) return 'en';
+            if (/モデル|拡張/.test(btnText)) return 'ja';
+            return null;
+        })();
+
+        // 按钮文本权威最高 → 直接返回
+        if (btnLocale && PROFILES[btnLocale]) return btnLocale;
+
+        // 方法 1：navigator.language（仅当按钮文本无法判断时使用）
         const nav = await page.evaluate(() => navigator.language || '');
-        const mapped = mapBCP47(nav);
-        if (mapped && PROFILES[mapped]) return mapped;
+        const navLocale = mapBCP47(nav);
 
         // 方法 2：<html lang>
         const doc = await page.evaluate(() =>
             document.documentElement.getAttribute('lang') || ''
         );
-        const mapped2 = mapBCP47(doc);
-        if (mapped2 && PROFILES[mapped2]) return mapped2;
+        const docLocale = mapBCP47(doc);
 
-        // 方法 3：从模型选择器按钮文本反向推断
-        const btn = await page.evaluate(() => {
-            const el = document.querySelector(
-                'button[aria-label*="模式"], button[aria-label*="Model"], button[aria-label*="モデル"]'
-            );
-            return el ? (el.textContent || '').trim() : '';
-        });
-        if (btn.includes('扩展')) return 'zh_CN';
-        if (btn.includes('延長')) return 'zh_TW';
-        if (btn.includes('Extended')) return 'en';
-        if (btn.includes('拡張')) return 'ja';
+        if (navLocale && PROFILES[navLocale]) return navLocale;
+        if (docLocale && PROFILES[docLocale]) return docLocale;
 
         return null; // 回退模糊匹配
     } catch {
