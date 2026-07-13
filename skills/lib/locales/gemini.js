@@ -92,7 +92,7 @@ const PROFILES = {
 
 const FUZZY = {
     modelAria:    /打开模式选择器|開啟模式挑選器|Model selector|モデルセレクターを開く/i,
-    modelVerify:  /Pro\s*(扩展|延長|Extended|拡張)/i,
+    modelVerify:  /Pro\s*(扩展|延伸|延長|Extended|拡張)/i,
     proDesc:      /進階|进阶|高等数学|Advanced|高度な数学/i,
     thinking:     /思考等级|思考程度|Thinking|Thought|思考レベル/i,
     extended:     /扩展思考|延伸思考|Extended thinking|拡張思考|扩展|延長|Extended|拡張/i,
@@ -108,8 +108,13 @@ const FUZZY = {
 // ═══════════════════════════════════════════════════════════════════════════
 
 const STATIC = {
-    menuContainer:   '[role="menu"]',
-    menuItem:        'gem-menu-item, [role="menuitem"]',
+    // v10: broadened — Angular Material renames (mat-mdc-*) and role variants
+    // (listbox/menuitemradio/option) no longer blind the menu detection.
+    menuContainer:   '[role="menu"], [role="listbox"], .mat-mdc-menu-panel, .cdk-overlay-pane [role="dialog"]',
+    menuItem:        'gem-menu-item, [role="menuitem"], [role="menuitemradio"], [role="option"], mat-option, [mat-menu-item], .mat-mdc-menu-item',
+    // v10: overlay container — child-count growth after a click is one of the
+    // "menu actually opened" signals used by verify-by-effect discovery.
+    overlayContainer: '.cdk-overlay-container',
     overlayBackdrop: '.cdk-overlay-backdrop',
     editor:          '.ql-editor, [contenteditable="true"][role="textbox"], rich-textarea',
     editorFallback:  '.ql-editor, [contenteditable="true"], rich-textarea',

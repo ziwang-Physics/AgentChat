@@ -35,6 +35,10 @@ module.exports = {
         '[class*="message-select-content-inner"]',
         '[class*="message-select-content"]',
         '.chat-round.last-message-item',
+        // v10: generic tails — four of the five above share the
+        // message-select naming family; a single rename kills them together.
+        '[class*="answer"]',
+        '[class*="markdown"]',
     ],
     responseSelectorTimeout: 60_000,
     stabilityWindow: 8_000,

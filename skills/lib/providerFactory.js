@@ -18,6 +18,10 @@
 
 const { ProviderError, classifyError, STAGES } = require('./errors');
 const { appendWithRotation } = require('./telemetry');
+// v10: stderr logger for factory-level diagnostics (stdout is a machine
+// contract — see lib/receipt.js stream policy; terminal.log writes stderr).
+const { log: _tlog } = require('./terminal');
+const flog = (key, msg) => { try { _tlog(key || 'factory', msg); } catch (_) {} };
 
 // ══════════════════════════════════════════════════════════════════════════════
 // CONFIG SCHEMA (JSDoc reference — not enforced at runtime)
@@ -112,8 +116,16 @@ const DEFAULTS = {
 /**
  * Find an editable element matching one of the given selectors.
  * Returns the first visible, non-readonly contenteditable div or textarea.
+ *
+ * v10: no longer a silent single-shot. When every configured selector fails
+ * (the Gemini-class "UI drift" failure, which used to hard-fail the provider
+ * at EDITOR_FIND), a heuristic scan across document + open shadow roots looks
+ * for the most chat-input-shaped editable on the page; the pick is still
+ * gated by validateFn. On total failure, dumps input-element diagnostics to
+ * stderr so the next selector fix takes one minute instead of a blind hunt.
  */
-async function findEditableElement(page, selectors, validateFn) {
+async function findEditableElement(page, selectors, validateFn, log) {
+    const _log = log || (() => {});
     for (const sel of selectors) {
         try {
             const loc = page.locator(sel).first();
@@ -139,7 +151,139 @@ async function findEditableElement(page, selectors, validateFn) {
             return loc;
         } catch (_) { /* next selector */ }
     }
+
+    // v10: heuristic last resort — selector drift should degrade, not kill
+    const rescued = await heuristicFindEditor(page, validateFn, _log).catch(() => null);
+    if (rescued) return rescued;
+
+    await dumpEditorDiagnostics(page, _log).catch(() => {});
     return null;
+}
+
+/**
+ * v10: Heuristic editor discovery (shadow-DOM piercing).
+ * Scores visible editables by chat-input shape: low on the page, wide,
+ * prompt-ish placeholder/aria. Tags the winner with data-fs-editor="1"
+ * (Playwright locators pierce open shadow roots, so the tag is reachable
+ * even inside a web component). validateFn still gates the pick.
+ */
+async function heuristicFindEditor(page, validateFn, log = () => {}) {
+    let meta = null;
+    try {
+        meta = await page.evaluate(({ marker }) => {
+            const roots = [document];
+            try {
+                const w = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT);
+                let n;
+                while ((n = w.nextNode())) if (n.shadowRoot) roots.push(n.shadowRoot);
+            } catch (_) {}
+
+            // Clear stale tags from earlier scans
+            for (const r of roots) {
+                try {
+                    r.querySelectorAll(`[${marker}]`).forEach(el => el.removeAttribute(marker));
+                } catch (_) {}
+            }
+
+            const PROMPTISH = /问|输入|消息|发送|聊|訊息|傳送|message|prompt|ask|chat|send|type/i;
+            const vw = window.innerWidth || 1280;
+            const vh = window.innerHeight || 800;
+            const seen = new Set();
+            const cands = [];
+            for (const r of roots) {
+                let list = [];
+                try {
+                    list = r.querySelectorAll(
+                        'textarea, [contenteditable="true"], [role="textbox"], input[type="text"]'
+                    );
+                } catch (_) { continue; }
+                for (const el of list) {
+                    if (seen.has(el)) continue;
+                    seen.add(el);
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width < 50 || rect.height < 14) continue;
+                    const style = getComputedStyle(el);
+                    if (style.visibility === 'hidden' || style.display === 'none') continue;
+                    if (el.hasAttribute('readonly') || el.hasAttribute('disabled')) continue;
+                    if (el.getAttribute('contenteditable') === 'false') continue;
+
+                    const hint = (el.getAttribute('placeholder') || '') + ' '
+                               + (el.getAttribute('aria-label') || '');
+                    let score = 0;
+                    if (rect.top > vh * 0.4) score += 2;   // chat inputs live low
+                    if (rect.width > vw * 0.35) score += 2; // main input is wide
+                    if (PROMPTISH.test(hint)) score += 2;
+                    if (el.tagName === 'TEXTAREA'
+                        || el.getAttribute('contenteditable') === 'true') score += 1;
+
+                    cands.push({ el, score, area: rect.width * rect.height, hint: hint.trim().slice(0, 60) });
+                }
+            }
+            if (!cands.length) return null;
+            cands.sort((a, b) => b.score - a.score || b.area - a.area);
+            cands[0].el.setAttribute(marker, '1');
+            return { score: cands[0].score, hint: cands[0].hint, total: cands.length };
+        }, { marker: 'data-fs-editor' });
+    } catch (_) { return null; }
+    if (!meta) return null;
+
+    const loc = page.locator('[data-fs-editor="1"]').first();
+    const visible = await loc.isVisible({ timeout: 1000 }).catch(() => false);
+    if (!visible) return null;
+    if (validateFn) {
+        const ok = await validateFn(loc).catch(() => false);
+        if (!ok) return null;
+    }
+    log(`editor found via HEURISTIC scan (selector drift? score=${meta.score} hint="${meta.hint}" candidates=${meta.total}) — update editorSelectors when convenient`);
+    return loc;
+}
+
+/**
+ * v10: Dump visible input-ish elements to stderr when no editor was found —
+ * the single source of truth for the next one-minute selector fix.
+ */
+async function dumpEditorDiagnostics(page, log = () => {}) {
+    try {
+        const info = await page.evaluate(() => {
+            const roots = [document];
+            try {
+                const w = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT);
+                let n;
+                while ((n = w.nextNode())) if (n.shadowRoot) roots.push(n.shadowRoot);
+            } catch (_) {}
+            const seen = new Set();
+            const items = [];
+            for (const r of roots) {
+                let list = [];
+                try {
+                    list = r.querySelectorAll('textarea, input, [contenteditable], [role="textbox"]');
+                } catch (_) { continue; }
+                for (const el of list) {
+                    if (seen.has(el)) continue;
+                    seen.add(el);
+                    const rect = el.getBoundingClientRect();
+                    items.push({
+                        tag: el.tagName,
+                        ce: el.getAttribute('contenteditable') || '',
+                        placeholder: (el.getAttribute('placeholder') || '').slice(0, 60),
+                        aria: (el.getAttribute('aria-label') || '').slice(0, 60),
+                        classes: (typeof el.className === 'string' ? el.className : '').slice(0, 100),
+                        visible: rect.width > 0 && rect.height > 0,
+                        top: Math.round(rect.top),
+                        shadow: r !== document,
+                    });
+                    if (items.length >= 12) return items;
+                }
+            }
+            return items;
+        });
+        log('DIAG: no editor selector matched — input-ish elements on page:');
+        info.forEach((b, i) => {
+            log(`  [${i}] <${b.tag}>${b.shadow ? ' [shadow]' : ''} vis=${b.visible} top=${b.top} ce="${b.ce}" ph="${b.placeholder}" aria="${b.aria}" class="${b.classes}"`);
+        });
+    } catch (e) {
+        log(`DIAG: editor dump failed: ${e.message}`);
+    }
 }
 
 /**
@@ -305,6 +449,107 @@ async function clickSend(page, editor, sendSelectors, fallbackKey) {
     await page.keyboard.press(fallbackKey || 'Enter');
     await page.waitForTimeout(1500);
     return true;
+}
+
+/**
+ * v10: Verify-by-effect for SEND — the same principle that fixed the Gemini
+ * model picker, applied to the one shared step with a SILENT failure mode:
+ * a keyboard fallback that inserts a newline instead of submitting (Enter vs
+ * Ctrl+Enter UIs) produced no error, then burned the whole WAIT_RESPONSE
+ * budget and failed the provider as 'timeout'.
+ *
+ * Signals (any one ⇒ 'sent'): editor emptied to <20% of the prompt, or a
+ * stop button appeared. 'unsent' is only returned when ≥80% of the prompt
+ * DEMONSTRABLY still sits in the editor — the only state where a retry with
+ * an alternate key cannot double-send. Anything ambiguous ⇒ 'unknown' (no-op).
+ *
+ * @returns {Promise<'sent'|'unsent'|'unknown'>}
+ */
+async function verifySendEffect(page, editor, prompt, C, budgetMs = 4000) {
+    const readLen = () => editor.evaluate(el =>
+        (el.value !== undefined && el.value !== null && el.tagName === 'TEXTAREA')
+            ? el.value.length
+            : (el.innerText || el.textContent || '').length
+    );
+    try {
+        const start = Date.now();
+        while (Date.now() - start < budgetMs) {
+            const len = await readLen().catch(() => -1);
+            if (len >= 0 && len < prompt.length * 0.2) return 'sent';
+
+            for (const sel of (C.stopSelectors || [])) {
+                const vis = await page.locator(sel).first()
+                    .isVisible({ timeout: 200 }).catch(() => false);
+                if (vis) return 'sent';
+            }
+            await page.waitForTimeout(400);
+        }
+        const finalLen = await readLen().catch(() => -1);
+        if (finalLen >= prompt.length * 0.8) return 'unsent';
+        return 'unknown';
+    } catch (_) { return 'unknown'; }
+}
+
+/**
+ * v10: When no responseSelector ever attaches, dump the largest visible text
+ * blocks (shadow-piercing, ancestor-deduped) — mirrors the Gemini DIAG dump.
+ * Any future response-selector drift becomes a one-minute fix instead of a
+ * blind 'timeout'.
+ */
+async function dumpResponseDiagnostics(page, log = () => {}) {
+    try {
+        const info = await page.evaluate(() => {
+            const roots = [document];
+            try {
+                const w = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT);
+                let n;
+                while ((n = w.nextNode())) if (n.shadowRoot) roots.push(n.shadowRoot);
+            } catch (_) {}
+
+            const seen = new Set();
+            const blocks = [];
+            let scanned = 0;
+            for (const r of roots) {
+                let list = [];
+                try { list = r.querySelectorAll('[class], article, section, main'); }
+                catch (_) { continue; }
+                for (const el of list) {
+                    if (++scanned > 6000) break;
+                    if (seen.has(el)) continue;
+                    seen.add(el);
+                    const t = (el.innerText || '').trim();
+                    if (t.length < 120) continue;
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width === 0 || rect.height === 0) continue;
+                    blocks.push({ el, len: t.length, preview: t.slice(0, 80).replace(/\s+/g, ' ') });
+                }
+                if (scanned > 6000) break;
+            }
+
+            // Prefer leaf-most blocks: ascending by length, an ancestor is
+            // dropped when a kept descendant carries ≥90% of its text.
+            blocks.sort((a, b) => a.len - b.len);
+            const kept = [];
+            for (const b of blocks) {
+                if (kept.some(k => b.el.contains(k.el) && k.len >= b.len * 0.9)) continue;
+                kept.push(b);
+            }
+            kept.sort((a, b) => b.len - a.len);
+            return kept.slice(0, 10).map(({ el, len, preview }) => ({
+                tag: el.tagName,
+                id: el.id || '',
+                classes: (typeof el.className === 'string' ? el.className : '').slice(0, 120),
+                len,
+                preview,
+            }));
+        });
+        log('DIAG: no responseSelector matched — largest visible text blocks:');
+        info.forEach((b, i) => {
+            log(`  [${i}] <${b.tag}> id="${b.id}" len=${b.len} class="${b.classes}" text="${b.preview}"`);
+        });
+    } catch (e) {
+        log(`DIAG: response dump failed: ${e.message}`);
+    }
 }
 
 /**
@@ -779,7 +1024,11 @@ function createProviderRunner(cfg) {
         }
 
         // ── Step 5: Find editor ──
-        const editor = await findEditableElement(page, C.editorSelectors, C.validateEditor);
+        // v10: findEditableElement now self-heals (heuristic rescue) and dumps
+        // diagnostics on total failure — pass the provider-tagged logger.
+        const editor = await findEditableElement(
+            page, C.editorSelectors, C.validateEditor, (m) => flog(C.key, m)
+        );
         if (!editor) {
             return classifyError(
                 new Error('No editable input found'),
@@ -826,6 +1075,23 @@ function createProviderRunner(cfg) {
             return classifyError(e, STAGES.SEND, C.key);
         }
 
+        // ── Step 7.5: v10 send-effect verification ──
+        // A send that silently did nothing (Enter inserted a newline; a stale
+        // button ate the click) previously surfaced only as a WAIT_RESPONSE
+        // 'timeout' after the full budget. Retry with the alternate key ONLY
+        // when ≥80% of the prompt is demonstrably still in the editor — the
+        // one state where a retry cannot double-send. Best-effort throughout.
+        try {
+            const eff = await verifySendEffect(page, editor, prompt, C);
+            if (eff === 'unsent') {
+                const alt = (C.sendFallback === 'Enter') ? 'ControlOrMeta+Enter' : 'Enter';
+                flog(C.key, `send not confirmed — prompt still in editor; retrying with ${alt}`);
+                await editor.focus().catch(() => {});
+                await page.keyboard.press(alt);
+                await page.waitForTimeout(1500);
+            }
+        } catch (_) { /* verification is best-effort */ }
+
         // ── Step 8: Wait for response ──
         // BUGFIX: pass provStart (full provider budget start) instead of respStart
         // (post-input reset). waitForCompletion's phase-1 comment already assumes
@@ -835,6 +1101,9 @@ function createProviderRunner(cfg) {
         // so per-run state (baselineCounts) must never be written onto it.
         const responseEl = await waitForCompletion(page, { ...C, baselineCounts }, provStart, timeoutMs);
         if (!responseEl) {
+            // v10: dump the largest visible text blocks BEFORE classifying —
+            // a response-selector drift is now diagnosable from one log.
+            await dumpResponseDiagnostics(page, (m) => flog(C.key, m)).catch(() => {});
             return classifyError(
                 new Error('No response element appeared'),
                 STAGES.WAIT_RESPONSE, C.key, 'timeout'
@@ -879,6 +1148,11 @@ module.exports = {
     // Shared atomic operations — also usable directly by providers that need
     // custom pipeline steps beyond what the factory supports.
     findEditableElement,
+    // v10 hardening helpers (exported for tests / custom pipelines)
+    heuristicFindEditor,
+    verifySendEffect,
+    dumpEditorDiagnostics,
+    dumpResponseDiagnostics,
     inputViaClipboard,
     inputViaSimulatedPaste,
     inputViaKeyboard,

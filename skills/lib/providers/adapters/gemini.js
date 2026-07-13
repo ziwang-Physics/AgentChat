@@ -2,7 +2,10 @@
  * Gemini provider adapter config.
  *
  * Key differences from standard pipeline:
- *   - Pro Extended Thinking activation (preInputHook)
+ *   - Pro Extended Thinking activation (preInputHook), v10: Pro→Flash→DEFAULT
+ *     (lenient policy — selector drift in the model picker degrades the model
+ *     choice instead of failing the provider; AGENTCHAT_GEMINI_MODEL_POLICY=strict
+ *     restores the old hard-fail)
  *   - Bursty output detection (stillGeneratingCheck) — resets stability clock
  *     when Pro Extended pauses mid-reasoning for 6s+
  *   - Action Toolbar completion anchor — Copy/Good-response buttons = definitive "done"
@@ -157,11 +160,28 @@ module.exports = {
             return;
         }
 
-        // Tier 3: Flash also failed — let provider chain fall to ChatGPT
-        throw Object.assign(
-            new Error('Gemini model activation failed — Pro Extended and Flash both unavailable'),
-            { code: 'ERR_MODEL_DEGRADED' }
-        );
+        // Tier 3: both switchers failed.
+        //
+        // v10 POLICY FIX (the actual "one-time" fix for the recurring Gemini
+        // outages): model PINNING failure is not model UNAVAILABILITY. If the
+        // selector drifts, the page still has a fully working Gemini with its
+        // default model — throwing here threw away a valid Gemini answer and
+        // cascaded the whole call to ChatGPT every time Google touched the
+        // model picker. Default is now to WARN and proceed on the page's
+        // current/default model; diagnostics for the picker were already
+        // dumped by geminiModelSwitch. Opt back into the old hard-fail with
+        //   AGENTCHAT_GEMINI_MODEL_POLICY=strict
+        // (for callers that MUST have Pro Extended, e.g. benchmark runs).
+        const policy = String(process.env.AGENTCHAT_GEMINI_MODEL_POLICY || 'lenient')
+            .trim().toLowerCase();
+        if (policy === 'strict') {
+            throw Object.assign(
+                new Error('Gemini model activation failed — Pro Extended and Flash both unavailable (policy=strict)'),
+                { code: 'ERR_MODEL_DEGRADED' }
+            );
+        }
+        log('gemini WARN: model activation failed — proceeding with the page\'s '
+            + 'DEFAULT model (policy=lenient). Set AGENTCHAT_GEMINI_MODEL_POLICY=strict to fail instead.');
     },
 
     // ── Editor ──

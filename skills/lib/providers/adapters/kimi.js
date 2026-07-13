@@ -83,6 +83,11 @@ module.exports = {
         '[class*="chat-content-item-assistant"]',
         '[class*="segment-content"]',
         '[class*="chat-content-list"] [class*="assistant"]',
+        // v10: all three above anchor on the chat-content/segment naming
+        // family — one rename kills them together. Generic tails are only
+        // reached when the specific ones fail (budget-clamped upstream).
+        '[class*="assistant"]',
+        '[class*="markdown"]',
     ],
     responseSelectorTimeout: 60_000,
     stabilityWindow: 8_000,

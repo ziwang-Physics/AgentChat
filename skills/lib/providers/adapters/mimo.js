@@ -32,8 +32,16 @@ module.exports = {
         /本网站为面向开发者的模型能力演示平台/i,
     ],
     editorSelectors: [
+        // v10: same P0 as DeepSeek — both entries anchored on placeholder COPY
+        // (the most volatile anchor: one wording tweak = provider dead at
+        // EDITOR_FIND). Structural fallbacks appended, specific-first order
+        // preserved. customSend already routes to Enter when its own
+        // placeholder-based traversal misses, so send stays consistent.
         'textarea[placeholder*="有问题，尽管问"]',
         'textarea[placeholder*="Shift + Enter"]',
+        'textarea',
+        '[contenteditable="true"]',
+        '[role="textbox"]',
     ],
     // MiMo's send button is found via DOM traversal from textarea, not CSS selectors.
     // Tries both editorSelectors placeholder variants — the textarea that actually
