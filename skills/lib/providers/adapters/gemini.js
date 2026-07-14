@@ -16,6 +16,9 @@
  *     gemini.google.com — CAPTCHA/consent/upsell → 'auth') + signedOutSelectors
  *     (signed-out landing page served ON gemini.google.com → 'auth')
  *   - Safety rejection + short-response validation in postResponseHook
+ *   - 2026-07 UI rewrite support: <message-content> response containers
+ *     (RESPONSE_SELECTOR) + dual-draft panels ("选项 A/B") resolved to draft A
+ *     in postResponseHook (extractFirstDraft) — drafts are NEVER concatenated
  *
  * Dependencies: lib/geminiModelSwitch.js (ensureProExtended), lib/providerFactory.js (input helpers)
  */
@@ -91,6 +94,80 @@ function validateResponseComplete(text) {
         return { ok: false, reason: 'thinking_only' };
     }
     return { ok: true };
+}
+
+// ── Response container selectors ────────────────────────────────────────────
+// 2026-07 Gemini UI rewrite: `.model-response-text` no longer exists anywhere
+// in the DOM. Responses now render inside <message-content> custom elements
+// (DIAG dump: MESSAGE-CONTENT len=2454), and Gemini sometimes produces TWO
+// parallel drafts ("选项 A" / "选项 B") inside a dual-response panel — which
+// per the dump is a DIV carrying class="dual-response-panel", NOT a custom
+// element tag.
+//
+// Design constraints (from providerFactory.js, read in full):
+//   1. Phase 2 waits up to responseSelectorTimeout (60s) for EACH
+//      responseSelectors array entry SERIALLY — so this must be ONE union
+//      string that attaches in every UI generation, never a list with a dead
+//      legacy entry in front burning 60s per call.
+//   2. The factory resolves the element as locator(sel).last() (live, tracks
+//      the newest match each poll) and keys the baselineCounts stale-response
+//      guard off this exact selector string. Both compose correctly with a
+//      simple union: old UI → .model-response-text; new UI → the newest
+//      message-content.
+//   3. Deliberately CSS2-simple. Draft-A-vs-draft-B discrimination needs
+//      CSS4 (:not() with a complex argument) whose support differs across
+//      selector engines — so it is NOT done here. During phase-3 stability
+//      polling in dual mode, .last() legitimately tracks draft B (document-
+//      order last); the definitive draft-A extraction happens once, in
+//      postResponseHook, via Playwright locator chaining (engine-safe).
+//      Per-element innerText extraction means drafts can NEVER concatenate.
+const RESPONSE_SELECTOR = '.model-response-text, message-content';
+
+// Dual-draft panel container. Class form is what the DIAG dump shows; the
+// custom-element tag form is kept as zero-cost insurance against an Angular
+// refactor flipping between the two.
+const DUAL_PANEL_SELECTOR = '.dual-response-panel, dual-response-panel';
+
+/**
+ * If the CURRENT turn rendered a dual-draft panel, deterministically extract
+ * draft A (the FIRST message-content inside the LAST panel). Locator chaining
+ * (.last()/.first()) replaces sibling-order CSS, so this survives wrapper-div
+ * drift and needs no CSS4.
+ *
+ * STALE-PANEL GUARD: a reused tab can restore history containing an OLD,
+ * unresolved dual panel while the NEW turn answers in single mode. Blindly
+ * taking "last panel → first draft" would then overwrite the fresh answer
+ * with stale text. Currentness proof: when the panel IS the newest content,
+ * the factory-polled element (document-order-LAST message-content) is the
+ * panel's own last message-content — so their texts must be identical. Any
+ * mismatch means the panel belongs to an earlier turn → return null and keep
+ * the factory-polled text.
+ *
+ * @param {import('playwright').Page} page
+ * @param {string} polledText - text the factory extracted from its .last() element
+ * @returns {Promise<string|null>} draft A text, or null (no panel / stale / failure)
+ */
+async function extractFirstDraft(page, polledText) {
+    try {
+        const panels = page.locator(DUAL_PANEL_SELECTOR);
+        if (await panels.count() === 0) return null;
+        const drafts = panels.last().locator('message-content');
+        if (await drafts.count() === 0) return null;
+
+        const panelTail = await drafts.last()
+            .evaluate(el => (el.innerText || el.textContent || '').trim())
+            .catch(() => null);
+        if (panelTail === null || panelTail !== (polledText || '').trim()) {
+            return null; // panel is not the current turn — keep polled text
+        }
+
+        const text = await drafts.first()
+            .evaluate(el => (el.innerText || el.textContent || '').trim())
+            .catch(() => '');
+        return text || null;
+    } catch (_) {
+        return null;
+    }
 }
 
 // ── Config ──────────────────────────────────────────────────────────────────
@@ -213,25 +290,46 @@ module.exports = {
     stopBtnExtensionMs: 120_000, // Pro Extended extra budget
 
     // ── Response ──
-    responseSelectors: ['.model-response-text'],
+    // Entry 2 is a last-resort fallback for a future UI where <message-content>
+    // itself gets renamed: the .markdown panel carried identical text in the
+    // DIAG dump (len 2454 == 2454). It is only consulted after entry 1 spends
+    // its full 60s wait, and in dual mode its .last() may resolve to draft B —
+    // a single coherent draft, never a concatenation.
+    responseSelectors: [RESPONSE_SELECTOR, '.markdown.markdown-main-panel'],
     responseSelectorTimeout: 60_000,
     stabilityWindow: 10_000,
     minResponseLength: 10,
 
     // ── Completion anchor: Action Toolbar = definitive "done" ──
+    // GAP FIX: the DIAG log shows a zh-CN UI ("选项 A", "搜索网页"), but the old
+    // list only covered zh-TW ("複製") and English — on Simplified-Chinese
+    // pages NO anchor could ever match and phase 4 silently burned its budget
+    // slice every call. Added 复制/コピー/良い回答 to mirror locales/gemini.js
+    // FUZZY (copy: /复制|複製|Copy|コピー/, good: /好答案|Good response|良い回答/),
+    // plus <message-actions> as a locale-independent structural anchor probed
+    // first. Phase 4 splits the remaining budget across entries with a hard
+    // cumulative deadline, so extra entries cannot overrun the budget.
     completionAnchor: [
+        'message-actions button',
+        'button[aria-label*="复制"]',
         'button[aria-label*="複製"]',
         'button[aria-label*="Copy"]',
+        'button[aria-label*="コピー"]',
         'button[aria-label*="Good response"]',
         'button[aria-label*="好答案"]',
+        'button[aria-label*="良い回答"]',
     ],
 
     // ── Bursty generation detection ──
     stillGeneratingCheck: async (page) => {
         const generating = await isStillGenerating(page);
         if (generating) return true;
-        // Also check if current text is just pre-generation filler
-        const text = await page.locator('.model-response-text').last()
+        // Also check if current text is just pre-generation filler.
+        // Must use the SAME selector union the factory polls with, so the
+        // pre-generation verdict is rendered on the SAME element whose text
+        // drives the stability clock (in dual mode that is draft B, the
+        // document-order last — draft A is swapped in later by postResponseHook).
+        const text = await page.locator(RESPONSE_SELECTOR).last()
             .evaluate(el => el.innerText || el.textContent || '').catch(() => '');
         return looksLikePreGeneration(text);
     },
@@ -298,8 +396,17 @@ module.exports = {
         return len > prompt.length * 0.8;
     },
 
-    // ── Post-response: validate + detect safety rejection ──
+    // ── Post-response: dual-draft resolution + validate + safety rejection ──
     postResponseHook: async (page, text) => {
+        // Dual-draft panel (选项 A / 选项 B): the factory's polled .last()
+        // element is draft B in that mode (document-order last). Replace the
+        // text with draft A — deterministic, single draft, never concatenated.
+        // extractFirstDraft's stale-panel guard keeps this a no-op when the
+        // panel belongs to an earlier restored turn. Must run BEFORE the
+        // refusal/validation checks so they judge the draft actually returned.
+        const draftA = await extractFirstDraft(page, text);
+        if (draftA) text = draftA;
+
         // Check for safety rejection.
         // BUGFIX (false positive): the old pattern matched substrings like
         // "unable to" ANYWHERE in the full text — a scientific answer containing

@@ -118,7 +118,10 @@ const STATIC = {
     overlayBackdrop: '.cdk-overlay-backdrop',
     editor:          '.ql-editor, [contenteditable="true"][role="textbox"], rich-textarea',
     editorFallback:  '.ql-editor, [contenteditable="true"], rich-textarea',
-    response:        '.model-response-text',
+    // 2026-07 UI rewrite: responses moved into <message-content> custom
+    // elements. No runtime consumer as of v10 (the adapter owns the full
+    // dual-draft-aware union) — kept in sync for future callers of STATIC.
+    response:        '.model-response-text, message-content',
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
