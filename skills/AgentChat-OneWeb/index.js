@@ -315,7 +315,8 @@ async function tryAllProviders(browser, prompt, ctx, options = {}) {
         }
     }
 
-    const context = browser.contexts()[0];
+    // v12: `let` — both may be swapped by the mid-chain CDP reconnect below.
+    let context = browser.contexts()[0];
     if (!context) throw new Error('No active browser context.');
 
     const fallbackReasons = {};
@@ -334,6 +335,48 @@ async function tryAllProviders(browser, prompt, ctx, options = {}) {
         const provider = PROVIDER_CHAIN[i];
         const elapsed = Date.now() - overallStart;
         const remainingTotal = totalTimeout - elapsed;
+
+        // ── v12: browser-loss fail-fast ──
+        // A tab-level Context closed sometimes means the whole Chrome/CDP link
+        // died with it. The old behavior marched every remaining provider
+        // through newPage()/goto() against a dead connection — 7 more
+        // identical "Context closed" failures, each burning budget, ending in
+        // exit 9 with the real cause (CDP down) buried. Detect once at the
+        // top of each iteration; try ONE reconnect (Chrome may still be up
+        // with only the websocket dropped); otherwise abort the chain with a
+        // dedicated 'browser_lost' reason that main() maps to exit 1
+        // (ERR_NO_CDP) so the operator sees the actual fix.
+        if (!browser.isConnected()) {
+            log('⚠ CDP connection lost mid-chain — attempting one reconnect...');
+            let recovered = false;
+            if (typeof options.reconnect === 'function') {
+                try {
+                    const fresh = await options.reconnect();
+                    const freshCtx = fresh && fresh.contexts && fresh.contexts()[0];
+                    if (freshCtx) {
+                        browser = fresh;
+                        context = freshCtx;
+                        recovered = true;
+                        log('✓ CDP reconnected — resuming chain');
+                    }
+                } catch (e) {
+                    log(`  reconnect failed: ${e.message}`);
+                }
+            }
+            if (!recovered) {
+                fallbackReasons[provider.key] = {
+                    reason: 'browser_lost',
+                    error_details: {
+                        message: 'CDP connection lost mid-chain and reconnect failed — remaining providers skipped',
+                        stage: 'browser',
+                        provider: provider.key,
+                    },
+                };
+                triedProviders.push(provider.key);
+                log('✗ CDP unrecoverable — aborting chain (remaining providers would all fail identically)');
+                break;
+            }
+        }
 
         if (remainingTotal < 15000) {
             log(`Total timeout approaching — ${remainingTotal}ms left. Stopping chain.`);
@@ -607,6 +650,8 @@ async function main() {
             startFrom,
             keepTabs,
             singleAttempt,
+            // v12: one-shot mid-chain CDP recovery (see browser-loss fail-fast)
+            reconnect: () => connectWithRetry(CDP_URL, 2),
         });
 
         if (result.success) {
@@ -667,6 +712,16 @@ async function main() {
             log('Total timeout reached before the chain could complete.');
             ctx.recordTelemetry(10);
             process.exit(10);
+        }
+        // v12: CDP died mid-run and the one-shot reconnect failed. Exit 1
+        // (ERR_NO_CDP) — same operator action as failing to connect at start.
+        // Previously this collapsed into exit 9 with 8 identical Context-closed
+        // reasons, hiding the one command that actually fixes it.
+        const hasBrowserLost = reasonValues.some(r => r.includes('browser_lost'));
+        if (hasBrowserLost) {
+            log('CDP connection was lost mid-run. Restart Chrome debug: bash scripts/start-chrome-debug.sh');
+            ctx.recordTelemetry(1);
+            process.exit(1);
         }
         ctx.recordTelemetry(9);
         process.exit(9);

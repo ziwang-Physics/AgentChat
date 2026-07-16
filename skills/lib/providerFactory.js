@@ -61,6 +61,10 @@ const flog = (key, msg) => { try { _tlog(key || 'factory', msg); } catch (_) {} 
 //       whole provider budget. Long-thinking providers raise it (Gemini 300s,
 //       Kimi 180s); it re-arms on every actual text change.
 //   responseSelectorTimeout?: number, // ms per response selector wait (default: 30000)
+//   salvageOnContextLoss?: boolean, // v12: when the tab's CDP context dies AFTER the
+//       send was committed (click landed → server has the prompt), open a fresh page,
+//       re-navigate to the conversation URL, and try to extract the response instead
+//       of failing the provider (default: true). See salvageCommittedSend().
 //   customSend?: (page, editor) => Promise<boolean>, // override clickSend entirely
 //   preInputHook?: (page, cfg) => Promise<void>,   // e.g. Gemini Pro detection
 //   postResponseHook?: (page, rawText, cfg) => Promise<string>, // e.g. Qwen prefix strip
@@ -108,6 +112,7 @@ const DEFAULTS = {
     stillGeneratingCheck: null,
     stillGeneratingMaxHoldMs: 90_000, // v11: ⚙ hold cap (see schema above)
     responseSelectorTimeout: 30_000,
+    salvageOnContextLoss: true, // v12: recover committed sends from dead tab contexts
     stabilityWindow: 10_000,
     pollInterval: 2_000,
     minResponseLength: 10,
@@ -420,14 +425,54 @@ async function clearEditor(page, editor) {
 }
 
 /**
+ * v12: Detect Playwright's "the CDP target/context/browser went away" error
+ * class. These are transport-level losses — they say NOTHING about whether
+ * the action that preceded them reached the server.
+ */
+function isContextLostError(e) {
+    const m = String((e && e.message) || e || '');
+    return /Target (page, context or browser has been closed|closed)/i.test(m)
+        || /browser has been (closed|disconnected)/i.test(m)
+        || /context or browser has been closed/i.test(m)
+        || /Session closed/i.test(m)
+        || /Connection closed/i.test(m)
+        || /Protocol error.*(closed|disconnected)/i.test(m)
+        || /websocket.*(closed|disconnected)/i.test(m);
+}
+
+/**
  * Find, verify, and click a send button, or press a fallback key.
  *
  * v2: Poll-waits for the button to be both visible AND enabled before clicking.
  *     React contenteditable editors may show a disabled button for 200-800ms
  *     after text is pasted (React batch state update).  A click on a disabled
  *     button is silently ignored.
+ *
+ * v12: COMMIT TRACKING. Once btn.click() (or the fallback keypress) has
+ *     RESOLVED, the prompt is committed server-side — the provider's backend
+ *     has it queued regardless of what happens to this tab. Two consequences:
+ *       1. Errors after commit must NEVER fall through to the next selector
+ *          or the keyboard fallback (a live page would double-send; a dead
+ *          page just throws again and hides the real state).
+ *       2. A context-lost error after commit is tagged
+ *          code='ERR_SEND_COMMITTED_CTX_LOST' so the runner can attempt
+ *          response salvage on a fresh page instead of failing a send that
+ *          actually SUCCEEDED (root cause of the DALL·E case: click lands,
+ *          image generates, but waitForTimeout(1500) throws Context closed
+ *          → SEND 'error' → pointless 8-provider cascade).
  */
 async function clickSend(page, editor, sendSelectors, fallbackKey) {
+    let committed = false; // click/keypress resolved → server has the prompt
+    const rethrowTagged = (e) => {
+        if (isContextLostError(e)) {
+            const err = new Error(
+                `send committed, then tab context lost during post-send settle: ${e.message}`);
+            err.code = 'ERR_SEND_COMMITTED_CTX_LOST';
+            err.cause = e;
+            throw err;
+        }
+        throw e;
+    };
     for (const sel of sendSelectors) {
         try {
             const btn = page.locator(sel).first();
@@ -449,14 +494,24 @@ async function clickSend(page, editor, sendSelectors, fallbackKey) {
             if (!enabled) continue; // still disabled after 3s → try next selector
 
             await btn.click();
+            committed = true; // ← past this line, the send happened
             await page.waitForTimeout(1500);
             return true;
-        } catch (_) { /* next selector */ }
+        } catch (e) {
+            if (committed) rethrowTagged(e); // no selector retry after a landed click
+            /* next selector */
+        }
     }
     // Fallback: press the key (usually Enter)
-    await editor.focus();
-    await page.keyboard.press(fallbackKey || 'Enter');
-    await page.waitForTimeout(1500);
+    try {
+        await editor.focus();
+        await page.keyboard.press(fallbackKey || 'Enter');
+        committed = true;
+        await page.waitForTimeout(1500);
+    } catch (e) {
+        if (committed) rethrowTagged(e);
+        throw e;
+    }
     return true;
 }
 
@@ -859,6 +914,127 @@ async function extractResponse(page, responseEl, config, prompt) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// v12: SEND-COMMITTED SALVAGE — recover a response whose tab died mid-flight
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * The dead-tab-after-committed-send recovery path.
+ *
+ * Scenario (observed with ChatGPT + DALL·E): btn.click() resolves → server
+ * queues the prompt → the tab's CDP context closes during the 1500ms settle
+ * wait. The generation continues server-side; only our WINDOW onto it died.
+ * Failing the provider here both lies (the send succeeded) and triggers a
+ * full fallback cascade that re-pays the generation on another provider —
+ * or fails everywhere if the whole browser went down with the tab.
+ *
+ * Recovery: open a FRESH page in the (still-alive) context and navigate to
+ * the conversation URL captured from the dead page. page.url() is a SYNC
+ * cached accessor — it survives target closure and tracks pushState, so for
+ * ChatGPT it usually already holds /c/<id> by the time the settle wait runs.
+ * Then reuse the standard waitForCompletion → extractResponse pipeline on
+ * the fresh page.
+ *
+ * Correctness gates (the silent-wrong-answer class is worse than a clean
+ * failure, so every gate bails to null → normal SEND error classification):
+ *   1. browser.isConnected() — a dead BROWSER (not just tab) is the
+ *      orchestrator's problem (reconnect / browser_lost fail-fast), not ours.
+ *   2. Conversation-URL preference — navigate to the captured per-chat URL;
+ *      the provider base URL usually opens an EMPTY new chat where .last()
+ *      extraction could only find stale or foreign text.
+ *   3. PROMPT-ECHO GUARD (mandatory): the recovered page's body must contain
+ *      the first 60 normalized chars of the prompt. This proves the page is
+ *      showing OUR conversation — and doubles as the send-really-landed
+ *      proof, which is why salvage is also safe to attempt for UNTAGGED
+ *      context-lost errors (e.g. thrown inside a customSend, where commit
+ *      state is unknown): an unsent prompt is simply not on the page.
+ *      Short prompts (<20 normalized chars) additionally require a
+ *      conversation-specific URL, since their echo alone is too weak.
+ *
+ * @returns {Promise<{success: true, response: string}|null>} null = not salvageable
+ */
+async function salvageCommittedSend(deadPage, C, prompt, provStart, timeoutMs, log = () => {}) {
+    // Budget gate — need enough runway for nav + (possibly still-running) generation.
+    const remaining = timeoutMs - (Date.now() - provStart);
+    if (remaining < 15_000) { log('salvage: <15s budget left — skipping'); return null; }
+
+    // Sync cached accessors — all safe on a closed page.
+    let lastUrl = null, ctxObj = null, browserObj = null;
+    try { lastUrl = deadPage.url(); } catch (_) {}
+    try { ctxObj = deadPage.context(); } catch (_) { return null; }
+    try { browserObj = ctxObj.browser(); } catch (_) {}
+    if (browserObj && !browserObj.isConnected()) {
+        log('salvage: whole CDP connection is down — deferring to orchestrator');
+        return null;
+    }
+
+    // Prefer the conversation-specific URL over the base URL.
+    let target = C.url;
+    let haveConvUrl = false;
+    try {
+        const baseHost = new URL(C.url).hostname;
+        if (lastUrl && !lastUrl.startsWith('about:')) {
+            const h = new URL(lastUrl).hostname;
+            const sameSite = h === baseHost || h.endsWith('.' + baseHost) || baseHost.endsWith('.' + h);
+            if (sameSite && lastUrl !== C.url) { target = lastUrl; haveConvUrl = true; }
+        }
+    } catch (_) { /* keep base URL */ }
+
+    const np = String(prompt || '').replace(/\s+/g, ' ').trim();
+    if (np.length < 20 && !haveConvUrl) {
+        log('salvage: short prompt + no conversation URL — echo guard too weak, skipping');
+        return null;
+    }
+
+    let fresh = null;
+    try {
+        fresh = await ctxObj.newPage();
+        log(`salvage: fresh page → ${target.slice(0, 100)}`);
+        await fresh.goto(target, { waitUntil: C.navWaitUntil, timeout: C.navTimeout });
+        if (C.navPostDelay > 0) await fresh.waitForTimeout(C.navPostDelay);
+
+        // Gate 3: prompt-echo — proves (a) this is OUR conversation and
+        // (b) the send actually landed. Poll briefly: SPAs hydrate history async.
+        const needle = np.slice(0, 60);
+        let echoed = false;
+        const echoDeadline = Date.now() + Math.min(12_000, Math.max(3_000, remaining - 10_000));
+        while (Date.now() < echoDeadline) {
+            echoed = await fresh.evaluate(n =>
+                (document.body ? (document.body.innerText || '') : '')
+                    .replace(/\s+/g, ' ').includes(n), needle).catch(() => false);
+            if (echoed) break;
+            await fresh.waitForTimeout(800);
+        }
+        if (!echoed) {
+            log('salvage: prompt not found on recovered page — not our conversation (or send never landed). Bailing.');
+            try { await fresh.close(); } catch (_) {}
+            return null;
+        }
+
+        // Standard completion pipeline on the fresh page. No baselineCounts:
+        // this is OUR single-prompt conversation, .last() IS our answer.
+        const el = await waitForCompletion(fresh, { ...C, baselineCounts: null }, provStart, timeoutMs);
+        if (!el) {
+            log('salvage: no response element appeared within budget');
+            try { await fresh.close(); } catch (_) {}
+            return null;
+        }
+        const response = await extractResponse(fresh, el, C, prompt);
+        if (!response) {
+            log('salvage: extraction empty/echo-rejected');
+            try { await fresh.close(); } catch (_) {}
+            return null;
+        }
+        // Success — leave the fresh tab open (keep-tabs policy: the user can
+        // see the conversation that produced this answer).
+        return { success: true, response };
+    } catch (e) {
+        log(`salvage: failed — ${e.message}`);
+        if (fresh) { try { await fresh.close(); } catch (_) {} }
+        return null;
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // OVERLAY CHECK — detect and handle modals/dialogs blocking the input area
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -1152,6 +1328,31 @@ function createProviderRunner(cfg) {
                 await clickSend(page, editor, C.sendSelectors, C.sendFallback);
             }
         } catch (e) {
+            // v12: a context loss at SEND stage does NOT mean the send failed —
+            // in the confirmed case (ERR_SEND_COMMITTED_CTX_LOST from clickSend)
+            // the click provably landed before the tab died; in the untagged
+            // case (customSend, or click() itself severed mid-flight) it's
+            // unknown. Both are safe to salvage: salvageCommittedSend's
+            // mandatory prompt-echo guard proves on the recovered page whether
+            // the prompt reached the conversation, so an unsent prompt can
+            // never yield a stale wrong answer — it just bails to the normal
+            // SEND error below.
+            const ctxLost = (e && e.code === 'ERR_SEND_COMMITTED_CTX_LOST') || isContextLostError(e);
+            if (ctxLost && C.salvageOnContextLoss !== false) {
+                flog(C.key, `send-stage context loss (${e.code || e.message}) — attempting response salvage on a fresh page`);
+                const salvaged = await salvageCommittedSend(
+                    page, C, prompt, provStart, timeoutMs, (m) => flog(C.key, m)
+                ).catch(() => null);
+                if (salvaged && salvaged.success) {
+                    flog(C.key, `salvage OK — recovered ${salvaged.response.length} chars from the committed send`);
+                    if (ctx && ctx.telemetry) {
+                        ctx.telemetry.per_provider_ms[C.key] = Date.now() - provStart;
+                        ctx.telemetry.send_salvaged = C.key;
+                    }
+                    return { success: true, response: salvaged.response };
+                }
+                flog(C.key, 'salvage unsuccessful — classifying as SEND failure');
+            }
             return classifyError(e, STAGES.SEND, C.key);
         }
 
@@ -1231,6 +1432,9 @@ module.exports = {
     // v10 hardening helpers (exported for tests / custom pipelines)
     heuristicFindEditor,
     verifySendEffect,
+    // v12: send-committed context-loss recovery
+    isContextLostError,
+    salvageCommittedSend,
     dumpEditorDiagnostics,
     dumpResponseDiagnostics,
     inputViaClipboard,
