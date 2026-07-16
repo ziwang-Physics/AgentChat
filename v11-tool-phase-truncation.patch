@@ -1,0 +1,992 @@
+diff --git a/skills/AgentChat-WebExtended/CHANGELOG.md b/skills/AgentChat-WebExtended/CHANGELOG.md
+index d718a56..485cf63 100644
+--- a/skills/AgentChat-WebExtended/CHANGELOG.md
++++ b/skills/AgentChat-WebExtended/CHANGELOG.md
+@@ -1,5 +1,18 @@
+ # AgentChat-WebExtended Changelog
+ 
++## 2026-07-16 (v11)
++- **[P0] Kimi 联网搜索「获取网页」阶段截断修复** (实测: 45s/960 chars 截断于「正在获取网页...」, 78s/1522 chars 截断于「获取网页 5 个网页」)。三层复合根因:
++  1. kimi.js `stillGeneratingCheck` 词表缺口 — `正在[搜索检索查询]` 不含「获取」, `\d+个结[果]` 不匹配「N 个网页」→ 抓取阶段 (5-30s 静默) 对检测器完全不可见, 8s stabilityWindow 到期即误判完成
++  2. `$` 锚定的 tail 正则天生脆弱 (状态行后跟任何来源 chip 行即失配) 且硬编码 responseSelectors[0], factory 命中 fallback selector 时检测器读错元素而静默失效
++  3. **factory 层 bug**: phase-3 只在 `text.length > lastLen` 时重置稳定时钟 — 搜索/思考卡片折叠导致 innerText 收缩时, 答案回升到峰值长度之前所有 poll 都被视为"stable", 窗口可在正文流式输出中途到期 (影响所有带可折叠工具 UI 的 provider)
++- 新增 `lib/stillWorking.js` — 共享多信号"仍在生成"检测器: S1 零 CDP 开销分类 factory 已读文本 / S2 停止按钮可见 (语言与措辞无关) / S3 最后一条回复容器内 spinner 或其子树 tail 状态行; CN 动词全词表 (搜索|检索|查询|获取|抓取|读取|阅读|浏览|访问|打开|解析|分析|整理|归纳|总结|思考|推理|撰写|生成|调用|执行|等待|加载|联网) + 「N 个网页/结果/来源」计数行 + EN 动名词
++- providerFactory phase-3 重写: 指纹 (length+tail-80) 变更检测取代纯增长检测, 新增 '~' tick (收缩/原位变更); `stillGeneratingCheck(page, {text, sinceChangeMs, elapsedMs})` 新签名 (向后兼容, 文本变化的 poll 不再调用 check — 每个增长 poll 省一次 CDP 往返); 新增 `stillGeneratingMaxHoldMs` (默认 90s, Gemini 300s, Kimi 180s) — ⚙ 重置自上次真实文本变化起有界, 误报从"烧光整个 provider 预算"降级为"有界延迟"
++- Kimi/MiniMax/DeepSeek/Qwen/MiMo 全部接入共享检测器 (MiniMax agent 工具阶段、DeepSeek R1 深度思考折叠、Qwen 深度搜索属同一截断类); responseSelectors 提升为模块常量保证检测器与 factory 轮询同一容器族; ChatGPT/Claude 保持 stop-button phase-1 管线不变
++- extractResponse 回声防护: 泛型 selector tail (`[class*="message"]` 等) 在 assistant 节点挂载缓慢时 `.last()` 会解析到用户自己的气泡 → 把 prompt 当响应返回 (silent-wrong-answer 类); 提取文本 ≈ prompt (±10-15% 长度且互相包含) 时判 EXTRACT 失败。短 prompt (<20 chars) 与"复述型"子串答案豁免
++- checkOverlays 登录误判: 「退出登录」「免登录」「已登录」不再把已登录 provider 硬判为 'auth' (负向后顾); `\blog in\b`/`\bsign in\b` 词边界
++- Claude editorSelectors 顺序: 页面级泛型 `[contenteditable="true"]` 从首位移到末位, 避免 `.first()` 绑定到对话重命名框/弹窗可编辑区
++- 新增 test_still_working.js — 57 条断言 (含两条实测截断 tail 的端到端回归、收缩回归、⚙ 上限、回声防护、8 provider 接线); test_gemini_selectors.js 19 条全部保持通过
++
+ ## 2026-07-03
+ - 新增 `--single` flag: 只尝试单个 provider 不级联，供 FreeSubAgent 的跨 worker 锁使用
+ - checkOverlays(): 修掉一处死三元表达式 (`dismissable ? 'error' : 'error'`)
+diff --git a/skills/lib/providerFactory.js b/skills/lib/providerFactory.js
+index 076c87a..ec97ed3 100644
+--- a/skills/lib/providerFactory.js
++++ b/skills/lib/providerFactory.js
+@@ -51,7 +51,15 @@ const flog = (key, msg) => { try { _tlog(key || 'factory', msg); } catch (_) {}
+ //   stopWaitMode?: 'hidden' | 'detached', // how stop button disappears (default: 'hidden')
+ //   stopBtnExtensionMs?: number, // extra wait if stop btn still visible after initial timeout (default: 0)
+ //   completionAnchor?: string | string[], // explicit completion signal (e.g. Action Toolbar)
+-//   stillGeneratingCheck?: (page) => Promise<boolean>, // reset stability clock if true
++//   stillGeneratingCheck?: (page, info?) => Promise<boolean>, // reset stability clock if true.
++//       info = { text, sinceChangeMs, elapsedMs } — text is what the poller just
++//       read from responseEl (so checks can classify it with ZERO extra CDP
++//       round-trips and are automatically aligned with the polled element).
++//   stillGeneratingMaxHoldMs?: number, // v11: cap on how long ⚙ resets may hold
++//       the stability clock past the last REAL text change (default: 90000).
++//       Bounds the cost of a false-positive check to seconds instead of the
++//       whole provider budget. Long-thinking providers raise it (Gemini 300s,
++//       Kimi 180s); it re-arms on every actual text change.
+ //   responseSelectorTimeout?: number, // ms per response selector wait (default: 30000)
+ //   customSend?: (page, editor) => Promise<boolean>, // override clickSend entirely
+ //   preInputHook?: (page, cfg) => Promise<void>,   // e.g. Gemini Pro detection
+@@ -98,6 +106,7 @@ const DEFAULTS = {
+     stopBtnExtensionMs: 0,
+     completionAnchor: null,
+     stillGeneratingCheck: null,
++    stillGeneratingMaxHoldMs: 90_000, // v11: ⚙ hold cap (see schema above)
+     responseSelectorTimeout: 30_000,
+     stabilityWindow: 10_000,
+     pollInterval: 2_000,
+@@ -557,10 +566,26 @@ async function dumpResponseDiagnostics(page, log = () => {}) {
+  *
+  * Strategy: stop button detection → response element → stability polling.
+  * Calls config.onProgress(status) if provided:
+- *   '+' = text grew, '.' = stable, '?' = DOM error, '⚙' = still generating
++ *   '+' = text grew, '~' = text changed without growing (shrink / in-place
++ *   mutation — e.g. a collapsing tool/thinking card), '.' = stable,
++ *   '?' = DOM error, '⚙' = still generating
+  *
+  * v2 (2026-07-03): Added stopBtnExtensionMs, completionAnchor, stillGeneratingCheck
+  * for Pro Extended Thinking support (Gemini bursty output, 3-5 min generation).
++ * v11 (2026-07): Phase-3 rework for agentic tool phases (Kimi 联网搜索 truncation):
++ *   - CHANGE detection, not GROWTH detection. The old `text.length > lastLen`
++ *     never reset the clock when innerText SHRANK — exactly what happens when
++ *     a search/thinking card collapses and the real answer starts streaming:
++ *     until the answer grows back past the card's peak length, every poll
++ *     looked "stable" and the window could expire MID-ANSWER. Fingerprint
++ *     (length + 80-char tail) now catches shrink and same-length mutation.
++ *   - stillGeneratingCheck now receives (page, { text, sinceChangeMs,
++ *     elapsedMs }) and is only consulted when the text did NOT change
++ *     (its verdict was ignored on growth anyway — saves one CDP round-trip
++ *     per growing poll).
++ *   - ⚙ resets are capped by stillGeneratingMaxHoldMs since the last REAL
++ *     text change, so a false-positive check degrades to a bounded delay
++ *     instead of burning the whole provider budget.
+  */
+ async function waitForCompletion(page, config, startTime, timeoutMs) {
+     const { stopSelectors, stabilityWindow, pollInterval, onProgress } = config;
+@@ -682,8 +707,18 @@ async function waitForCompletion(page, config, startTime, timeoutMs) {
+ 
+     // Phase 3: stability polling
+     const stillGeneratingCheck = config.stillGeneratingCheck || (async () => false);
++    // v11: ⚙ hold cap — see docstring. Re-arms on every REAL text change.
++    const stillGenMaxHold = Number.isFinite(config.stillGeneratingMaxHoldMs)
++        ? config.stillGeneratingMaxHoldMs
++        : 90_000;
+     let lastLen = 0;
++    // v11 fingerprint: length + tail. Catches shrink (collapsing tool cards)
++    // and same-length in-place mutation, which pure length-growth missed.
++    // Initialized to the empty-text fingerprint so an empty responseEl on
++    // poll 1 does NOT count as a change (exact parity with the old code).
++    let lastFp = '0\u0000';
+     let lastChangeTime = Date.now();
++    let lastRealChangeTime = Date.now(); // only ACTUAL text changes re-arm the ⚙ cap
+     const deadline = startTime + timeoutMs;
+ 
+     // ROBUSTNESS: distinguish a transient read miss (element re-rendered mid-poll)
+@@ -703,18 +738,35 @@ async function waitForCompletion(page, config, startTime, timeoutMs) {
+             const text = await responseEl.evaluate(el => el.innerText || el.textContent || '');
+             consecutiveErrors = 0;
+ 
+-            // Check if generation is still in progress (e.g. bursty Pro Extended output)
+-            const stillGen = await stillGeneratingCheck(page).catch(() => false);
++            const now = Date.now();
++            const fp = text.length + '\u0000' + text.slice(-80);
+ 
+-            if (text.length > lastLen) {
++            if (fp !== lastFp) {
++                // ANY change — growth, shrink (collapsing search/thinking
++                // card), or same-length mutation — means generation is live.
++                const grew = text.length > lastLen;
+                 lastLen = text.length;
+-                lastChangeTime = Date.now();
+-                tick('+');
+-            } else if (stillGen) {
+-                lastChangeTime = Date.now(); // reset clock — generation ongoing
+-                tick('⚙');
++                lastFp = fp;
++                lastChangeTime = now;
++                lastRealChangeTime = now;
++                tick(grew ? '+' : '~');
+             } else {
+-                tick('.');
++                // Text static — ask the adapter whether the UI still says
++                // "working" (tool phase, bursty thinking). Only consulted
++                // here: its verdict was ignored on change anyway, so this
++                // also saves one CDP round-trip per changing poll.
++                const stillGen = await stillGeneratingCheck(page, {
++                    text,
++                    sinceChangeMs: now - lastRealChangeTime,
++                    elapsedMs: now - startTime,
++                }).catch(() => false);
++
++                if (stillGen && (now - lastRealChangeTime) < stillGenMaxHold) {
++                    lastChangeTime = now; // reset clock — generation ongoing
++                    tick('⚙');
++                } else {
++                    tick('.');
++                }
+             }
+         } catch (e) {
+             tick('?');
+@@ -766,12 +818,36 @@ async function waitForCompletion(page, config, startTime, timeoutMs) {
+ 
+ /**
+  * Extract and validate response text from the response element.
++ *
++ * v11 ECHO GUARD: adapters whose responseSelectors end in generic tails
++ * ([class*="message"], [class*="message-content"], …) can have `.last()`
++ * resolve to the USER's own bubble when the assistant node mounts slowly —
++ * the poller then sees perfectly stable text and returns the PROMPT as the
++ * "response" (silent-wrong-answer class). When the extracted text is
++ * essentially the prompt itself, fail the EXTRACT stage instead.
+  */
+-async function extractResponse(page, responseEl, config) {
++async function extractResponse(page, responseEl, config, prompt) {
+     let text = await responseEl.evaluate(el => (el.innerText || el.textContent || '').trim());
+ 
+     if (!text || text.length < config.minResponseLength) return null;
+ 
++    if (prompt && typeof prompt === 'string') {
++        const norm = s => s.replace(/\s+/g, ' ').trim();
++        const np = norm(prompt);
++        const nt = norm(text);
++        // Only guard non-trivial prompts, and only reject NEAR-IDENTICAL
++        // text (a user bubble carries the prompt plus at most a few UI
++        // labels). "Repeat after me: X" style answers, where the response
++        // is a small SUBSTRING of the prompt, must stay valid.
++        if (np.length >= 20) {
++            const ratio = nt.length / np.length;
++            const nearLen = ratio >= 0.9 && ratio <= 1.15;
++            if (nt === np || (nearLen && (nt.includes(np) || np.includes(nt)))) {
++                return null; // echoed prompt → EXTRACT error upstream
++            }
++        }
++    }
++
+     // Post-response hook (e.g. Claude thinking filter)
+     if (config.postResponseHook) {
+         text = await config.postResponseHook(page, text, config);
+@@ -860,7 +936,11 @@ async function checkOverlays(page, C) {
+             if (pat.test(text)) return { block: 'quota', detail: text.slice(0, 120) };
+         }
+         // Hard block: login
+-        if (/(?:log\s*in|sign\s*in|登\s*录|请先登录|Continue with Google)/i.test(text)) {
++        // v11: '登录' needs a negative lookbehind — settings dialogs contain
++        // 退出登录 (logout) and marketing copy contains 免登录/已登录, all of
++        // which hard-blocked a perfectly signed-in provider as 'auth'.
++        // \b around log in / sign in similarly stops "Blogindex"-style hits.
++        if (/(?:\blog\s*in\b|\bsign\s*in\b|(?<!退出|已|免)登\s*录|请先登录|Continue with Google)/i.test(text)) {
+             return { block: 'auth', detail: text.slice(0, 120) };
+         }
+ 
+@@ -1117,7 +1197,7 @@ function createProviderRunner(cfg) {
+         // used to always collapse to reason='error' — losing the safety signal.
+         let response;
+         try {
+-            response = await extractResponse(page, responseEl, C);
++            response = await extractResponse(page, responseEl, C, prompt);
+         } catch (e) {
+             return classifyError(e, STAGES.EXTRACT, C.key);
+         }
+diff --git a/skills/lib/providers/adapters/claude.js b/skills/lib/providers/adapters/claude.js
+index 187e8cf..f9669a3 100644
+--- a/skills/lib/providers/adapters/claude.js
++++ b/skills/lib/providers/adapters/claude.js
+@@ -28,9 +28,13 @@ module.exports = {
+         /announcement/i,
+     ],
+     editorSelectors: [
+-        '[contenteditable="true"]',
++        // v11 ORDER FIX: the page-global '[contenteditable="true"]' was FIRST,
++        // so .first() could bind a rename field / dialog editable instead of
++        // the composer whenever one existed. Specific → generic; the generic
++        // entry stays as the last-resort tail.
+         '.ProseMirror',
+         'div[role="textbox"]',
++        '[contenteditable="true"]',
+     ],
+     validateEditor: async (loc) => {
+         return loc.evaluate(el =>
+diff --git a/skills/lib/providers/adapters/deepseek.js b/skills/lib/providers/adapters/deepseek.js
+index 7d1ffb5..4e7d605 100644
+--- a/skills/lib/providers/adapters/deepseek.js
++++ b/skills/lib/providers/adapters/deepseek.js
+@@ -5,6 +5,19 @@
+  */
+ 
+ const { COMMON_CN_QUOTA_PATTERNS, COMMON_DISMISS_PATTERNS } = require('../../providerFactory');
++const { makeStillWorkingCheck } = require('../../stillWorking');
++
++// Hoisted so the still-working probe judges the same container family the
++// factory polls (see kimi.js v11 note).
++const RESPONSE_SELECTORS = [
++    '.ds-markdown',
++    '.ds-assistant-message-main-content',
++    '[class*="ds-markdown"]',
++    // v10: all three above share the ds- class family — one CSS-module
++    // rename kills them together. Generic tail is only reached when the
++    // specific ones fail (per-selector wait is budget-clamped upstream).
++    '[class*="markdown"]',
++];
+ 
+ module.exports = {
+     key: 'deepseek',
+@@ -33,16 +46,15 @@ module.exports = {
+     ],
+     sendSelectors: ['.ds-button--primary.ds-button--filled.ds-button--circle'],
+     sendFallback: 'Enter',
+-    responseSelectors: [
+-        '.ds-markdown',
+-        '.ds-assistant-message-main-content',
+-        '[class*="ds-markdown"]',
+-        // v10: all three above share the ds- class family — one CSS-module
+-        // rename kills them together. Generic tail is only reached when the
+-        // specific ones fail (per-selector wait is budget-clamped upstream).
+-        '[class*="markdown"]',
+-    ],
++    responseSelectors: RESPONSE_SELECTORS,
+     responseSelectorTimeout: 60_000,
+     stabilityWindow: 12_000,
+     minResponseLength: 5,
++
++    // v11: R1 深度思考 stalls text mid-fold ("思考中…", collapsing reasoning
++    // panel shrinks innerText) and 联网搜索 has the same fetch-silence windows
++    // as Kimi. Shared detector + factory shrink-fingerprint cover both;
++    // hold cap bounds any false positive.
++    stillGeneratingCheck: makeStillWorkingCheck({ responseSelectors: RESPONSE_SELECTORS }),
++    stillGeneratingMaxHoldMs: 150_000,
+ };
+diff --git a/skills/lib/providers/adapters/gemini.js b/skills/lib/providers/adapters/gemini.js
+index 925c713..407a294 100644
+--- a/skills/lib/providers/adapters/gemini.js
++++ b/skills/lib/providers/adapters/gemini.js
+@@ -300,6 +300,13 @@ module.exports = {
+     stabilityWindow: 10_000,
+     minResponseLength: 10,
+ 
++    // v11: the factory now caps ⚙ stability-clock holds at
++    // stillGeneratingMaxHoldMs since the last REAL text change (default 90s).
++    // Pro Extended can think 3-5 min with the stop button visible and ZERO
++    // text output — raise the cap so isStillGenerating() keeps holding the
++    // clock for the full thinking phase, exactly as before the cap existed.
++    stillGeneratingMaxHoldMs: 300_000,
++
+     // ── Completion anchor: Action Toolbar = definitive "done" ──
+     // GAP FIX: the DIAG log shows a zh-CN UI ("选项 A", "搜索网页"), but the old
+     // list only covered zh-TW ("複製") and English — on Simplified-Chinese
+diff --git a/skills/lib/providers/adapters/kimi.js b/skills/lib/providers/adapters/kimi.js
+index 93b3992..ad92104 100644
+--- a/skills/lib/providers/adapters/kimi.js
++++ b/skills/lib/providers/adapters/kimi.js
+@@ -6,9 +6,29 @@
+  *   - customSend handles Kimi's .send-button-container with disabled class detection
+  *   - navPostDelay=4s for React SPA mount
+  *   - postResponseHook rejects truncated opening lines (e.g. "我来从...")
++ *   - v11: stillGeneratingCheck = shared multi-signal detector (stillWorking.js)
++ *     covering the full 联网搜索 phase vocabulary (搜索→获取网页→阅读→整理),
++ *     stop-control + spinner DOM signals, bounded by stillGeneratingMaxHoldMs
+  */
+ 
+ const { COMMON_DISMISS_PATTERNS } = require('../../providerFactory');
++const { makeStillWorkingCheck } = require('../../stillWorking');
++
++// Hoisted so responseSelectors and stillGeneratingCheck are guaranteed to
++// judge the SAME container family. The old check hardcoded selector [0]
++// ('[class*="chat-content-item-assistant"]') and silently read the wrong
++// element — or nothing — whenever the factory had matched a fallback
++// selector, disabling the check exactly when the DOM had drifted.
++const RESPONSE_SELECTORS = [
++    '[class*="chat-content-item-assistant"]',
++    '[class*="segment-content"]',
++    '[class*="chat-content-list"] [class*="assistant"]',
++    // v10: all three above anchor on the chat-content/segment naming
++    // family — one rename kills them together. Generic tails are only
++    // reached when the specific ones fail (budget-clamped upstream).
++    '[class*="assistant"]',
++    '[class*="markdown"]',
++];
+ 
+ module.exports = {
+     key: 'kimi',
+@@ -79,46 +99,38 @@ module.exports = {
+         }
+     },
+ 
+-    responseSelectors: [
+-        '[class*="chat-content-item-assistant"]',
+-        '[class*="segment-content"]',
+-        '[class*="chat-content-list"] [class*="assistant"]',
+-        // v10: all three above anchor on the chat-content/segment naming
+-        // family — one rename kills them together. Generic tails are only
+-        // reached when the specific ones fail (budget-clamped upstream).
+-        '[class*="assistant"]',
+-        '[class*="markdown"]',
+-    ],
++    responseSelectors: RESPONSE_SELECTORS,
+     responseSelectorTimeout: 60_000,
+     stabilityWindow: 8_000,
+     minResponseLength: 10,
+ 
+     // ── Prevent premature "done" during Kimi's multi-round search pauses ──
+     // Kimi's search process: query → pause(5-30s fetch) → analysis → next query → ...
+-    // During pauses the text stops growing, which fools the stability poller into
+-    // declaring completion. This check resets the stability clock when Kimi is
+-    // clearly between search rounds (text ends with a query or result count).
+-    stillGeneratingCheck: async (page) => {
+-        try {
+-            // Use the same selector as responseSelectors[0] for consistency
+-            const el = page.locator('[class*="chat-content-item-assistant"]').last();
+-            const text = (await el.evaluate(el => el.innerText || el.textContent || '')
+-                .catch(() => '')).trim();
+-            if (!text || text.length < 50) return false;
++    // During pauses the text stops growing, which fools the stability poller
++    // into declaring completion.
++    //
++    // v11 FIX (field-observed truncations at "正在获取网页..." and
++    // "获取网页 5 个网页"): the old tail regexes here had a VOCABULARY GAP —
++    // 正在[搜索检索查询] does not contain 获取, and "N 个网页" is not
++    // "N 个结果" — so the entire 网页获取 phase was invisible to the check
++    // and every fetch longer than the 8s stabilityWindow truncated the run.
++    // They were also $-anchored against innerText tails (any trailing
++    // source-chip line broke the anchor) and hardcoded to selector [0].
++    //
++    // Replaced with the shared multi-signal detector (lib/stillWorking.js):
++    //   S1 zero-cost classification of the factory-polled text,
++    //   S2 visible stop/pause control (wording/locale independent),
++    //   S3 spinner inside — or busy tail of — the last response container,
++    // with the fetch-phase verbs (获取/抓取/阅读/浏览/…) and "N 个网页"
++    // count lines in the vocabulary. False positives are bounded by
++    // stillGeneratingMaxHoldMs below instead of burning the budget.
++    stillGeneratingCheck: makeStillWorkingCheck({ responseSelectors: RESPONSE_SELECTORS }),
+ 
+-            const tail = text.slice(-300);
+-            const STILL_SEARCHING = [
+-                /搜索[网页关键词资料].*\s*$/,     // ends with a search query line
+-                /\d+\s*[个条]\s*结[果].*\s*$/,    // ends with "X 个结果"
+-                /让我[再继续].*\s*$/,             // "让我再搜索..."
+-                /正在[搜索检索查询].*\s*$/,       // "正在搜索..."
+-                /还需[要更].*\s*$/,               // "还需要更多..."
+-            ];
+-            return STILL_SEARCHING.some(p => p.test(tail));
+-        } catch (_) {
+-            return false;
+-        }
+-    },
++    // Multi-round search legitimately alternates fetch-silence and text
++    // bursts for minutes; the cap re-arms on every REAL text change, so it
++    // only bounds a terminal stall (e.g. a final answer whose last line
++    // happens to look like a status chip).
++    stillGeneratingMaxHoldMs: 180_000,
+ 
+     // ── Reject truncated responses (Kimi occasionally stops mid-sentence) ──
+     postResponseHook: async (_page, text) => {
+diff --git a/skills/lib/providers/adapters/mimo.js b/skills/lib/providers/adapters/mimo.js
+index bb0614e..5488187 100644
+--- a/skills/lib/providers/adapters/mimo.js
++++ b/skills/lib/providers/adapters/mimo.js
+@@ -8,6 +8,11 @@
+  */
+ 
+ const { COMMON_CN_QUOTA_PATTERNS, COMMON_DISMISS_PATTERNS } = require('../../providerFactory');
++const { makeStillWorkingCheck } = require('../../stillWorking');
++
++// Hoisted so the still-working probe judges the same container family the
++// factory polls (see kimi.js v11 note).
++const RESPONSE_SELECTORS = ['.markdown-prose', '.Markdown_markdown__', '[class*="markdown"]'];
+ 
+ module.exports = {
+     key: 'mimo',
+@@ -66,7 +71,12 @@ module.exports = {
+         }
+         if (!sent) await page.keyboard.press('Enter');
+     },
+-    responseSelectors: ['.markdown-prose', '.Markdown_markdown__', '[class*="markdown"]'],
++    responseSelectors: RESPONSE_SELECTORS,
+     stabilityWindow: 15_000,
+     minResponseLength: 5,
++
++    // v11: no stop selectors are known for this UI — the shared detector is
++    // the only completion guard during slow reasoning; hold cap bounds it.
++    stillGeneratingCheck: makeStillWorkingCheck({ responseSelectors: RESPONSE_SELECTORS }),
++    stillGeneratingMaxHoldMs: 120_000,
+ };
+diff --git a/skills/lib/providers/adapters/minimax.js b/skills/lib/providers/adapters/minimax.js
+index 6a743ee..54e25bc 100644
+--- a/skills/lib/providers/adapters/minimax.js
++++ b/skills/lib/providers/adapters/minimax.js
+@@ -7,6 +7,14 @@
+  */
+ 
+ const { COMMON_CN_QUOTA_PATTERNS, COMMON_DISMISS_PATTERNS } = require('../../providerFactory');
++const { makeStillWorkingCheck } = require('../../stillWorking');
++
++// Hoisted so the still-working probe judges the same container family the
++// factory polls (see kimi.js v11 note).
++const RESPONSE_SELECTORS = [
++    '[class*="message-content"]', '[class*="matrix-markdown"]',
++    '.markdown-body', '[class*="answer"]', '[class*="response"]',
++];
+ 
+ module.exports = {
+     key: 'minimax',
+@@ -21,10 +29,15 @@ module.exports = {
+     ],
+     sendSelectors: ['[aria-label="发送消息"]', '[class*="send"]', '[class*="submit"]'],
+     sendFallback: 'Enter',
+-    responseSelectors: [
+-        '[class*="message-content"]', '[class*="matrix-markdown"]',
+-        '.markdown-body', '[class*="answer"]', '[class*="response"]',
+-    ],
++    responseSelectors: RESPONSE_SELECTORS,
+     stabilityWindow: 10_000,
+     minResponseLength: 5,
++
++    // v11: agent.minimaxi.com is an AGENTIC product — tool/browse phases stall
++    // text for tens of seconds exactly like Kimi 联网搜索 (same truncation
++    // class). No stopSelectors are known for this UI, so the shared detector
++    // (stop control / spinner / CN+EN status vocabulary) is the completion
++    // guard; false positives are bounded by the hold cap.
++    stillGeneratingCheck: makeStillWorkingCheck({ responseSelectors: RESPONSE_SELECTORS }),
++    stillGeneratingMaxHoldMs: 150_000,
+ };
+diff --git a/skills/lib/providers/adapters/qwen.js b/skills/lib/providers/adapters/qwen.js
+index ebb50bc..e4726ba 100644
+--- a/skills/lib/providers/adapters/qwen.js
++++ b/skills/lib/providers/adapters/qwen.js
+@@ -9,6 +9,21 @@
+  */
+ 
+ const { COMMON_CN_QUOTA_PATTERNS, COMMON_DISMISS_PATTERNS } = require('../../providerFactory');
++const { makeStillWorkingCheck } = require('../../stillWorking');
++
++// Hoisted so the still-working probe judges the same container family the
++// factory polls (see kimi.js v11 note).
++const RESPONSE_SELECTORS = [
++    '[class*="message-select-wrapper-answer"]',
++    '[class*="chat-answers-card-wrap"]',
++    '[class*="message-select-content-inner"]',
++    '[class*="message-select-content"]',
++    '.chat-round.last-message-item',
++    // v10: generic tails — four of the five above share the
++    // message-select naming family; a single rename kills them together.
++    '[class*="answer"]',
++    '[class*="markdown"]',
++];
+ 
+ module.exports = {
+     key: 'qwen',
+@@ -29,20 +44,17 @@ module.exports = {
+     sendFallback: 'Enter',
+     stopWaitMode: 'detached', // Qwen removes stop button from DOM when done
+     stopSelectors: ['[class*="stop"]', '[class*="pause-generat"]'],
+-    responseSelectors: [
+-        '[class*="message-select-wrapper-answer"]',
+-        '[class*="chat-answers-card-wrap"]',
+-        '[class*="message-select-content-inner"]',
+-        '[class*="message-select-content"]',
+-        '.chat-round.last-message-item',
+-        // v10: generic tails — four of the five above share the
+-        // message-select naming family; a single rename kills them together.
+-        '[class*="answer"]',
+-        '[class*="markdown"]',
+-    ],
++    responseSelectors: RESPONSE_SELECTORS,
+     responseSelectorTimeout: 60_000,
+     stabilityWindow: 8_000,
+     minResponseLength: 5,
++
++    // v11: phase-3 defense for 深度搜索 rounds. Phase-1 handles the detached
++    // stop button, but if the stop SELECTOR drifts (or the button re-appears
++    // between rounds after phase 1 already passed), the 8s window is as
++    // vulnerable as Kimi's was. Bounded by the hold cap.
++    stillGeneratingCheck: makeStillWorkingCheck({ responseSelectors: RESPONSE_SELECTORS }),
++    stillGeneratingMaxHoldMs: 120_000,
+     postResponseHook: async (_page, text) =>
+         text.replace(/^Qwen[\d.]+-(?:Max|Plus|Turbo|Flash)\s*\n?\s*/i, '').trim(),
+ };
+diff --git a/skills/lib/stillWorking.js b/skills/lib/stillWorking.js
+new file mode 100644
+index 0000000..db02fe2
+--- /dev/null
++++ b/skills/lib/stillWorking.js
+@@ -0,0 +1,209 @@
++/**
++ * stillWorking.js — shared multi-signal "generation still in progress" detector.
++ *
++ * WHY THIS EXISTS (Kimi 联网搜索 truncation, 2026-07):
++ * Kimi's multi-step web search pipeline emits phase statuses the old
++ * kimi.js tail regexes never covered — the char class 正在[搜索检索查询]
++ * does not contain 获取, and "N 个网页" is not "N 个结果". During a
++ * 5–30s page-fetch the response text is static longer than the 8s
++ * stabilityWindow, so the factory declared completion mid-search. Two
++ * field-observed truncation tails:
++ *     "正在获取网页..."          (45s run,  960 chars)
++ *     "获取网页 5 个网页"        (78s run, 1522 chars)
++ * Neither matched any old pattern. The same failure class applies to
++ * every provider with an agentic tool phase (MiniMax agent, DeepSeek R1
++ * 深度思考折叠, Qwen deep search, MiMo), so the detector lives here as a
++ * shared module instead of being re-fixed one adapter at a time.
++ *
++ * DESIGN — three OR'd signals, ordered cheap→expensive:
++ *   S1 (zero CDP cost)  factory-supplied polled text tail looks like an
++ *                       in-flight status line (textLooksBusy).
++ *   S2 (1 evaluate)     a stop/pause control is visible (the send button
++ *                       flips to a stop control while streaming) — the
++ *                       strongest wording- and locale-independent signal.
++ *   S3 (same evaluate)  a spinner/typing indicator is visible INSIDE the
++ *                       last response container, or that container's own
++ *                       text tail looks busy (covers the case where the
++ *                       status lives in a tool card OUTSIDE the node the
++ *                       factory happens to poll).
++ *
++ * FALSE-POSITIVE BUDGET: a wrong "busy" verdict can only DELAY completion,
++ * and providerFactory.js v11 bounds that delay with
++ * stillGeneratingMaxHoldMs (the ⚙ hold cap): once no REAL text change has
++ * happened for that long, ⚙ resets are ignored and the normal stability
++ * window takes over. So patterns here are tuned for recall (catch every
++ * status wording) rather than precision — a miss truncates a response,
++ * a false hit costs bounded seconds.
++ */
++
++'use strict';
++
++// ── Text-tail classifier (pure, unit-testable) ──────────────────────────────
++
++// Status chips are SHORT; real prose sentences are not. Only lines at or
++// under this length are eligible to be classified as a status.
++const STATUS_LINE_MAX = 48;
++// How many trailing non-empty lines of the container text to inspect.
++// Status cards sometimes render a couple of source-chip lines AFTER the
++// status itself, so we look at a small tail window, not just the last line.
++const TAIL_LINES = 6;
++
++// Verb vocabulary for CJK tool-phase statuses. Deliberately broad — see
++// FALSE-POSITIVE BUDGET above. 获取/抓取/阅读/浏览 are the fetch-phase verbs
++// missing from the original kimi.js patterns.
++const CN_VERBS =
++    '搜索|检索|查询|获取|抓取|读取|阅读|浏览|访问|打开|解析|分析|整理|归纳|'
++    + '总结|思考|推理|撰写|生成|调用|执行|等待|加载|联网';
++
++const STATUS_PATTERNS = [
++    // "正在获取网页…" / "正在搜索…" / "开始分析…" / "继续浏览…"
++    new RegExp(`^(?:正在|开始|继续|准备)(?:${CN_VERBS})`),
++    // "搜索中…" / "深度思考中" / "联网搜索中" — up to 4 CJK prefix chars
++    new RegExp(`^[\\u4e00-\\u9fa5]{0,4}(?:${CN_VERBS})中(?:[.。…]{0,3})?$`),
++    // "获取网页 5 个网页" / "已阅读 12 个网页" / "搜索到 8 条结果" / "5 个结果"
++    new RegExp(
++        `^(?:已|共)?(?:(?:${CN_VERBS})(?:了|到|网页|资料|来源|链接|结果)?)?`
++        + `\\s*\\d+\\s*[个条篇]\\s*(?:网页|结果|来源|链接|页面|资料|文件)`
++    ),
++    // "让我再搜索一下" / "还需要更多资料"
++    /^让我(?:再|先|继续)/,
++    /^还需(?:要|更)/,
++    // English tool-phase gerunds ("Searching the web", "Reading 5 pages…").
++    // A short heading in a final answer can false-positive here — bounded
++    // by the factory's ⚙ hold cap, see module header.
++    /^(?:Searching|Browsing|Reading|Fetching|Crawling|Visiting|Opening|Gathering|Analyzing|Thinking|Reasoning|Running|Working)\b/i,
++    /^\d+\s*(?:results?|sources?|pages?)\s*$/i,
++];
++
++/**
++ * Does the TAIL of this text look like an in-flight tool/status line?
++ * Inspects the last TAIL_LINES non-empty lines; only short lines qualify.
++ *
++ * @param {string} text - container innerText (full or tail slice)
++ * @returns {boolean}
++ */
++function textLooksBusy(text) {
++    if (!text) return false;
++    const lines = String(text).split('\n').map(s => s.trim()).filter(Boolean);
++    const tail = lines.slice(-TAIL_LINES);
++    for (const line of tail) {
++        if (line.length > STATUS_LINE_MAX) continue; // prose sentence, not a chip
++        if (STATUS_PATTERNS.some(p => p.test(line))) return true;
++    }
++    return false;
++}
++
++// ── DOM-side probe (single page.evaluate) ────────────────────────────────────
++// Runs in the page. RegExps cannot cross the evaluate boundary, so the DOM
++// class/aria heuristics are self-contained string sources here; the TEXT
++// classification stays in Node (textLooksBusy) on the returned tail.
++function _domProbe({ sels }) {
++    const visible = el => {
++        try {
++            if (!el || !el.getBoundingClientRect) return false;
++            const r = el.getBoundingClientRect();
++            if (r.width <= 0 || r.height <= 0) return false;
++            const s = getComputedStyle(el);
++            return s.visibility !== 'hidden' && s.display !== 'none'
++                && s.opacity !== '0';
++        } catch (_) { return false; }
++    };
++
++    // Last response container, honoring the ADAPTER's own selector order —
++    // the probe must judge the same subtree family the factory polls.
++    let host = null;
++    for (const sel of sels || []) {
++        let list;
++        try { list = document.querySelectorAll(sel); } catch (_) { continue; }
++        if (list && list.length) { host = list[list.length - 1]; break; }
++    }
++
++    // S2: stop/pause control anywhere on the page. Class-token or aria
++    // anchored — bare substring "stop" would hit "one-stop" marketing copy.
++    const STOPISH = /(?:^|[\s_-])(?:stop|pause)[-_]?(?:btn|button|icon|generat|answer|respon)|(?:^|[\s_-])generating(?:$|[\s_-])/i;
++    const STOP_ARIA = /停止|stop\s*(?:generat|respon|answer)|暂停/i;
++    let uiBusy = false;
++    let scanned = 0;
++    let ctrls;
++    try {
++        ctrls = document.querySelectorAll(
++            'button, [role="button"], [class*="stop" i], [class*="pause" i]'
++        );
++    } catch (_) { ctrls = []; }
++    for (const el of ctrls) {
++        if (++scanned > 400) break;
++        const aria = (el.getAttribute && (el.getAttribute('aria-label') || '')) || '';
++        const cls = typeof el.className === 'string' ? el.className : '';
++        if ((STOP_ARIA.test(aria) || STOPISH.test(cls)) && visible(el)) {
++            uiBusy = true; break;
++        }
++    }
++
++    // S3a: spinner / typing indicator INSIDE the last response container.
++    // [^a-z] boundary (case-insensitive) keeps "download(ing)" from matching
++    // "loading". camelCase boundaries are accepted misses — signals are OR'd.
++    if (!uiBusy && host) {
++        const SPIN = /(?:^|[^a-z])(?:loading|spinner|dot(?:ting)?[-_]?(?:flashing|typing|pulse)?|animate-spin|typing(?:[-_]?indicator)?|shimmer|skeleton|blinking?|cursor[-_]?blink)/i;
++        let n = 0;
++        let nodes;
++        try { nodes = host.querySelectorAll('[class]'); } catch (_) { nodes = []; }
++        for (const el of nodes) {
++            if (++n > 800) break;
++            const cls = typeof el.className === 'string' ? el.className : '';
++            if (cls && SPIN.test(cls) && visible(el)) { uiBusy = true; break; }
++        }
++    }
++
++    const text = host ? (host.innerText || host.textContent || '') : '';
++    return { uiBusy, tail: String(text).slice(-1500) };
++}
++
++/**
++ * Build a stillGeneratingCheck for providerFactory.
++ *
++ * @param {object} opts
++ * @param {string[]} opts.responseSelectors - SAME array the adapter hands the
++ *        factory, so the probe and the stability poller judge the same
++ *        container family (the old kimi.js check hardcoded selector [0] and
++ *        silently diverged whenever the factory matched a fallback selector).
++ * @returns {(page: import('playwright-core').Page, info?: {text?: string}) => Promise<boolean>}
++ */
++function makeStillWorkingCheck(opts = {}) {
++    const sels = Array.isArray(opts.responseSelectors)
++        ? opts.responseSelectors.slice()
++        : [];
++    return async function stillWorkingCheck(page, info) {
++        // S1 — zero-cost: classify the text the factory ALREADY read this
++        // poll (perfectly aligned with the element driving the stability
++        // clock). Factory v11 passes { text }; older callers pass nothing.
++        if (info && typeof info.text === 'string' && textLooksBusy(info.text)) {
++            return true;
++        }
++        // S2 + S3 — one CDP round-trip.
++        let probe = null;
++        try {
++            probe = await page.evaluate(_domProbe, { sels });
++        } catch (_) {
++            return false; // page gone / CSP — never break the poller
++        }
++        if (!probe) return false;
++        if (probe.uiBusy) return true;
++        // S3b — the probe's host subtree can include tool/status cards that
++        // sit OUTSIDE the factory-polled node; classify its tail too.
++        if (typeof probe.tail === 'string' && probe.tail
++            && probe.tail !== (info && info.text)) {
++            return textLooksBusy(probe.tail);
++        }
++        return false;
++    };
++}
++
++module.exports = {
++    textLooksBusy,
++    makeStillWorkingCheck,
++    // exported for tests / diagnostics
++    STATUS_PATTERNS,
++    STATUS_LINE_MAX,
++    TAIL_LINES,
++    _domProbe,
++};
+diff --git a/test_still_working.js b/test_still_working.js
+new file mode 100644
+index 0000000..d3b0324
+--- /dev/null
++++ b/test_still_working.js
+@@ -0,0 +1,251 @@
++/**
++ * Functional assertions for the v11 tool-phase truncation fix, modeling the
++ * factory's exact phase-3 semantics against a scripted mock page:
++ *
++ *   T1  textLooksBusy vocabulary — including the two FIELD-OBSERVED Kimi
++ *       truncation tails: "正在获取网页..." and "获取网页 5 个网页"
++ *   T2  waitForCompletion shrink regression — a collapsing tool card shrinks
++ *       innerText; the old growth-only clock truncated MID-ANSWER
++ *   T3  waitForCompletion ⚙ hold cap — a permanently-busy-looking tail must
++ *       cost a bounded delay, never the whole provider budget
++ *   T4  end-to-end Kimi fetch-phase scenario — status-frozen text longer than
++ *       the stabilityWindow must NOT complete until the answer streams
++ *   T5  makeStillWorkingCheck signal paths (S1 zero-CDP / S2 uiBusy / negative)
++ *   T6  extractResponse echo guard (+ exemptions)
++ *   T7  adapter wiring + overlay 登录 lookbehind (source-level, like
++ *       test_gemini_selectors.js)
++ *
++ * No browser, no network — pure mocks. Run: node test_still_working.js
++ */
++
++'use strict';
++
++const path = require('path');
++const fs = require('fs');
++
++const { textLooksBusy, makeStillWorkingCheck } =
++    require('./skills/lib/stillWorking');
++const { waitForCompletion, extractResponse } =
++    require('./skills/lib/providerFactory');
++
++const _q = [];
++function await0(fn) { _q.push(fn); } // sequential async test queue
++
++let pass = 0, fail = 0;
++const assert = (name, cond, detail = '') => {
++    if (cond) { pass++; console.log('  PASS', name); }
++    else      { fail++; console.log('  FAIL', name, detail); }
++};
++
++// ── Mock page: responseEl.evaluate() walks a scripted text sequence ─────────
++function makePage(script, { domProbe } = {}) {
++    let i = 0;
++    const current = () => script[Math.min(i, script.length - 1)];
++    const el = {
++        waitFor: async () => {},
++        evaluate: async () => { const t = current(); i++; return t; },
++        isVisible: async () => false,
++    };
++    const page = {
++        isClosed: () => false,
++        waitForTimeout: (ms) => new Promise(r => setTimeout(r, ms)),
++        locator: () => ({
++            last: () => el, first: () => el, nth: () => el,
++            count: async () => 1,
++        }),
++        evaluate: async () => {
++            if (domProbe === 'reject') throw new Error('evaluate blocked');
++            return domProbe || { uiBusy: false, tail: '' };
++        },
++    };
++    return { page, el, calls: () => i };
++}
++
++// ═════════════════════════════════════════════════════════════════════════════
++console.log('\nT1: textLooksBusy vocabulary');
++// The two exact field-observed truncation tails:
++assert('field tail #1 「正在获取网页...」', textLooksBusy('前文分析…\n正在获取网页...'));
++assert('field tail #2 「获取网页 5 个网页」', textLooksBusy('前文分析…\n获取网页 5 个网页'));
++// Broader phase vocabulary:
++for (const s of [
++    '搜索中…', '深度思考中', '联网搜索中', '正在搜索相关资料',
++    '正在阅读网页内容', '已阅读 12 个网页', '搜索到 8 条结果', '5 个结果',
++    '让我再搜索一下最新数据', '还需要更多资料', 'Searching the web',
++    'Reading 5 pages…', 'Thinking', '3 results',
++]) assert(`busy: ${JSON.stringify(s)}`, textLooksBusy('blah\n' + s));
++// Negatives — real answers must not be classified busy:
++assert('prose ending w/ 搜索 mention (long line)', !textLooksBusy(
++    '综上所述，通过对文献的系统搜索与比对，可以确认该反应路径在 Au(111) 表面上是主导通道。'));
++assert('plain short ending', !textLooksBusy('计算完成。\n结果为 42。'));
++assert('status buried ABOVE >6 trailing lines', !textLooksBusy(
++    '正在获取网页...\n' + Array.from({length: 8}, (_, k) => `来源 ${k}: 一段较长的最终参考文献描述文本，超过状态行长度上限的普通句子。`).join('\n')));
++assert('empty', !textLooksBusy(''));
++
++// ═════════════════════════════════════════════════════════════════════════════
++console.log('\nT2: phase-3 shrink regression (collapsing tool card)');
++await0(async () => {
++    // peak(card inflated) ×3 → card collapses (SHRINK) → answer streams, all
++    // BELOW the old peak → final constant. Growth-only logic would expire the
++    // window during the shrink/regrow phase and truncate mid-answer.
++    const FINAL = 'FINAL:' + 'A'.repeat(474);
++    const script = [
++        'P'.repeat(500), 'P'.repeat(500), 'P'.repeat(500),
++        'A'.repeat(120), 'A'.repeat(180), 'A'.repeat(240),
++        'A'.repeat(300), 'A'.repeat(360), 'A'.repeat(420),
++        FINAL,
++    ];
++    const ticks = [];
++    const { page, el } = makePage(script);
++    const cfg = {
++        responseSelectors: ['x'], stabilityWindow: 200, pollInterval: 40,
++        onProgress: t => ticks.push(t),
++    };
++    const start = Date.now();
++    const got = await waitForCompletion(page, cfg, start, 8000);
++    assert('returns responseEl', !!got);
++    const text = await el.evaluate(() => {});
++    assert('completed on FINAL text (no mid-answer truncation)',
++        text === FINAL, `got len=${text.length}`);
++    assert("shrink emitted '~' ticks", ticks.includes('~'), ticks.join(''));
++});
++
++// ═════════════════════════════════════════════════════════════════════════════
++console.log('\nT3: ⚙ hold cap bounds a permanently-busy-looking tail');
++await0(async () => {
++    const script = ['正在获取网页...']; // never changes, always "busy"
++    const { page } = makePage(script);
++    const cfg = {
++        responseSelectors: ['x'], stabilityWindow: 150, pollInterval: 40,
++        stillGeneratingMaxHoldMs: 500,
++        stillGeneratingCheck: async (_p, info) => textLooksBusy(info.text),
++    };
++    const t0 = Date.now();
++    await waitForCompletion(page, cfg, t0, 10_000);
++    const dt = Date.now() - t0;
++    assert('held past plain window (⚙ worked)', dt > 400, `dt=${dt}`);
++    assert('but bounded far below deadline (cap worked)', dt < 2500, `dt=${dt}`);
++});
++
++// ═════════════════════════════════════════════════════════════════════════════
++console.log('\nT4: end-to-end Kimi fetch-phase scenario');
++await0(async () => {
++    // Answer-so-far + frozen fetch status for 12 polls (480ms >> 150ms window)
++    // → fetch completes, analysis streams → final. The v10 adapter truncated
++    // exactly here; v11 must hold through the freeze and return the FINAL text.
++    const frozen = 'X'.repeat(300) + '\n正在获取网页...';
++    const FINAL = 'X'.repeat(300) + '\n' + '正文'.repeat(120) + '\n结论：完成。';
++    const script = [
++        ...Array(12).fill(frozen),
++        'X'.repeat(300) + '\n' + '正文'.repeat(40),
++        'X'.repeat(300) + '\n' + '正文'.repeat(80),
++        FINAL,
++    ];
++    const { page, el } = makePage(script);
++    const check = makeStillWorkingCheck({ responseSelectors: ['x'] });
++    const cfg = {
++        responseSelectors: ['x'], stabilityWindow: 150, pollInterval: 40,
++        stillGeneratingCheck: check, stillGeneratingMaxHoldMs: 5000,
++    };
++    const t0 = Date.now();
++    const got = await waitForCompletion(page, cfg, t0, 10_000);
++    const dt = Date.now() - t0;
++    assert('survived the frozen fetch phase', dt > 12 * 40, `dt=${dt}`);
++    assert('returned', !!got);
++    const text = await el.evaluate(() => {});
++    assert('final text intact (bug fixed)', text === FINAL, `len=${text.length}`);
++});
++
++// ═════════════════════════════════════════════════════════════════════════════
++console.log('\nT5: makeStillWorkingCheck signal paths');
++await0(async () => {
++    const check = makeStillWorkingCheck({ responseSelectors: ['x'] });
++    // S1: busy verdict from factory-supplied text, ZERO CDP (evaluate rejects)
++    const { page: p1 } = makePage([''], { domProbe: 'reject' });
++    assert('S1 zero-CDP busy from info.text',
++        await check(p1, { text: '…\n获取网页 5 个网页' }) === true);
++    // S2: uiBusy from DOM probe
++    const { page: p2 } = makePage([''], { domProbe: { uiBusy: true, tail: '' } });
++    assert('S2 uiBusy → true', await check(p2, { text: '普通结尾。' }) === true);
++    // S3b: busy tail visible only in the probe's host subtree
++    const { page: p3 } = makePage([''], { domProbe: { uiBusy: false, tail: '正在阅读网页内容' } });
++    assert('S3b probe-tail busy → true', await check(p3, { text: '普通结尾。' }) === true);
++    // Negative: calm everywhere
++    const { page: p4 } = makePage([''], { domProbe: { uiBusy: false, tail: '结论：完成。' } });
++    assert('calm → false', await check(p4, { text: '结论：完成。' }) === false);
++    // Robustness: evaluate rejects + calm text → false, never throws
++    const { page: p5 } = makePage([''], { domProbe: 'reject' });
++    assert('evaluate failure → false (no throw)',
++        await check(p5, { text: '结论：完成。' }) === false);
++});
++
++// ═════════════════════════════════════════════════════════════════════════════
++console.log('\nT6: extractResponse echo guard');
++await0(async () => {
++    const mk = (text) => ({ evaluate: async () => text });
++    const cfg = { minResponseLength: 5 };
++    const prompt = '请分析这个反应路径的过渡态能量并给出与实验值的对比结论。';
++    assert('exact echo rejected',
++        await extractResponse(null, mk(prompt), cfg, prompt) === null);
++    assert('echo + UI labels rejected',
++        await extractResponse(null, mk(prompt + ' 复制'), cfg, prompt) === null);
++    assert('real answer passes',
++        await extractResponse(null, mk('过渡态能垒为 0.87 eV，与实验值 0.9±0.05 eV 一致。'), cfg, prompt)
++        !== null);
++    assert('substring-style short answer to long prompt passes (repeat-after-me)',
++        await extractResponse(null, mk('过渡态能量'), cfg, prompt) !== null);
++    assert('short prompt exempt',
++        await extractResponse(null, mk('你好呀朋友'), cfg, '你好呀朋友') !== null);
++});
++
++// ═════════════════════════════════════════════════════════════════════════════
++console.log('\nT7: adapter wiring + overlay 登录 lookbehind');
++await0(async () => {
++    const kimi = require('./skills/lib/providers/adapters/kimi');
++    assert('kimi check is the shared detector',
++        typeof kimi.stillGeneratingCheck === 'function');
++    assert('kimi hold cap = 180s', kimi.stillGeneratingMaxHoldMs === 180_000);
++    const { page } = makePage([''], { domProbe: 'reject' });
++    assert('kimi check catches field tail #1',
++        await kimi.stillGeneratingCheck(page, { text: '…\n正在获取网页...' }) === true);
++    assert('kimi check catches field tail #2',
++        await kimi.stillGeneratingCheck(page, { text: '…\n获取网页 5 个网页' }) === true);
++
++    for (const k of ['minimax', 'deepseek', 'qwen', 'mimo']) {
++        const a = require(`./skills/lib/providers/adapters/${k}`);
++        assert(`${k}: shared check wired`, typeof a.stillGeneratingCheck === 'function'
++            && Number.isFinite(a.stillGeneratingMaxHoldMs));
++    }
++    const gemini = require('./skills/lib/providers/adapters/gemini');
++    assert('gemini hold cap raised to 300s (Pro Extended preserved)',
++        gemini.stillGeneratingMaxHoldMs === 300_000);
++    const claude = require('./skills/lib/providers/adapters/claude');
++    assert('claude editor order: specific first',
++        claude.editorSelectors[0] === '.ProseMirror'
++        && claude.editorSelectors[claude.editorSelectors.length - 1] === '[contenteditable="true"]');
++    const chatgpt = require('./skills/lib/providers/adapters/chatgpt');
++    assert('chatgpt untouched (stop-button pipeline)', !chatgpt.stillGeneratingCheck);
++
++    // Source-level: the overlay login regex must NOT hard-block 退出登录/免登录
++    const src = fs.readFileSync(
++        path.join(__dirname, 'skills/lib/providerFactory.js'), 'utf8');
++    const m = src.match(/if \((\/\(\?:\\blog[^\n]+?\/i)\.test\(text\)\) \{/);
++    assert('login regex found in source', !!m);
++    if (m) {
++        const re = eval(m[1]); // eslint-disable-line no-eval — test-only
++        assert('「退出登录」 not auth', !re.test('设置 退出登录 深色模式'));
++        assert('「免登录体验」 not auth', !re.test('免登录体验新功能'));
++        assert('「已登录」 not auth', !re.test('已登录：user@example.com'));
++        assert('「请先登录」 IS auth', re.test('请先登录后继续'));
++        assert('「登录」 alone IS auth', re.test('登录 / 注册'));
++        assert('"Log in" IS auth', re.test('Log in to continue'));
++        assert('"Blogindex" not auth', !re.test('Blogindex weekly'));
++    }
++});
++
++// ── run queue (keeps top-level await-free for plain node) ────────────────────
++(async () => {
++    // T1 already ran synchronously above via direct calls — the queue holds T2+.
++    for (const fn of _q) await fn();
++    console.log(`\n${pass} passed, ${fail} failed`);
++    process.exit(fail ? 1 : 0);
++})();

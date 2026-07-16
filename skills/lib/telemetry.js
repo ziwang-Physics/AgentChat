@@ -37,7 +37,7 @@ function appendWithRotation(filePath, line) {
     // The append must also be best-effort: if the skill dir is read-only
     // (common for Claude Code skill mounts) or the disk is full, a throw here
     // used to propagate AFTER the response was already printed to stdout,
-    // flipping a successful run into exit 4 — which FreeSubAgent then treated
+    // flipping a successful run into exit 4 — which IndependentTasks then treated
     // as a provider failure. Telemetry loss must never fail the invocation.
     try {
         fs.appendFileSync(filePath, line);

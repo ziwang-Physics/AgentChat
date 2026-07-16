@@ -34,15 +34,15 @@ import { z } from "zod";
 // ── 配置 ──────────────────────────────────────────────────────────────────
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_DIR = path.resolve(__dirname, "../..");
-const WEBEXT_INDEX = path.join(PROJECT_DIR, "skills/AgentChat-WebExtended/index.js");
+const WEBEXT_INDEX = path.join(PROJECT_DIR, "skills/AgentChat-OneWeb/index.js");
 const NODE_EXE = process.execPath;
 const DEFAULT_TIMEOUT = 600_000;    // 10 分钟总超时
 const DEFAULT_PROV_TIMEOUT = 180_000; // 3 分钟单 Provider
 
-// ── 工具：执行 WebExtended CLI ────────────────────────────────────────────
+// ── 工具：执行 OneWeb CLI ────────────────────────────────────────────
 
 /**
- * 调用 AgentChat-WebExtended CLI，返回 stdout。
+ * 调用 AgentChat-OneWeb CLI，返回 stdout。
  * @param {string} prompt
  * @param {object} opts
  * @returns {Promise<string>}
@@ -58,7 +58,7 @@ function callWebext(prompt, opts = {}) {
         // --single: try ONLY the named provider — no internal cascade. Without
         // it, gemini_think could exhaust Gemini's quota, silently fall through
         // to ChatGPT/Qwen/…, and return THAT text labeled as "Gemini 推理" —
-        // the silent-wrong-provider class WebExtended's --single exists to
+        // the silent-wrong-provider class OneWeb's --single exists to
         // prevent. Provider-named tools must fail loudly, not impersonate.
         if (opts.single) args.push("--single");
         if (opts.keepTabs) args.push("--keep-tabs");
@@ -168,7 +168,7 @@ server.tool(
 
 server.tool(
     "gemini_chat",
-    // DESCRIPTION FIX: previously claimed "保留对话上下文" — false. WebExtended
+    // DESCRIPTION FIX: previously claimed "保留对话上下文" — false. OneWeb
     // reuses the Gemini tab but page.goto()'s the app URL, which STARTS A NEW
     // CHAT every invocation (see findProviderPage's comment in its index.js).
     // Cross-call context was never retained; the tool description must not

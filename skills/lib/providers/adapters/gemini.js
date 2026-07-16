@@ -31,7 +31,7 @@ const { log: _tlog } = require('../../terminal');
 // activation log line, making Pro/Flash switching impossible to debug.
 const glog = (msg) => _tlog('gemini', msg);
 
-// ── Helpers (replicated from WebExtended for self-contained adapter) ──
+// ── Helpers (replicated from OneWeb for self-contained adapter) ──
 
 const STILL_WORKING_TEXT = [
     /^搜索网页\s*$/im,

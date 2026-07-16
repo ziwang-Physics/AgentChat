@@ -1,7 +1,7 @@
 """
-GeminiSession — AgentChat WebExtended 的 Python 异步接口。
+GeminiSession — AgentChat OneWeb 的 Python 异步接口。
 
-通过 subprocess 调用 AgentChat-WebExtended CLI，管理 CDP 连接、
+通过 subprocess 调用 AgentChat-OneWeb CLI，管理 CDP 连接、
 tab 生命周期、降级链。
 
 使用示例:
@@ -51,7 +51,7 @@ class GeminiSession:
         self._node_exe = self._find_node()
         self._index_js = os.path.join(
             self._project_dir,
-            "skills", "AgentChat-WebExtended", "index.js"
+            "skills", "AgentChat-OneWeb", "index.js"
         )
 
     # ── 核心 API ──────────────────────────────────────────────────────────
@@ -260,7 +260,7 @@ class GeminiSession:
         """自动定位 AgentChat 项目根目录"""
         # 从这个文件的位置向上找
         d = Path(__file__).resolve().parent.parent
-        index = d / "skills" / "AgentChat-WebExtended" / "index.js"
+        index = d / "skills" / "AgentChat-OneWeb" / "index.js"
         if index.exists():
             return str(d)
         raise FileNotFoundError(

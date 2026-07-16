@@ -55,7 +55,7 @@ echo   Installing npm dependencies...
 REM BUGFIX: path pointed at the pre-rename skill dir
 REM (gemini-web-extended-thinking) - cd failed, so npm install ran in
 REM scripts\ and installed nothing useful.
-cd /d "%~dp0..\skills\AgentChat-WebExtended"
+cd /d "%~dp0..\skills\AgentChat-OneWeb"
 call npm install --registry=https://registry.npmmirror.com 2>&1
 cd /d "%~dp0"
 echo   OK
@@ -93,6 +93,6 @@ echo   Next steps:
 echo     1. Edit .env if you need proxy settings
 echo     2. Run: powershell .\scripts\start-chrome.ps1 -FirstLogin
 echo     3. Log in to Gemini in the Chrome window
-echo     4. Test: node skills\AgentChat-WebExtended\index.js --smoke
+echo     4. Test: node skills\AgentChat-OneWeb\index.js --smoke
 echo.
 pause

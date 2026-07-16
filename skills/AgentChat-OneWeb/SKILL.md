@@ -1,6 +1,6 @@
 ---
-name: AgentChat-WebExtended
-description: Multi-provider CDP bridge with automatic fallback (Gemini->ChatGPT->Claude->Qwen->Kimi->MiniMax->MiMo->DeepSeek). Use for AI provider failover, fallback chain, multi-provider routing, or "send to any available AI". MANDATORY EXECUTION - invoking this skill REQUIRES running `node skills/AgentChat-WebExtended/index.js "<prompt>"` as the FIRST action and quoting its `[receipt] AGENTCHAT_RUN` line in the final answer; explaining the skill or answering from model knowledge without a receipt is a violation.
+name: AgentChat-OneWeb
+description: Multi-provider CDP bridge with automatic fallback (Gemini->ChatGPT->Claude->Qwen->Kimi->MiniMax->MiMo->DeepSeek). Use for AI provider failover, fallback chain, multi-provider routing, or "send to any available AI". MANDATORY EXECUTION - invoking this skill REQUIRES running `node ~/.claude/skills/AgentChat-OneWeb/index.js "<prompt>"` as the FIRST action and quoting its `[receipt] AGENTCHAT_RUN` line in the final answer; explaining the skill or answering from model knowledge without a receipt is a violation.
 ---
 
 # AI Fallback Chain — Multi-Provider CDP Bridge
@@ -11,13 +11,13 @@ description: Multi-provider CDP bridge with automatic fallback (Gemini->ChatGPT-
 
 ## ⚠️ 强制规则 — 调用即执行（首要动作契约）
 
-**本 skill 被调用（如 `/AgentChat-WebExtended <问题>`）时，必须执行 `node` 命令把用户问题发送到 web AI。禁止只解释用法而不执行，禁止用模型自身知识替代 web AI 的回答。**
+**本 skill 被调用（如 `/AgentChat-OneWeb <问题>`）时，必须执行 `node` 命令把用户问题发送到 web AI。禁止只解释用法而不执行，禁止用模型自身知识替代 web AI 的回答。**
 
 ### 1. 首要动作契约
 读完本 SKILL.md 之后的**下一个工具调用**必须是：
 
 ```bash
-node skills/AgentChat-WebExtended/index.js "<用户prompt>"
+node ~/.claude/skills/AgentChat-OneWeb/index.js "<用户prompt>"
 ```
 
 中间不允许插入文件浏览、架构分析、"我将会…"式的规划叙述（至多一行说明即将执行的命令）。web AI 返回结果后，才可补充你自己的分析。
@@ -26,12 +26,12 @@ node skills/AgentChat-WebExtended/index.js "<用户prompt>"
 每次真实执行（含失败）都会在 **stderr** 输出一行机器生成的回执：
 
 ```
-[receipt] AGENTCHAT_RUN {"run_id":"ac-xxxxxxxxxxxx","skill":"AgentChat-WebExtended","exit":0,"provider_used":"Gemini",...}
+[receipt] AGENTCHAT_RUN {"run_id":"ac-xxxxxxxxxxxx","skill":"AgentChat-OneWeb","exit":0,"provider_used":"Gemini",...}
 ```
 
 - **最终回答末尾必须原样引用这行 receipt**（至少包含 run_id、provider_used、exit）。
 - 没有 receipt = 没有执行 = 违规，必须回去执行。
-- `run_id` 为随机生成并同步落盘到 `skills/AgentChat-WebExtended/data/receipts.jsonl`，用户可用 `grep <run_id>` 核对——凭空编造无法通过核对。
+- `run_id` 为随机生成并同步落盘到 `~/.claude/skills/AgentChat-OneWeb/data/receipts.jsonl`，用户可用 `grep <run_id>` 核对——凭空编造无法通过核对。
 - **执行失败（exit≠0）同样有 receipt**：必须引用失败回执并说明原因（限流/未登录/超时…），在此之后才允许用模型自身能力回答，且必须明确标注"web AI 未参与本次回答"。
 
 ### 3. 违规模式（全部禁止）
@@ -41,6 +41,66 @@ node skills/AgentChat-WebExtended/index.js "<用户prompt>"
 
 ### 4. 例外
 仅限：`--smoke`、`--doctor`，或用户明确要求"只检查环境不发送"。这两种模式不产生 receipt，属预期行为。
+
+## 📐 输出排版规范 — 最终回答强制格式
+
+约束对象是 Claude Code 撰写的**最终落地文本**；worker 原始输出、代码块、diff、表格与 receipt 行不受约束。
+
+1. **结论先行**：开头第一段为 ≤50 字的核心结论（TL;DR），直接回答用户根本诉求，无客套话、无方法论铺垫。
+2. **标题层级**：主模块用 `##`，子观点用 `###`，禁止一级标题 `#`。维度按逻辑聚类为 3–5 块（如：背景/现状/分析/结论），禁止按检索顺序写流水账。
+3. **视觉焦点**：数据、时间、专有名词、核心论点用 `**加粗**` 标出；加粗仅用于焦点引导，每个自然段不超过 2 处。
+4. **列表纪律**：只允许单层无序列表 `*`，禁止任何多级嵌套列表（保证终端/聊天框阅读体验）。
+5. **文本密度**：叙述性自然段 ≤3 句，新逻辑分支必须换行分段；禁止"总而言之""基于以上搜索结果""作为一个人工智能"等无实质信息的过渡句。
+6. **信息隔离**：引用 web AI 原文片段或外部链接时必须放入 `>` 引用块并标注来源 provider，与自己的分析严格区分。
+7. **豁免条款（优先级高于第 1–6 条）**：
+   * `[receipt] AGENTCHAT_RUN {...}` 行（或各步 run_id 清单）必须原样保留在回答末尾的代码块中，禁止改写、加粗、省略——受强制规则 §2 约束。
+   * 降级/失败披露（如"N 个角色降级""web AI 未参与本次回答"）属流程透明性要求，不算冗余过渡句，不得删除。
+   * 代码块、diff、表格不受段落长度与列表层级限制。
+
+## 🖼️ 图片生成协议 (Image Generation Protocol)
+
+### 触发条件
+
+当用户请求涉及以下任一关键词时，触发图片生成协议：
+
+* **生成类**: 生成图片、画图、制图、绘制、作图、生成图、create image、generate image、make image
+* **图表类**: 流程图、架构图、示意图、思维导图、图表、拓扑图、chart、diagram、flowchart、mindmap、Mermaid
+* **可视化类**: 可视化、visualization、illustration、infographic、DALL·E、Imagen、Midjourney
+
+### 1. Prompt 自动增强（强制）
+
+检测到图片生成请求时，**必须**在用户原始 prompt 末尾追加以下增强指令后再发送给 web AI：
+
+```
+[系统指令] 请使用你的图片生成模型/工具（如 DALL·E、Imagen 等）主动生成上述要求的图片。
+生成后请提供图片的下载链接或在回答中嵌入图片。如果无法生成图片，请明确说明原因。
+```
+
+增强后的完整 prompt 格式：`"<用户原始prompt> [系统指令] 请使用你的图片生成模型/工具..."`
+
+如果用户已明确指定 `--from=ChatGPT`（DALL·E）或 `--from=Gemini`（Imagen），优先使用该 provider 的生图能力，并在增强指令中提及对应的模型名称。
+
+### 2. 图片自动下载（强制 — index.js 内置）
+
+index.js 在收到 web AI 响应后，**自动执行**以下步骤：
+
+1. 扫描响应文本中的图片 URL：
+   * Markdown 语法：`![alt](url)`
+   * HTML 标签：`<img src="url">`
+   * 直链：以 `.png`/`.jpg`/`.jpeg`/`.gif`/`.webp`/`.svg` 结尾的 URL
+2. 将每张图片下载到 **当前工作目录**（`process.cwd()`，即用户执行 skill 时所在的目录）
+3. 文件名格式：`ai-image-{YYYYMMDD-HHmmss}-{序号}.{ext}`
+4. 在 stdout 末尾自动附加下载结果摘要（`## 📥 Downloaded Images` 段落）
+
+下载由 index.js 内部自动完成，透明无感。如果响应中无图片 URL，该步骤为零开销 no-op。
+
+### 3. 下载目录说明
+
+下载目标始终为 **用户当前工作目录**（shell 的 `$PWD`），而非 skill 安装目录。例如：
+* 用户在 `~/Project/` 下调用 `/AgentChat-OneWeb 帮我画流程图` → 图片下载到 `~/Project/`
+* 用户在 `~/Data_Project/` 下调用 → 图片下载到 `~/Data_Project/`
+
+可通过 `--no-download-images` 标志禁用自动下载。
 
 ---
 
@@ -111,7 +171,7 @@ pgrep -f "start-chrome-debug" || bash scripts/start-chrome-debug.sh
 curl -s http://127.0.0.1:9222/json/version | python3 -c "import json,sys; print(json.load(sys.stdin).get('Browser','FAIL'))"
 
 # 3. playwright-core (npm, ~3MB)
-(cd skills/AgentChat-WebExtended && npm install)
+(cd ~/.claude/skills/AgentChat-OneWeb && npm install)
 
 # 4. 至少一个 AI service 已登录 (Chrome profile 中)
 #    各 service 登录 URL:
@@ -129,25 +189,25 @@ curl -s http://127.0.0.1:9222/json/version | python3 -c "import json,sys; print(
 
 ```bash
 # 基本用法 — 自动遍历 fallback chain（默认保留浏览器标签）
-node skills/AgentChat-WebExtended/index.js "Your prompt"
+node ~/.claude/skills/AgentChat-OneWeb/index.js "Your prompt"
 
 # 执行完毕后自动清理浏览器标签
-node skills/AgentChat-WebExtended/index.js --close "Your prompt"
+node ~/.claude/skills/AgentChat-OneWeb/index.js --close "Your prompt"
 
 # 指定超时 (ms)
-node skills/AgentChat-WebExtended/index.js --timeout=600000 "Long prompt..."
+node ~/.claude/skills/AgentChat-OneWeb/index.js --timeout=600000 "Long prompt..."
 
 # 从 stdin 读取
-echo "Prompt from pipe" | node skills/AgentChat-WebExtended/index.js
+echo "Prompt from pipe" | node ~/.claude/skills/AgentChat-OneWeb/index.js
 
 # 环境检查 (不发送 prompt)
-node skills/AgentChat-WebExtended/index.js --smoke
+node ~/.claude/skills/AgentChat-OneWeb/index.js --smoke
 
 # CDP 连通性检查
-node skills/AgentChat-WebExtended/index.js --doctor
+node ~/.claude/skills/AgentChat-OneWeb/index.js --doctor
 
 # 强制指定起始 provider (跳过前面的)
-node skills/AgentChat-WebExtended/index.js --from=ChatGPT "prompt"
+node ~/.claude/skills/AgentChat-OneWeb/index.js --from=ChatGPT "prompt"
 ```
 
 ### CLI Flags
@@ -157,12 +217,13 @@ node skills/AgentChat-WebExtended/index.js --from=ChatGPT "prompt"
 | `--timeout=N` | 总超时 (ms)，包含所有 provider 尝试时间，默认 600000 |
 | `--timeout-per-provider=N` | 单个 provider 超时 (ms)，默认取 `timeout / 2` 或 180000 |
 | `--from=NAME` | 从指定 provider 开始，跳过链中前面的。NAME 可缩写不区分大小写 |
-| `--single` | 只尝试 `--from` 指定的那一个 provider，失败即返回，不级联到链中后续 provider。给需要自己做跨 provider 降级+加锁的调用方用（如 AgentChat-FreeSubAgent），避免子进程内部级联绕开调用方的互斥锁 |
+| `--single` | 只尝试 `--from` 指定的那一个 provider，失败即返回，不级联到链中后续 provider。给需要自己做跨 provider 降级+加锁的调用方用（如 AgentChat-IndependentTasks），避免子进程内部级联绕开调用方的互斥锁 |
 | `--only=NAME` | `--from=NAME --single` 的合并简写（程序化调用方使用；未知 NAME 会 fail loudly 而非静默回退） |
 | `--locale=xx_XX` | 强制 Gemini UI 语言 profile（`zh_CN` / `zh_TW` / `en` / `ja`），跳过自动检测。Python SDK 的 `locale=` 参数即透传此 flag |
 | `--smoke` | 环境检查：遍历所有 provider 确认至少一个可达 |
 | `--doctor` | CDP 端口连通性检查 |
 | `--close` / `--close-browser` | 执行完毕后关闭所有 tab 和浏览器连接（默认保留） |
+| `--no-download-images` | 禁用图片自动下载（默认启用，从响应中提取图片 URL 下载到当前工作目录） |
 
 ---
 
@@ -170,7 +231,7 @@ node skills/AgentChat-WebExtended/index.js --from=ChatGPT "prompt"
 
 - **stdout**: 成功时输出 AI 响应原文
 - **stderr**: 诊断日志，`[fallback]` 前缀
-- **telemetry**: 写入 `skills/AgentChat-WebExtended/data/fallback-telemetry.jsonl`
+- **telemetry**: 写入 `~/.claude/skills/AgentChat-OneWeb/data/fallback-telemetry.jsonl`
 
 ```json
 {
@@ -269,6 +330,6 @@ index.js
 - `index.js` — CLI 入口 + fallback 编排器
 - `lib/providerFactory.js` — 10-step config-driven pipeline (所有 8 个 provider 共享)
 - `lib/providers/adapters/<name>.js` — 各 provider 差异配置
-- `lib/providers/chain.js` — 优先级顺序 (与 FreeSubAgent 共享的单一真相源)
+- `lib/providers/chain.js` — 优先级顺序 (与 IndependentTasks 共享的单一真相源)
 - `SKILL.md` — AI-facing operational guide
 - `package.json` — npm metadata (playwright-core)

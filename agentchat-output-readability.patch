@@ -1,0 +1,94 @@
+diff --git a/skills/AgentChat-FreeSubAgent/SKILL.md b/skills/AgentChat-FreeSubAgent/SKILL.md
+index 003195b..b0903c5 100644
+--- a/skills/AgentChat-FreeSubAgent/SKILL.md
++++ b/skills/AgentChat-FreeSubAgent/SKILL.md
+@@ -155,6 +155,21 @@ node skills/AgentChat-FreeSubAgent/index.js --timeout=900000 "$(cat /tmp/ai_plan
+ 脚本输出结构化仲裁报告 + 各 worker 完整响应 + 末尾一行 `[receipt] AGENTCHAT_RUN {...}`。
+ Claude Code 解读并呈现给用户，**最终回答末尾必须原样附上该 receipt 行**（强制规则 §2）。
+ 
++## 📐 输出排版规范 — 最终回答强制格式
++
++约束对象是 Claude Code 撰写的**最终落地文本**；worker 原始输出、代码块、diff、表格与 receipt 行不受约束。
++
++1. **结论先行**：开头第一段为 ≤50 字的核心结论（TL;DR），直接回答用户根本诉求，无客套话、无方法论铺垫。
++2. **标题层级**：主模块用 `##`，子观点用 `###`，禁止一级标题 `#`。维度按逻辑聚类为 3–5 块（如：背景/现状/分析/结论），禁止按检索顺序写流水账。
++3. **视觉焦点**：数据、时间、专有名词、核心论点用 `**加粗**` 标出；加粗仅用于焦点引导，每个自然段不超过 2 处。
++4. **列表纪律**：只允许单层无序列表 `*`，禁止任何多级嵌套列表（保证终端/聊天框阅读体验）。
++5. **文本密度**：叙述性自然段 ≤3 句，新逻辑分支必须换行分段；禁止"总而言之""基于以上搜索结果""作为一个人工智能"等无实质信息的过渡句。
++6. **信息隔离**：引用 web AI 原文片段或外部链接时必须放入 `>` 引用块并标注来源 provider，与自己的分析严格区分。
++7. **豁免条款（优先级高于第 1–6 条）**：
++   * `[receipt] AGENTCHAT_RUN {...}` 行（或各步 run_id 清单）必须原样保留在回答末尾的代码块中，禁止改写、加粗、省略——受强制规则 §2 约束。
++   * 降级/失败披露（如"N 个角色降级""web AI 未参与本次回答"）属流程透明性要求，不算冗余过渡句，不得删除。
++   * 代码块、diff、表格不受段落长度与列表层级限制。
++
+ ## Fallback Chain
+ 
+ 任意 provider 不可用时自动降级（由 FreeSubAgent 编排层处理；子进程用 `--only`/`--single` 只跑单个 provider，降级控制只存在于这一层）：
+diff --git a/skills/AgentChat-FreeSubAgent/index.js b/skills/AgentChat-FreeSubAgent/index.js
+index 3c5be4a..9c57af5 100644
+--- a/skills/AgentChat-FreeSubAgent/index.js
++++ b/skills/AgentChat-FreeSubAgent/index.js
+@@ -596,6 +596,11 @@ function printStructuredOutput(dag, results, arb, totalMs) {
+   if (stratParts.length === 0) stratParts.push("所有角色无降级，综合报告完整，可直接引用");
+   lines.push(`\nSTRATEGY: ${stratParts.join("；")}。`);
+ 
++  // Runtime reinforcement of SKILL.md《输出排版规范》— re-enters the upper
++  // agent's context at result time, guarding against instruction decay in
++  // long sessions (same rationale as the [receipt] enforcement line).
++  lines.push(`\nFORMAT: 最终回答遵循 SKILL.md《输出排版规范》— 结论先行(≤50字)、\`##\` 分块(3–5维度)、单层列表、叙述段≤3句、引用入 \`>\` 块、receipt 原样保留。`);
++
+   console.log(`\n${lines.join("\n")}`);
+   console.log(`\nTotal time: ${(totalMs / 1000).toFixed(1)}s\n`);
+ 
+diff --git a/skills/AgentChat-WebExtended/SKILL.md b/skills/AgentChat-WebExtended/SKILL.md
+index a1eb0e2..b8b2bcb 100644
+--- a/skills/AgentChat-WebExtended/SKILL.md
++++ b/skills/AgentChat-WebExtended/SKILL.md
+@@ -42,6 +42,21 @@ node skills/AgentChat-WebExtended/index.js "<用户prompt>"
+ ### 4. 例外
+ 仅限：`--smoke`、`--doctor`，或用户明确要求"只检查环境不发送"。这两种模式不产生 receipt，属预期行为。
+ 
++## 📐 输出排版规范 — 最终回答强制格式
++
++约束对象是 Claude Code 撰写的**最终落地文本**；worker 原始输出、代码块、diff、表格与 receipt 行不受约束。
++
++1. **结论先行**：开头第一段为 ≤50 字的核心结论（TL;DR），直接回答用户根本诉求，无客套话、无方法论铺垫。
++2. **标题层级**：主模块用 `##`，子观点用 `###`，禁止一级标题 `#`。维度按逻辑聚类为 3–5 块（如：背景/现状/分析/结论），禁止按检索顺序写流水账。
++3. **视觉焦点**：数据、时间、专有名词、核心论点用 `**加粗**` 标出；加粗仅用于焦点引导，每个自然段不超过 2 处。
++4. **列表纪律**：只允许单层无序列表 `*`，禁止任何多级嵌套列表（保证终端/聊天框阅读体验）。
++5. **文本密度**：叙述性自然段 ≤3 句，新逻辑分支必须换行分段；禁止"总而言之""基于以上搜索结果""作为一个人工智能"等无实质信息的过渡句。
++6. **信息隔离**：引用 web AI 原文片段或外部链接时必须放入 `>` 引用块并标注来源 provider，与自己的分析严格区分。
++7. **豁免条款（优先级高于第 1–6 条）**：
++   * `[receipt] AGENTCHAT_RUN {...}` 行（或各步 run_id 清单）必须原样保留在回答末尾的代码块中，禁止改写、加粗、省略——受强制规则 §2 约束。
++   * 降级/失败披露（如"N 个角色降级""web AI 未参与本次回答"）属流程透明性要求，不算冗余过渡句，不得删除。
++   * 代码块、diff、表格不受段落长度与列表层级限制。
++
+ ---
+ 
+ ## Trigger
+diff --git a/skills/Web-SubAgent-Workflow/SKILL.md b/skills/Web-SubAgent-Workflow/SKILL.md
+index c8b0ff9..2903729 100644
+--- a/skills/Web-SubAgent-Workflow/SKILL.md
++++ b/skills/Web-SubAgent-Workflow/SKILL.md
+@@ -137,6 +137,21 @@ Fallback: ChatGPT → Claude → Qwen
+ 
+ 逐条应用审查意见，输出最终文件。向用户报告：步骤摘要、复杂度理由、审查处理情况、产出位置。
+ 
++## 📐 输出排版规范 — 最终回答强制格式
++
++约束对象是 Claude Code 撰写的**最终落地文本**；worker 原始输出、代码块、diff、表格与 receipt 行不受约束。
++
++1. **结论先行**：开头第一段为 ≤50 字的核心结论（TL;DR），直接回答用户根本诉求，无客套话、无方法论铺垫。
++2. **标题层级**：主模块用 `##`，子观点用 `###`，禁止一级标题 `#`。维度按逻辑聚类为 3–5 块（如：背景/现状/分析/结论），禁止按检索顺序写流水账。
++3. **视觉焦点**：数据、时间、专有名词、核心论点用 `**加粗**` 标出；加粗仅用于焦点引导，每个自然段不超过 2 处。
++4. **列表纪律**：只允许单层无序列表 `*`，禁止任何多级嵌套列表（保证终端/聊天框阅读体验）。
++5. **文本密度**：叙述性自然段 ≤3 句，新逻辑分支必须换行分段；禁止"总而言之""基于以上搜索结果""作为一个人工智能"等无实质信息的过渡句。
++6. **信息隔离**：引用 web AI 原文片段或外部链接时必须放入 `>` 引用块并标注来源 provider，与自己的分析严格区分。
++7. **豁免条款（优先级高于第 1–6 条）**：
++   * `[receipt] AGENTCHAT_RUN {...}` 行（或各步 run_id 清单）必须原样保留在回答末尾的代码块中，禁止改写、加粗、省略——受强制规则 §2 约束。
++   * 降级/失败披露（如"N 个角色降级""web AI 未参与本次回答"）属流程透明性要求，不算冗余过渡句，不得删除。
++   * 代码块、diff、表格不受段落长度与列表层级限制。
++
+ ---
+ 
+ ## CLI 速查

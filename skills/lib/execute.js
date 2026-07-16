@@ -1,11 +1,11 @@
 /**
- * Shared subprocess executor over AgentChat-WebExtended.
+ * Shared subprocess executor over AgentChat-OneWeb.
  *
  * Unifies the callProvider / executeWithFallback / cleanResponse triplet that
- * previously lived as drifting near-copies inside AgentChat-FreeSubAgent and
- * Web-SubAgent-Workflow. Divergences that had already crept in:
+ * previously lived as drifting near-copies inside AgentChat-IndependentTasks and
+ * AgentChat-WebSubAgent. Divergences that had already crept in:
  *   - exit code 2 mapped to "auth" (FSA) vs "no_provider" (Workflow) — unified
- *     to "auth", matching WebExtended's documented ERR_NO_PROVIDER semantics
+ *     to "auth", matching OneWeb's documented ERR_NO_PROVIDER semantics
  *     ("all providers auth-gated").
  *   - MIN_CALL_BUDGET_MS 30s (FSA) vs 20s (Workflow) — parameterized.
  *   - lock lifecycle: hold-on-success (FSA, protects concurrent DAG workers
@@ -53,7 +53,7 @@ const MAX_BUFFER = 1024 * 1024;    // 1MB stdout/stderr cap to prevent OOM
 const MAX_LOCK_RETRIES = 3;
 const LOCK_BACKOFF_BASE_MS = 5_000; // 5s → 15s → 30s
 
-// WebExtended exit-code contract (see its header comment)
+// OneWeb exit-code contract (see its header comment)
 const EXIT_REASONS = {
     1: "no_cdp", 2: "auth", 3: "safety", 4: "internal",
     5: "quota", 9: "all_exhausted", 10: "timeout",
@@ -89,7 +89,7 @@ function cleanResponse(text) {
 
 /**
  * @param {object} opts
- * @param {string}  opts.webextPath          absolute path to AgentChat-WebExtended/index.js
+ * @param {string}  opts.webextPath          absolute path to AgentChat-OneWeb/index.js
  * @param {string}  [opts.logPrefix]         stderr log prefix
  * @param {number}  [opts.minCallBudgetMs]   stop the chain when remaining budget drops below this
  * @param {number}  [opts.perCallCapMs]      per-attempt timeout ceiling
@@ -111,16 +111,16 @@ function createExecutor({
     const log = (msg) => _log(logPrefix, msg);
 
     /**
-     * Call exactly ONE provider via a WebExtended subprocess (--only + --single:
+     * Call exactly ONE provider via a OneWeb subprocess (--only + --single:
      * no internal cascade — fallback control lives solely in the caller).
      * Prompt is delivered over stdin, never argv.
      *
      * @returns {Promise<{ok:boolean, text:string, provider:string, terminal?:boolean, reason?:string, error?:string}>}
      */
     function callProvider(prompt, provider, timeoutMs) {
-        // BUDGET CONTRACT FIX: WebExtended's normalizeTimeout() reinterprets any
+        // BUDGET CONTRACT FIX: OneWeb's normalizeTimeout() reinterprets any
         // --timeout < 10000 as SECONDS (×1000) — a human-typo heuristic that is
-        // wrong for programmatic callers. FreeSubAgent's buildDAG can legally
+        // wrong for programmatic callers. IndependentTasks's buildDAG can legally
         // compute a 8-9s slice (0.4 × a small M1 budget), which the child then
         // inflated to HOURS while our SIGTERM fired at slice+30s: the attempt
         // burned ~40s of wall clock and died as exit_null instead of finishing
@@ -128,7 +128,7 @@ function createExecutor({
         // value the child sees is always in the "milliseconds" regime.
         timeoutMs = Math.max(10_000, Math.floor(timeoutMs) || 0);
 
-        // EXIT-CODE CONFLATION GUARD: WebExtended exits 1 for BOTH a usage error
+        // EXIT-CODE CONFLATION GUARD: OneWeb exits 1 for BOTH a usage error
         // (empty prompt) and ERR_NO_CDP. An empty prompt spawned downstream would
         // come back as reason "no_cdp" with terminal=true — aborting the caller's
         // ENTIRE fallback chain over a caller-side bug. Fail fast locally instead.
@@ -159,7 +159,7 @@ function createExecutor({
             });
 
             // Dual-timer teardown: SIGTERM after budget + 30s grace, SIGKILL +5s more
-            // (prevents zombie subprocesses if WebExtended's own timeout wedges).
+            // (prevents zombie subprocesses if OneWeb's own timeout wedges).
             let settled = false;
             const sigtermTimer = setTimeout(() => {
                 if (!settled) { log(`SIGTERM → ${provider} (budget ${timeoutMs}ms + 30s grace elapsed)`); child.kill("SIGTERM"); }
@@ -190,7 +190,7 @@ function createExecutor({
                 } else {
                     // code === null ⇒ killed by signal (our SIGTERM/SIGKILL after
                     // budget overrun, or external kill). Was labelled "exit_null",
-                    // which read like a WebExtended contract violation in logs.
+                    // which read like a OneWeb contract violation in logs.
                     const reason = code === null
                         ? `killed_${signal || "signal"}`
                         : (EXIT_REASONS[code] || `exit_${code}`);

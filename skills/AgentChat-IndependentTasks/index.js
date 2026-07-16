@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Parallel AI Decompose v3 — Thin Orchestrator over AgentChat-WebExtended
+ * Parallel AI Decompose v3 — Thin Orchestrator over AgentChat-OneWeb
  *
  * Core principles:
  *   1. DAG first, parallelism second (respect dependencies)
@@ -8,17 +8,17 @@
  *   3. Structured I/O with quality gates
  *   4. Evidence-based arbitration (not majority vote)
  *   5. Explicit degradation (never silent failure)
- *   6. Single provider source: AgentChat-WebExtended (no code duplication)
+ *   6. Single provider source: AgentChat-OneWeb (no code duplication)
  *
  * Three modules:
  *   M1: Task DAG — decompose task into complementary sub-prompts
  *   M2: Wave Dispatch — topological layers (depends_on honored); nodes within a
- *       wave run as parallel subprocesses → AgentChat-WebExtended, downstream
+ *       wave run as parallel subprocesses → AgentChat-OneWeb, downstream
  *       prompts receive upstream outputs ({{dep_id}} substitution or appendix)
  *   M3: Evidence Arbitrator — evidence-weighted synthesis + degradation report
  *
  * Provider subprocess plumbing lives in lib/execute.js (shared with
- * Web-SubAgent-Workflow); prompts travel over stdin, never argv.
+ * AgentChat-WebSubAgent); prompts travel over stdin, never argv.
  */
 
 const path = require("path");
@@ -33,9 +33,9 @@ process.on("exit", cleanupAllLocks);
 process.on("SIGINT", () => { cleanupAllLocks(); process.exit(130); });
 process.on("SIGTERM", () => { cleanupAllLocks(); process.exit(143); });
 
-const WEBEXT = path.resolve(__dirname, "..", "AgentChat-WebExtended", "index.js");
-// Single source of truth: lib/providers/chain.js (shared with WebExtended).
-// Previously this required WebExtended's index.js just to read a constant,
+const WEBEXT = path.resolve(__dirname, "..", "AgentChat-OneWeb", "index.js");
+// Single source of truth: lib/providers/chain.js (shared with OneWeb).
+// Previously this required OneWeb's index.js just to read a constant,
 // dragging in playwright-core + all 8 adapter modules at orchestrator startup.
 const { PROVIDER_CHAIN } = require('../lib/providers/chain');
 const FALLBACK_CHAIN = PROVIDER_CHAIN.map(p => p.key);
@@ -60,13 +60,13 @@ function ts() { return new Date().toISOString().slice(11, 19); }
 // PROVIDER CALL — shared executor (lib/execute.js)
 // ═══════════════════════════════════════════════════════════════════
 // callProvider/runChain/cleanResponse previously lived here as a near-copy of
-// Web-SubAgent-Workflow's versions and had already drifted (exit-code labels,
+// AgentChat-WebSubAgent's versions and had already drifted (exit-code labels,
 // MIN_CALL_BUDGET). Now a single implementation, parameterized:
 //   holdLockOnSuccess: true — a successful provider stays locked so other
 //     workers IN THE SAME WAVE skip it (tab-collision protection). Locks are
 //     released at wave boundaries by dispatchWaves(), and on process exit.
 //   acceptUsedMarker: true — tolerate the stdout/close delivery race by
-//     trusting WebExtended's "✓ X: USED (N chars" stderr marker.
+//     trusting OneWeb's "✓ X: USED (N chars" stderr marker.
 // Prompt delivery is now stdin (was argv): required for wave execution, which
 // injects upstream outputs into downstream prompts — argv would hit Windows'
 // ~32KB command-line limit and leak prompts via `ps`.
@@ -97,9 +97,9 @@ function normalizeAI(name) {
   // that isn't in our provider set — e.g. "grok", "llama", a typo, or "".
   // Previously such a key flowed straight through: acquireLock("grok") always
   // "succeeds" (it's an unused name), then callProvider sends --only=grok to
-  // WebExtended, which USED to silently run Gemini — so this worker held a lock
+  // OneWeb, which USED to silently run Gemini — so this worker held a lock
   // on "grok" while consuming Gemini, colliding with the real Gemini worker.
-  // Now WebExtended rejects unknown --only, but we still shouldn't waste a
+  // Now OneWeb rejects unknown --only, but we still shouldn't waste a
   // subprocess round-trip on a doomed key: coerce anything unknown to the head
   // of the chain so the worker at least runs a real, lockable provider.
   if (!FALLBACK_CHAIN.includes(key)) {
@@ -596,6 +596,11 @@ function printStructuredOutput(dag, results, arb, totalMs) {
   if (stratParts.length === 0) stratParts.push("所有角色无降级，综合报告完整，可直接引用");
   lines.push(`\nSTRATEGY: ${stratParts.join("；")}。`);
 
+  // Runtime reinforcement of SKILL.md《输出排版规范》— re-enters the upper
+  // agent's context at result time, guarding against instruction decay in
+  // long sessions (same rationale as the [receipt] enforcement line).
+  lines.push(`\nFORMAT: 最终回答遵循 SKILL.md《输出排版规范》— 结论先行(≤50字)、\`##\` 分块(3–5维度)、单层列表、叙述段≤3句、引用入 \`>\` 块、receipt 原样保留。`);
+
   console.log(`\n${lines.join("\n")}`);
   console.log(`\nTotal time: ${(totalMs / 1000).toFixed(1)}s\n`);
 
@@ -642,10 +647,10 @@ async function main() {
 
   if (doctor) {
     if (fs.existsSync(WEBEXT)) {
-      log(`✓ WebExtended found at: ${WEBEXT}`);
+      log(`✓ OneWeb found at: ${WEBEXT}`);
       process.exit(0);
     } else {
-      log(`✗ WebExtended NOT found at: ${WEBEXT}`);
+      log(`✗ OneWeb NOT found at: ${WEBEXT}`);
       process.exit(1);
     }
   }
@@ -674,10 +679,10 @@ async function main() {
     timeout *= 1000;
   }
 
-  // Verify WebExtended exists
+  // Verify OneWeb exists
   if (!fs.existsSync(WEBEXT)) {
-    log(`FATAL: AgentChat-WebExtended not found at: ${WEBEXT}`);
-    log("  This skill depends on AgentChat-WebExtended for provider implementations.");
+    log(`FATAL: AgentChat-OneWeb not found at: ${WEBEXT}`);
+    log("  This skill depends on AgentChat-OneWeb for provider implementations.");
     process.exit(1);
   }
 
@@ -685,7 +690,7 @@ async function main() {
   const RUN_ID = makeRunId(); // execution receipt id (see lib/receipt.js)
 
   if (smoke) {
-    log("Smoke test: checking all providers via WebExtended...");
+    log("Smoke test: checking all providers via OneWeb...");
     const testedLocks = [];
     for (const key of FALLBACK_CHAIN) {
       // Skip if already locked (provider in use by another worker / already tested)
@@ -735,7 +740,7 @@ async function main() {
   // by the agent's own answer.
   emitReceipt({
     skillDir: __dirname,
-    skill: 'AgentChat-FreeSubAgent',
+    skill: 'AgentChat-IndependentTasks',
     runId: RUN_ID,
     fields: {
       exit: exitCode,
@@ -763,7 +768,7 @@ async function main() {
 // file (e.g. from a test, or another script re-using FALLBACK_CHAIN/normalizeAI)
 // would immediately run the CLI: parse process.argv, block on stdin if no prompt
 // was given, spawn subprocesses, and eventually call process.exit(). Guarded to
-// match AgentChat-WebExtended/index.js's existing require.main === module pattern.
+// match AgentChat-OneWeb/index.js's existing require.main === module pattern.
 if (require.main === module) {
     main().catch(e => { log(`CRITICAL: ${e.message}`); process.exit(4); });
 }

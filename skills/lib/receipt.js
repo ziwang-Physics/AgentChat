@@ -23,13 +23,13 @@
  * answer.
  *
  * Stream policy (IMPORTANT — do not change casually):
- *   - AgentChat-WebExtended's stdout is a MACHINE CONTRACT: parents
+ *   - AgentChat-OneWeb's stdout is a MACHINE CONTRACT: parents
  *     (lib/execute.js, the Python SDK, the MCP server) take stdout verbatim
  *     as the AI response. Its receipt therefore goes to STDERR, alongside the
  *     existing "✓ X: USED" marker.
- *   - AgentChat-FreeSubAgent's stdout is a human/agent-readable report — the
+ *   - AgentChat-IndependentTasks's stdout is a human/agent-readable report — the
  *     receipt is appended to STDOUT so it survives in the captured output.
- *   - Web-SubAgent-Workflow prints a single JSON object on stdout — the
+ *   - AgentChat-WebSubAgent prints a single JSON object on stdout — the
  *     receipt is embedded as a `receipt` field inside that JSON (plus a
  *     stderr copy for uniform grepping).
  */

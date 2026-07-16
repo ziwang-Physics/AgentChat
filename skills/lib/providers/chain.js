@@ -1,11 +1,11 @@
 /**
  * PROVIDER_CHAIN — single source of truth for provider priority order.
  *
- * Extracted from AgentChat-WebExtended/index.js so that consumers that only
- * need the chain (e.g. FreeSubAgent's buildFallbackChain) don't have to load
+ * Extracted from AgentChat-OneWeb/index.js so that consumers that only
+ * need the chain (e.g. IndependentTasks's buildFallbackChain) don't have to load
  * playwright-core + all 8 adapters just to read a constant array.
  *
- * WebExtended re-exports this for backward compatibility.
+ * OneWeb re-exports this for backward compatibility.
  */
 
 const PROVIDER_CHAIN = [

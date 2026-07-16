@@ -1,7 +1,7 @@
 /**
  * Shared terminal utilities — spinner, timer, log line management.
  *
- * Used by all skills (WebExtended, FreeSubAgent).
+ * Used by all skills (OneWeb, IndependentTasks).
  * Eliminates ~80 lines of duplicated \r\x1b[K + spinner frame logic.
  *
  * v2 (2026-07-03): Timer handle pattern — startTimer() returns {stop}

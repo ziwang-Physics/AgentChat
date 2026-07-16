@@ -14,8 +14,9 @@
  *   node index.js --doctor         # check CDP connectivity only
  *   node index.js --from=ChatGPT   # start from a specific provider
  *   node index.js --from=Claude --single "..."  # try ONLY Claude, no cascade
- *                                   # (used by AgentChat-FreeSubAgent, which owns
+ *                                   # (used by AgentChat-IndependentTasks, which owns
  *                                   # its own cross-provider fallback + locking)
+ *   node index.js --no-download-images "..."  # skip image download post-processing
  *
  * Exit codes:
  *   0 - Success (response on stdout)
@@ -31,6 +32,8 @@
 const { chromium } = require('playwright-core');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
+const http = require('http');
 
 const { ProviderError, classifyError } = require('../lib/errors');
 const { createProviderRunner, appendWithRotation } = require('../lib/providerFactory');
@@ -38,7 +41,7 @@ const { makeRunId, emitReceipt } = require('../lib/receipt');
 const { log: _log, startTimer: _startTimer, spinner } = require('../lib/terminal');
 const { connectWithRetry: _connectWithRetry, doctorCheck: _doctorCheck } = require('../lib/cdp');
 
-// ── Adapt shared modules to WebExtended naming conventions ──
+// ── Adapt shared modules to OneWeb naming conventions ──
 const PREFIX = 'fallback';
 const log = (msg) => _log(PREFIX, msg);
 const startTimer = (label) => _startTimer(PREFIX, label);
@@ -88,7 +91,7 @@ class InvocationContext {
         // receipt line there would be embedded into the answer text.
         emitReceipt({
             skillDir: SKILL_DIR,
-            skill: 'AgentChat-WebExtended',
+            skill: 'AgentChat-OneWeb',
             runId: this.runId,
             fields: {
                 exit: code,
@@ -105,7 +108,7 @@ class InvocationContext {
 // PROVIDER CHAIN (priority order — first available wins)
 // ══════════════════════════════════════════════════════════════════════════════
 
-// Single source of truth: lib/providers/chain.js (also consumed by FreeSubAgent,
+// Single source of truth: lib/providers/chain.js (also consumed by IndependentTasks,
 // which must NOT require this file — that would load playwright-core + 8 adapters).
 const { PROVIDER_CHAIN } = require('../lib/providers/chain');
 
@@ -150,7 +153,7 @@ function getProviderHosts(provider) {
  * Fix: REUSE the existing tab instead of skipping the provider. page.goto(url)
  * on the existing tab starts a fresh chat, so reuse is functionally identical
  * to a new tab and also stops tab accumulation. Concurrent-worker isolation is
- * the job of FreeSubAgent's file locks (and --single), not tab heuristics.
+ * the job of IndependentTasks's file locks (and --single), not tab heuristics.
  */
 function findProviderPage(context, provider) {
     const hosts = getProviderHosts(provider);
@@ -169,6 +172,82 @@ function findProviderPage(context, provider) {
             return hosts.some(h => host === h || host.endsWith('.' + h));
         } catch { return false; }
     }) || null;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// IMAGE DOWNLOAD HELPERS
+// ══════════════════════════════════════════════════════════════════════════════
+
+const IMG_EXT_PATTERN = /\.(png|jpg|jpeg|gif|webp|svg)(\?.*)?$/i;
+const MARKDOWN_IMG_RE = /!\[.*?\]\((https?:\/\/[^\s)]+)\)/g;
+const HTML_IMG_RE = /<img[^>]+src=["'](https?:\/\/[^\s"']+)["'][^>]*>/gi;
+const DIRECT_URL_RE = /https?:\/\/[^\s"'`<>]+\.(?:png|jpg|jpeg|gif|webp|svg)(?:\?[^\s"'`<>]*)?/gi;
+
+function extractImageUrls(text) {
+    const urls = new Set();
+    for (const m of text.matchAll(MARKDOWN_IMG_RE)) urls.add(m[1]);
+    for (const m of text.matchAll(HTML_IMG_RE)) urls.add(m[1]);
+    for (const m of text.matchAll(DIRECT_URL_RE)) urls.add(m[0]);
+    return [...urls];
+}
+
+function downloadFile(url, destPath, redirects) {
+    redirects = redirects || 0;
+    if (redirects > 3) return Promise.reject(new Error('Too many redirects'));
+    return new Promise((resolve, reject) => {
+        const proto = url.startsWith('https') ? https : http;
+        const req = proto.get(url, { timeout: 30000 }, (res) => {
+            if ([301, 302, 307, 308].includes(res.statusCode)) {
+                const loc = res.headers.location;
+                if (loc) return downloadFile(loc, destPath, redirects + 1).then(resolve, reject);
+            }
+            if (res.statusCode !== 200) {
+                return reject(new Error(`HTTP ${res.statusCode}`));
+            }
+            const file = fs.createWriteStream(destPath);
+            res.pipe(file);
+            file.on('finish', () => { file.close(); resolve(destPath); });
+            file.on('error', reject);
+        });
+        req.on('error', reject);
+        req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    });
+}
+
+async function downloadAllImages(response, destDir, opts) {
+    opts = opts || {};
+    const urls = extractImageUrls(response);
+    if (!urls.length) return { downloaded: [], response };
+
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const ts = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    const results = [];
+
+    for (let i = 0; i < urls.length; i++) {
+        const extMatch = urls[i].match(IMG_EXT_PATTERN);
+        const ext = extMatch ? extMatch[1] : 'png';
+        const filename = `ai-image-${ts}-${pad(i + 1)}.${ext}`;
+        const destPath = path.join(destDir, filename);
+        try {
+            await downloadFile(urls[i], destPath);
+            results.push({ url: urls[i], file: filename, status: 'ok', path: destPath });
+            log(`  📥 Downloaded: ${filename} (${destDir})`);
+        } catch (err) {
+            results.push({ url: urls[i], file: filename, status: 'failed', error: err.message });
+            log(`  ❌ Download failed: ${filename} — ${err.message}`);
+        }
+    }
+
+    const ok = results.filter(r => r.status === 'ok');
+    const failed = results.filter(r => r.status === 'failed');
+    let summary = '\n\n---\n## 📥 Downloaded Images\n';
+    if (ok.length) summary += ok.map(r => `✅ \`${r.file}\` → ${destDir}`).join('\n') + '\n';
+    if (failed.length) summary += failed.map(r => `❌ \`${r.file}\` — ${r.error}`).join('\n') + '\n';
+    if (!ok.length && !failed.length) summary += '(no images found in response)\n';
+
+    const augmentedResponse = response + summary;
+    return { downloaded: ok, failed, response: augmentedResponse };
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -244,7 +323,7 @@ async function tryAllProviders(browser, prompt, ctx, options = {}) {
 
     // singleAttempt: bound the loop to exactly one provider (startIdx) instead of
     // cascading through the rest of PROVIDER_CHAIN on failure. Used by callers
-    // (e.g. AgentChat-FreeSubAgent) that implement their own cross-provider
+    // (e.g. AgentChat-IndependentTasks) that implement their own cross-provider
     // fallback with external locking — without this, a single spawned attempt at
     // provider X could silently succeed via provider Y further down the chain,
     // while the caller's lock is only held on X, breaking mutual exclusion between
@@ -419,6 +498,7 @@ async function main() {
     let startFrom = null;
     let keepTabs = true; // Always keep tabs — never close user's browser
     let singleAttempt = false; // --single: try exactly one provider, no cascade
+    let downloadImages = true; // download images from response to cwd (--no-download-images to disable)
 
     // Timeouts are milliseconds. Values < 10000 are almost certainly seconds
     // typed by a human (--timeout=900) — normalize instead of silently giving
@@ -455,7 +535,7 @@ async function main() {
         } else if (a === '--single') {
             singleAttempt = true;
         } else if (a.startsWith('--only=')) {
-            // Try exactly ONE provider — no internal fallback. Used by FreeSubAgent
+            // Try exactly ONE provider — no internal fallback. Used by IndependentTasks
             // so that fallback control lives solely in the orchestrator layer.
             startFrom = a.split('=')[1];
             singleAttempt = true;
@@ -475,6 +555,10 @@ async function main() {
             } else {
                 log(`Gemini UI locale forced to ${applied}`);
             }
+        } else if (a === '--no-download-images') {
+            // Image download opt-out — skip the automatic image download post-processing.
+            // Images in the web AI response will be preserved as remote URLs only.
+            downloadImages = false;
         } else if (!a.startsWith('--')) {
             remaining.push(a);
         }
@@ -526,6 +610,17 @@ async function main() {
         });
 
         if (result.success) {
+            // ── Post-process: download images from response (if enabled) ──
+            let finalResponse = result.response;
+            if (downloadImages) {
+                try {
+                    const dlResult = await downloadAllImages(result.response, process.cwd());
+                    finalResponse = dlResult.response;
+                } catch (err) {
+                    log(`Image download phase failed: ${err.message}`);
+                }
+            }
+
             // P0 FLUSH FIX: console.log + immediate process.exit truncates piped
             // stdout at the pipe-buffer boundary (~128KB on Linux, less on
             // Windows/macOS). A PARTIAL flush still passes the parent executor's
@@ -537,7 +632,7 @@ async function main() {
             // websocket keeps the event loop alive, so a natural exit never
             // happens; exitCode-and-return is NOT an option in this file.)
             ctx.recordTelemetry(0);
-            process.stdout.write(result.response + '\n', () => process.exit(0));
+            process.stdout.write(finalResponse + '\n', () => process.exit(0));
             return;
         }
 

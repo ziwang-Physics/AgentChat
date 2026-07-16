@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Web-SubAgent-Workflow — Sequential Pipeline Helper
+ * AgentChat-WebSubAgent — Sequential Pipeline Helper
  *
- * Thin wrapper over AgentChat-WebExtended. Claude Code is the master controller;
+ * Thin wrapper over AgentChat-OneWeb. Claude Code is the master controller;
  * this script ONLY handles external AI calls for steps 2 (search), 3 (reason), 5 (review).
  *
  * Usage:
@@ -27,7 +27,7 @@ process.on("SIGTERM", () => { cleanupAllLocks(); process.exit(143); });
 // CONSTANTS
 // ═══════════════════════════════════════════════════════════════════
 
-const WEBEXT = path.resolve(__dirname, "..", "AgentChat-WebExtended", "index.js");
+const WEBEXT = path.resolve(__dirname, "..", "AgentChat-OneWeb", "index.js");
 const { PROVIDER_CHAIN } = require("../lib/providers/chain");
 const ALL_KEYS = PROVIDER_CHAIN.map(p => p.key);
 
@@ -43,7 +43,7 @@ function log(msg) { process.stderr.write(`[workflow] ${msg}\n`); }
 // PROVIDER CALL + FALLBACK — shared executor (lib/execute.js)
 // ═══════════════════════════════════════════════════════════════════
 // callProvider/cleanResponse/executeWithFallback previously lived here as a
-// near-copy of FreeSubAgent's versions and had drifted (exit code 2 was
+// near-copy of IndependentTasks's versions and had drifted (exit code 2 was
 // labelled "no_provider" here vs "auth" there; MIN_CALL_BUDGET 20s vs 30s).
 // Single implementation now, parameterized:
 //   holdLockOnSuccess: false — steps are sequential; a provider is free again
@@ -125,7 +125,7 @@ async function main() {
         process.exit(r.status || (r.error ? 1 : 0));
     }
 
-    if (!fs.existsSync(WEBEXT)) { log(`FATAL: WebExtended not found: ${WEBEXT}`); process.exit(1); }
+    if (!fs.existsSync(WEBEXT)) { log(`FATAL: OneWeb not found: ${WEBEXT}`); process.exit(1); }
 
     if (smoke) { await smokeTest(); process.exit(0); }
     if (!prompt) { log("Usage: node index.js [--search|--reason|--review] [--timeout=N] <prompt>"); process.exit(1); }
@@ -155,7 +155,7 @@ async function main() {
     // persisted to data/receipts.jsonl for user-side verification.
     const receipt = emitReceipt({
         skillDir: __dirname,
-        skill: "Web-SubAgent-Workflow",
+        skill: "AgentChat-WebSubAgent",
         runId: makeRunId(),
         fields: {
             mode: mode || "custom",

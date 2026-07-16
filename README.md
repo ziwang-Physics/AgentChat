@@ -1,4 +1,4 @@
-# AgentChat — Free Web-SubAgent Workflow
+# AgentChat — Free WebSubAgent Workflow
 
 > Claude Code 接低价/免费API做决策分工，
 > Gemini/ChatGPT/Claude 等免费网页 AI 执行子任务。
@@ -11,7 +11,7 @@
 [![Claude Code Ready](https://img.shields.io/badge/Claude_Code-Skill_Ready-8A2BE2.svg)](#-claude-code-integration)
 
 
-## 什么是 Free Web-SubAgent ？
+## 什么是 Free WebSubAgent ？
 
 - 🎭一套零成本的 Claude Code 技能套件，通过接管本地 Chrome 浏览器桥接 8 个免费网页 AI
 - 🛡支持串行降级（单模型自动切换）与并行编排（角色分工+证据仲裁)
@@ -21,9 +21,9 @@
 
 | Skill | 类型 | 职责 | 何时用 |
 |-------|------|------|--------|
-| **AgentChat-WebExtended** | 串行降级链 | 1个ai，7个替补。只使用一个你最喜欢的ai，免费额度耗尽自动切换，8-Provider 自动 fallback |代码 + 多模态 |
-| **AgentChat-FreeSubAgent** | 并行编排 | 一次性触发8个ai。默认触发4个，可根据任务数量指定，如16个独立任务让8个Web 端分别执行两个任务 |大量高独立性任务|
-| **Web-SubAgent-Workflow** | 串行管道 | 核心Skill（架构图如下），6 步 AI 管道：你的Agent规划→Kimi 搜索→Gemini 推理→Agent 合成→ChatGPT或Claude 审查 | 深度推理 + 质量审查 |
+| **AgentChat-OneWeb** | 串行降级链 | 1个ai，7个替补。只使用一个你最喜欢的ai，免费额度耗尽自动切换，8-Provider 自动 fallback |代码 + 多模态 |
+| **AgentChat-IndependentTasks** | 并行编排 | 一次性触发8个ai。默认触发4个，可根据任务数量指定，如16个独立任务让8个Web 端分别执行两个任务 |大量高独立性任务|
+| **AgentChat-WebSubAgent** | 串行管道 | 核心Skill（架构图如下），6 步 AI 管道：你的Agent规划→Kimi 搜索→Gemini 推理→Agent 合成→ChatGPT或Claude 审查 | 深度推理 + 质量审查 |
 
 ---
 
@@ -41,9 +41,9 @@ git clone https://github.com/ziwang-Physics/AgentChat.git && cd AgentChat
 # Python 依赖（Chrome daemon — 使用系统 Chrome，不需要 Playwright Chromium）
 pip3 install playwright websocket-client
 
-# Node.js 依赖（AI bridge — 根目录统一管理 + WebExtended skill）
+# Node.js 依赖（AI bridge — 根目录统一管理 + OneWeb skill）
 npm install
-(cd skills/AgentChat-WebExtended && npm install)
+(cd skills/AgentChat-OneWeb && npm install)
 ```
 
 ### 2. 配置 & 启动
@@ -58,13 +58,13 @@ bash scripts/start-chrome-debug.sh  # 启动 Chrome daemon
 
 ```bash
 # 单 prompt 高可用 — 自动 fallback
-/AgentChat-WebExtended 帮我写Python脚本/根据文字生成视频
+/AgentChat-OneWeb 帮我写Python脚本/根据文字生成视频
 
 # 8 路并发 — 大量高独立性任务
-/AgentChat-FreeSubAgent 高独立性的多个任务：根据我的任务调用8个ai生成8个脚本/8个视频
+/AgentChat-IndependentTasks 高独立性的多个任务：根据我的任务调用8个ai生成8个脚本/8个视频
 
 # 串行深度管道 — 规划→搜索→推理→合成→审查→修复
-/Web-SubAgent-Workflow 帮我设计一个高并发消息队列的架构方案
+/AgentChat-WebSubAgent 帮我设计一个高并发消息队列的架构方案
 ```
 
 ## 🧠 Claude Code Integration
@@ -84,10 +84,10 @@ bash scripts/start-chrome-debug.sh  # 启动 Chrome daemon
 ### 环境诊断
 
 ```bash
-node skills/AgentChat-WebExtended/index.js --smoke     # 遍历 8 个 provider
-node skills/AgentChat-WebExtended/index.js --doctor    # CDP 端口连通性检查
-node skills/AgentChat-FreeSubAgent/index.js --smoke    # 并行编排环境检查
-node skills/Web-SubAgent-Workflow/index.js --doctor    # 串行管道环境检查
+node skills/AgentChat-OneWeb/index.js --smoke     # 遍历 8 个 provider
+node skills/AgentChat-OneWeb/index.js --doctor    # CDP 端口连通性检查
+node skills/AgentChat-IndependentTasks/index.js --smoke    # 并行编排环境检查
+node skills/AgentChat-WebSubAgent/index.js --doctor    # 串行管道环境检查
 ```
 
 ---
@@ -130,16 +130,16 @@ AgentChat/
     │           ├── minimax.js             #     TipTap 异步挂载
     │           ├── mimo.js                #     DOM 遍历 send button
     │           └── deepseek.js            #     标准管线
-    ├── AgentChat-WebExtended/           # 8-Provider Fallback Chain
+    ├── AgentChat-OneWeb/           # 8-Provider Fallback Chain
     │   ├── SKILL.md                     # 🤖 AI 操作指南
     │   ├── index.js                     # 编排入口（~530 行，零 provider 代码）
     │   ├── CHANGELOG.md                 # 变更日志
     │   ├── package.json
     │   └── data/                        # 遥测数据
-    ├── AgentChat-FreeSubAgent/          # 并行编排器（DAG + 波次调度 + 证据仲裁）
+    ├── AgentChat-IndependentTasks/          # 并行编排器（DAG + 波次调度 + 证据仲裁）
     │   ├── SKILL.md                     # 🤖 AI 操作指南 + 角色分工
     │   └── index.js                     # 薄编排器（~710 行，零 provider 代码）
-    └── Web-SubAgent-Workflow/           # 串行 6 步管道
+    └── AgentChat-WebSubAgent/           # 串行 6 步管道
         ├── SKILL.md                     # 🤖 AI 操作指南
         └── index.js                     # 管道 helper（~160 行，零 provider 代码）
 ```
@@ -201,7 +201,7 @@ GFW 会阻断 Chrome 启动时向 Google 云端发起的 SSL 请求，导致 Chr
 pkill -9 chrome && bash scripts/start-chrome-debug.sh
 ```
 
-详见 `skills/AgentChat-WebExtended/SKILL.md` → 各 Provider 实现说明。
+详见 `skills/AgentChat-OneWeb/SKILL.md` → 各 Provider 实现说明。
 </details>
 
 <details>
@@ -236,7 +236,7 @@ sleep 2 && bash scripts/start-chrome-debug.sh
 
 ## 🤝 Contributing
 
-欢迎提 Issue 和 PR。新增 provider 请在 `lib/providers/adapters/` 中添加 adapter config（参考现有 8 个），编排层改动请保持 `FreeSubAgent` 的零 provider 代码原则。
+欢迎提 Issue 和 PR。新增 provider 请在 `lib/providers/adapters/` 中添加 adapter config（参考现有 8 个），编排层改动请保持 `IndependentTasks` 的零 provider 代码原则。
 
 ---
 

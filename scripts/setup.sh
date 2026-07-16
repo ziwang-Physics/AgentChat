@@ -99,7 +99,7 @@ echo ""
 
 # --- Skill npm 依赖 ---
 echo "📦 Skill npm 依赖:"
-for skill_dir in skills/AgentChat-WebExtended; do
+for skill_dir in skills/AgentChat-OneWeb; do
     if [ -d "$skill_dir" ]; then
         skill_name=$(basename "$skill_dir")
         check "$skill_name node_modules" \
@@ -157,4 +157,4 @@ echo "   bash scripts/start-chrome-debug.sh"
 echo "   bash scripts/connect-gemini.sh"
 echo ""
 echo "   # 或直接使用 AI skills:"
-echo "   node skills/AgentChat-WebExtended/index.js '你的问题'"
+echo "   node skills/AgentChat-OneWeb/index.js '你的问题'"

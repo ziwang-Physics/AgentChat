@@ -37,7 +37,7 @@
  * fallback, aria-label locale correction, modelVerify-based verification.
  * v6 history preserved: Angular CDK overlay text-fill polling.
  *
- * This is the CANONICAL implementation — used by WebExtended.
+ * This is the CANONICAL implementation — used by OneWeb.
  *
  * Usage:
  *   const { ensureProExtended } = require('../lib/geminiModelSwitch');

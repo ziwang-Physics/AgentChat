@@ -83,9 +83,9 @@ async def ask_structured(
                 # P1 FIX: the old correction prompt was JUST "你的上一个回复格式
                 # 有误：…" and relied on "复用同一个 session tab，LLM 能看到上下文"。
                 # That assumption is false: each session.ask() spawns a fresh
-                # WebExtended subprocess, and WebExtended's tab reuse does a
+                # OneWeb subprocess, and OneWeb's tab reuse does a
                 # page.goto(url) that STARTS A NEW CHAT (see findProviderPage's
-                # comment in AgentChat-WebExtended/index.js). The model receiving
+                # comment in AgentChat-OneWeb/index.js). The model receiving
                 # the retry had never seen the original prompt, the schema, or
                 # its "previous" reply — retries 2..N were guaranteed garbage.
                 # The correction must therefore be fully self-contained.

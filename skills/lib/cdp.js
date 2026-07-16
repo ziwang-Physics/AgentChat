@@ -1,7 +1,7 @@
 /**
  * Shared CDP utilities — connect, health check, and doctor diagnostics.
  *
- * Used by WebExtended and FreeSubAgent skills.
+ * Used by OneWeb and IndependentTasks skills.
  * Eliminates ~70 lines of duplicated connectWithRetry + doctorCheck logic.
  *
  * NOTE: connectWithRetry takes `chromium` as first arg (imported by caller)

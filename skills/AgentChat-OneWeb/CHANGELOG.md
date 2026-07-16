@@ -1,4 +1,4 @@
-# AgentChat-WebExtended Changelog
+# AgentChat-OneWeb Changelog
 
 ## 2026-07-16 (v11)
 - **[P0] Kimi 联网搜索「获取网页」阶段截断修复** (实测: 45s/960 chars 截断于「正在获取网页...」, 78s/1522 chars 截断于「获取网页 5 个网页」)。三层复合根因:
@@ -14,7 +14,7 @@
 - 新增 test_still_working.js — 57 条断言 (含两条实测截断 tail 的端到端回归、收缩回归、⚙ 上限、回声防护、8 provider 接线); test_gemini_selectors.js 19 条全部保持通过
 
 ## 2026-07-03
-- 新增 `--single` flag: 只尝试单个 provider 不级联，供 FreeSubAgent 的跨 worker 锁使用
+- 新增 `--single` flag: 只尝试单个 provider 不级联，供 IndependentTasks 的跨 worker 锁使用
 - checkOverlays(): 修掉一处死三元表达式 (`dismissable ? 'error' : 'error'`)
 - waitForCompletion() 的 stopWaitMode='detached' 分支 (Qwen): 补上已耗时间扣减，避免单 provider 超预算
 - Claude adapter postResponseHook: 去掉与 minResponseLength:5 矛盾的 30 字符门槛，短回答不再被误杀
@@ -26,4 +26,4 @@
 - Kimi 串行超时: selector 60s → 10s each, 45s 最坏 → 30s
 - Gemini Pro Extended 长 prompt 超时: stop button 可见=仍在思考, 延长等待+120s
 - Claude "Thinking" 占位符: 过滤 Thinking/Analyzing 空响应, 多重停止检测
-- Promise.allSettled: FreeSubAgent 单 worker 异常不再影响其他 worker
+- Promise.allSettled: IndependentTasks 单 worker 异常不再影响其他 worker
