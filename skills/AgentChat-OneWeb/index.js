@@ -214,10 +214,88 @@ function downloadFile(url, destPath, redirects) {
     });
 }
 
+/**
+ * v13: Identify an image payload and its extension from content-type and/or
+ * magic bytes. Returns null for anything that isn't an image — including the
+ * text/html error pages some endpoints serve with HTTP 200, which would
+ * otherwise be written to disk as a corrupt ".png".
+ */
+function sniffImageExt(buf, contentType) {
+    const ct = String(contentType || '').toLowerCase();
+    const CT_EXT = {
+        'image/png': 'png', 'image/jpeg': 'jpg', 'image/jpg': 'jpg',
+        'image/webp': 'webp', 'image/gif': 'gif', 'image/svg+xml': 'svg',
+        'image/avif': 'avif', 'image/bmp': 'bmp',
+    };
+    for (const k of Object.keys(CT_EXT)) if (ct.includes(k)) return CT_EXT[k];
+    if (!buf || buf.length < 12) return null;
+    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return 'png';
+    if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return 'jpg';
+    if (buf.slice(0, 4).toString('ascii') === 'GIF8') return 'gif';
+    if (buf.slice(0, 4).toString('ascii') === 'RIFF'
+        && buf.slice(8, 12).toString('ascii') === 'WEBP') return 'webp';
+    const head = buf.slice(0, 256).toString('utf8').trimStart().toLowerCase();
+    if (head.startsWith('<svg') || (head.startsWith('<?xml') && head.includes('<svg'))) return 'svg';
+    return null;
+}
+
+/**
+ * v13: Fetch an image THROUGH the provider tab's session instead of a naked
+ * https.get. Two tiers:
+ *
+ *   1. page.request.get() — Playwright's APIRequestContext runs Node-side
+ *      (no CORS) but carries the browser context's cookie jar. Handles the
+ *      common session-gated case (ChatGPT estuary, signed CDN URLs).
+ *   2. in-page fetch(credentials:'include') via page.evaluate — same-origin
+ *      requests that additionally validate fetch-metadata / anti-bot headers
+ *      only a real page context sends. Payload returns as base64 (a few MB
+ *      through CDP is fine).
+ *
+ * Both tiers sniff the payload — a 200 with an HTML error body is a FAILURE,
+ * not an image. Throws when neither tier yields a real image.
+ *
+ * @returns {Promise<{buffer: Buffer, ext: string|null, via: string}>}
+ */
+async function fetchViaBrowser(page, url) {
+    // Tier 1: context-cookie fetch, no CORS constraints
+    try {
+        const resp = await page.request.get(url, { timeout: 30_000 });
+        if (resp.ok()) {
+            const buffer = await resp.body();
+            const ext = sniffImageExt(buffer, resp.headers()['content-type']);
+            if (buffer.length && ext) return { buffer, ext, via: 'browser-session' };
+        }
+    } catch (_) { /* tier 2 */ }
+
+    // Tier 2: in-page fetch
+    const r = await page.evaluate(async (u) => {
+        const resp = await fetch(u, { credentials: 'include' });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const bytes = new Uint8Array(await resp.arrayBuffer());
+        let s = '';
+        const CH = 0x8000;
+        for (let i = 0; i < bytes.length; i += CH) {
+            s += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+        }
+        return { b64: btoa(s), type: resp.headers.get('content-type') || '' };
+    }, url);
+    const buffer = Buffer.from(r.b64, 'base64');
+    const ext = sniffImageExt(buffer, r.type);
+    if (!buffer.length || !ext) throw new Error('in-page fetch returned a non-image payload');
+    return { buffer, ext, via: 'in-page fetch' };
+}
+
 async function downloadAllImages(response, destDir, opts) {
     opts = opts || {};
     const urls = extractImageUrls(response);
     if (!urls.length) return { downloaded: [], response };
+
+    // v13: BROWSER-FIRST download when the provider tab is still available.
+    // Generated-image endpoints are routinely session-gated (ChatGPT's
+    // /backend-api/estuary/content?id=file_… returns 403 to a cookieless
+    // https.get) — the plain Node download can only ever fetch public CDNs.
+    const pg = opts.page;
+    const pageUsable = !!(pg && typeof pg.isClosed === 'function' && !pg.isClosed());
 
     const now = new Date();
     const pad = (n) => String(n).padStart(2, '0');
@@ -226,13 +304,33 @@ async function downloadAllImages(response, destDir, opts) {
 
     for (let i = 0; i < urls.length; i++) {
         const extMatch = urls[i].match(IMG_EXT_PATTERN);
-        const ext = extMatch ? extMatch[1] : 'png';
-        const filename = `ai-image-${ts}-${pad(i + 1)}.${ext}`;
-        const destPath = path.join(destDir, filename);
+        let ext = extMatch ? extMatch[1] : 'png';
+        let filename = `ai-image-${ts}-${pad(i + 1)}.${ext}`;
+        let destPath = path.join(destDir, filename);
         try {
-            await downloadFile(urls[i], destPath);
-            results.push({ url: urls[i], file: filename, status: 'ok', path: destPath });
-            log(`  📥 Downloaded: ${filename} (${destDir})`);
+            let via = 'direct';
+            let got = null;
+            if (pageUsable) {
+                got = await fetchViaBrowser(pg, urls[i]).catch((e) => {
+                    log(`  browser fetch failed (${e.message}) — falling back to direct download`);
+                    return null;
+                });
+            }
+            if (got) {
+                // Extensionless URLs (estuary et al.) defaulted to .png — fix
+                // the extension from the sniffed payload before writing.
+                if (!extMatch && got.ext && got.ext !== ext) {
+                    ext = got.ext;
+                    filename = `ai-image-${ts}-${pad(i + 1)}.${ext}`;
+                    destPath = path.join(destDir, filename);
+                }
+                fs.writeFileSync(destPath, got.buffer);
+                via = got.via;
+            } else {
+                await downloadFile(urls[i], destPath);
+            }
+            results.push({ url: urls[i], file: filename, status: 'ok', path: destPath, via });
+            log(`  📥 Downloaded: ${filename} via ${via} (${destDir})`);
         } catch (err) {
             results.push({ url: urls[i], file: filename, status: 'failed', error: err.message });
             log(`  ❌ Download failed: ${filename} — ${err.message}`);
@@ -261,7 +359,7 @@ async function downloadAllImages(response, destDir, opts) {
  * @param {string} prompt - The prompt to send
  * @param {InvocationContext} ctx - Per-invocation context (telemetry)
  * @param {object} options - { totalTimeout, providerTimeout, startFrom, singleAttempt }
- * @returns {{success: true, response: string, provider: string}} | {{success: false, reasons: object}}
+ * @returns {{success: true, response: string, provider: string, page: Page}} | {{success: false, reasons: object}}
  */
 async function tryAllProviders(browser, prompt, ctx, options = {}) {
     // POLICY: Never close the user's Chrome browser. We are a guest in their session.
@@ -459,7 +557,11 @@ async function tryAllProviders(browser, prompt, ctx, options = {}) {
         if (triedProviders.length > 1) {
             log(`  Fallback chain: ${triedProviders.join(' → ')} (${triedProviders.length - 1} provider(s) skipped)`);
         }
-        return { success: true, response: result.response, provider: provider.name };
+        // v13: hand the successful provider's page to the caller — image
+        // download must reuse this tab's session cookies (session-gated image
+        // endpoints 403 a cookieless download). May already be closed when
+        // --close was used; consumers must guard with page.isClosed().
+        return { success: true, response: result.response, provider: provider.name, page };
     }
 
     // All providers exhausted
@@ -659,7 +761,7 @@ async function main() {
             let finalResponse = result.response;
             if (downloadImages) {
                 try {
-                    const dlResult = await downloadAllImages(result.response, process.cwd());
+                    const dlResult = await downloadAllImages(result.response, process.cwd(), { page: result.page }); // v13: session-aware download
                     finalResponse = dlResult.response;
                 } catch (err) {
                     log(`Image download phase failed: ${err.message}`);
@@ -743,4 +845,12 @@ if (require.main === module) {
     });
 }
 
-module.exports = { PROVIDER_CHAIN };
+module.exports = {
+    PROVIDER_CHAIN,
+    // v13: exported for tests and for IndependentTasks' own post-processing
+    extractImageUrls,
+    downloadAllImages,
+    downloadFile,
+    fetchViaBrowser,
+    sniffImageExt,
+};

@@ -65,6 +65,15 @@ const flog = (key, msg) => { try { _tlog(key || 'factory', msg); } catch (_) {} 
 //       send was committed (click landed → server has the prompt), open a fresh page,
 //       re-navigate to the conversation URL, and try to extract the response instead
 //       of failing the provider (default: true). See salvageCommittedSend().
+//   captureImages?: boolean, // v13: scan the response DOM for generated <img>
+//       elements and append them as markdown image refs — innerText extraction
+//       drops them entirely otherwise (default: true). See collectResponseImages().
+//   imageScopeSelector?: string, // v13: closest-ancestor scope for the image scan,
+//       for providers that mount the <img> as a SIBLING of the matched text
+//       container (ChatGPT: '[data-message-author-role="assistant"]'). Default:
+//       the response element itself.
+//   imageMinPx?: number,      // v13: min rendered/natural px to count as content
+//       (filters avatars/icons; default: 64)
 //   customSend?: (page, editor) => Promise<boolean>, // override clickSend entirely
 //   preInputHook?: (page, cfg) => Promise<void>,   // e.g. Gemini Pro detection
 //   postResponseHook?: (page, rawText, cfg) => Promise<string>, // e.g. Qwen prefix strip
@@ -113,6 +122,9 @@ const DEFAULTS = {
     stillGeneratingMaxHoldMs: 90_000, // v11: ⚙ hold cap (see schema above)
     responseSelectorTimeout: 30_000,
     salvageOnContextLoss: true, // v12: recover committed sends from dead tab contexts
+    captureImages: true,        // v13: surface generated <img> URLs innerText drops
+    imageScopeSelector: null,   // v13: ancestor scope for the image scan (see schema)
+    imageMinPx: 64,             // v13: avatar/icon size filter
     stabilityWindow: 10_000,
     pollInterval: 2_000,
     minResponseLength: 10,
@@ -881,12 +893,95 @@ async function waitForCompletion(page, config, startTime, timeoutMs) {
  * "response" (silent-wrong-answer class). When the extracted text is
  * essentially the prompt itself, fail the EXTRACT stage instead.
  */
+/**
+ * v13: Collect generated-image URLs from the response DOM.
+ *
+ * innerText/textContent DROP every non-text node — an assistant turn whose
+ * payload is a generated <img> (ChatGPT/DALL·E, and increasingly others)
+ * loses the image without a trace: downstream extractImageUrls() then regex-
+ * scans plain text for <img>/markdown patterns that were never going to be
+ * there, and downloadAllImages() reports "(no images found in response)".
+ * Observed: a 1536×1024 DALL·E image silently reduced to the quota footer
+ * text that happened to share the container.
+ *
+ * Scope: the response element itself — or, when config.imageScopeSelector is
+ * set, its closest matching ancestor. Needed because some providers mount the
+ * <img> as a SIBLING of the text container the responseSelector matched
+ * (ChatGPT: <img> and <p> are both children of the assistant turn, while
+ * responseSelectors[0]='.markdown' matches only the text part).
+ *
+ * Filters:
+ *   - http(s) src only. blob:/data: srcs are counted and surfaced to the
+ *     caller for diagnostics (capturing those requires an in-page read and
+ *     is provider-specific — not attempted here), UI noise is not.
+ *   - rendered/natural size ≥ imageMinPx (default 64) — drops avatars,
+ *     favicons, emoji, and toolbar icons.
+ *
+ * @returns {Promise<{images: {src,alt,w,h}[], skippedNonHttp: number}>}
+ */
+async function collectResponseImages(responseEl, config) {
+    const scopeSel = config.imageScopeSelector || null;
+    const minPx = Number.isFinite(config.imageMinPx) ? config.imageMinPx : 64;
+    return responseEl.evaluate((el, args) => {
+        let scope = el;
+        if (args.scopeSel) {
+            try { scope = el.closest(args.scopeSel) || el; } catch (_) { /* keep el */ }
+        }
+        const imgs = scope.tagName === 'IMG'
+            ? [scope]
+            : Array.from(scope.querySelectorAll('img'));
+        const seen = new Set();
+        const images = [];
+        let skippedNonHttp = 0;
+        for (const img of imgs) {
+            const src = img.currentSrc || img.src || '';
+            if (!/^https?:\/\//i.test(src)) {
+                if (src) skippedNonHttp++; // blob:/data: — diagnosable, not silent
+                continue;
+            }
+            if (seen.has(src)) continue;
+            const rect = img.getBoundingClientRect();
+            const w = Math.max(rect.width || 0, img.naturalWidth || 0);
+            const h = Math.max(rect.height || 0, img.naturalHeight || 0);
+            if (w < args.minPx || h < args.minPx) continue; // avatar/icon noise
+            seen.add(src);
+            images.push({
+                src,
+                alt: String(img.alt || '').slice(0, 80),
+                w: Math.round(w),
+                h: Math.round(h),
+            });
+        }
+        return { images, skippedNonHttp };
+    }, { scopeSel, minPx });
+}
+
 async function extractResponse(page, responseEl, config, prompt) {
     let text = await responseEl.evaluate(el => (el.innerText || el.textContent || '').trim());
 
-    if (!text || text.length < config.minResponseLength) return null;
+    // v13: capture image URLs BEFORE the text-length gate — a pure-image
+    // response ("here's your picture", no prose) previously died right here
+    // as "Response too short or empty".
+    let images = [];
+    if (config.captureImages !== false) {
+        try {
+            const r = await collectResponseImages(responseEl, config);
+            // Shape guard — evaluate() runs in-page and its return crosses a
+            // serialization boundary; anything malformed degrades to "no
+            // images captured", never to a crashed extraction.
+            if (r && Array.isArray(r.images)) {
+                images = r.images.filter(im => im && typeof im.src === 'string');
+                if (r.skippedNonHttp > 0) {
+                    flog(config.key, `extract: ${r.skippedNonHttp} non-http image src(s) (blob:/data:) skipped — not capturable via URL`);
+                }
+            }
+        } catch (_) { /* best-effort — never fail extraction over image scan */ }
+    }
 
-    if (prompt && typeof prompt === 'string') {
+    const hasText = !!(text && text.length >= config.minResponseLength);
+    if (!hasText && images.length === 0) return null;
+
+    if (hasText && prompt && typeof prompt === 'string') {
         const norm = s => s.replace(/\s+/g, ' ').trim();
         const np = norm(prompt);
         const nt = norm(text);
@@ -894,6 +989,9 @@ async function extractResponse(page, responseEl, config, prompt) {
         // text (a user bubble carries the prompt plus at most a few UI
         // labels). "Repeat after me: X" style answers, where the response
         // is a small SUBSTRING of the prompt, must stay valid.
+        // v13 note: an echoed prompt means we attached to the USER bubble —
+        // any <img> collected there is a user upload, not our answer, so the
+        // conservative `return null` stands even when images are present.
         if (np.length >= 20) {
             const ratio = nt.length / np.length;
             const nearLen = ratio >= 0.9 && ratio <= 1.15;
@@ -904,13 +1002,31 @@ async function extractResponse(page, responseEl, config, prompt) {
     }
 
     // Post-response hook (e.g. Claude thinking filter)
-    if (config.postResponseHook) {
+    if (hasText && config.postResponseHook) {
         text = await config.postResponseHook(page, text, config);
     }
 
-    if (!text || text.length < config.minResponseLength) return null;
+    const finalTextOk = !!(text && text.length >= config.minResponseLength);
+    if (!finalTextOk && images.length === 0) return null;
 
-    return text;
+    let out = finalTextOk ? text : '';
+
+    // v13: append captured images as markdown image refs — the exact shape
+    // extractImageUrls()'s MARKDOWN_IMG_RE scans for (extension-agnostic, so
+    // ChatGPT's extensionless /backend-api/estuary/content?id=… URLs survive).
+    // Dedupe against URLs the text already carries verbatim.
+    const fresh = images.filter(im => !out.includes(im.src));
+    if (fresh.length) {
+        const mdSafe = (s) => String(s || '').replace(/[\[\]()\n\r]/g, ' ').replace(/\s+/g, ' ').trim();
+        const block = fresh.map((im, i) => {
+            const label = mdSafe(im.alt) || `generated-image-${i + 1}`;
+            return `![${label} ${im.w}x${im.h}](${im.src})`;
+        }).join('\n');
+        flog(config.key, `extract: captured ${fresh.length} image(s) from response DOM`);
+        out = out ? `${out}\n\n${block}` : block;
+    }
+
+    return out;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1435,6 +1551,8 @@ module.exports = {
     // v12: send-committed context-loss recovery
     isContextLostError,
     salvageCommittedSend,
+    // v13: response-DOM image capture
+    collectResponseImages,
     dumpEditorDiagnostics,
     dumpResponseDiagnostics,
     inputViaClipboard,

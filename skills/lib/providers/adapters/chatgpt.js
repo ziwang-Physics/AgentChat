@@ -76,6 +76,10 @@ module.exports = {
         '.agent-turn',
         '[class*="response"]',
     ],
+    // v13: DALL·E mounts the generated <img> as a SIBLING of the .markdown
+    // text container inside the assistant turn — scanning only the matched
+    // responseEl misses it. Widen the image scan to the enclosing turn.
+    imageScopeSelector: '[data-message-author-role="assistant"]',
     stabilityWindow: 10_000,
     minResponseLength: 5,
 
