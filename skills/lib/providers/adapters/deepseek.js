@@ -5,6 +5,19 @@
  */
 
 const { COMMON_CN_QUOTA_PATTERNS, COMMON_DISMISS_PATTERNS } = require('../../providerFactory');
+const { makeStillWorkingCheck } = require('../../stillWorking');
+
+// Hoisted so the still-working probe judges the same container family the
+// factory polls (see kimi.js v11 note).
+const RESPONSE_SELECTORS = [
+    '.ds-markdown',
+    '.ds-assistant-message-main-content',
+    '[class*="ds-markdown"]',
+    // v10: all three above share the ds- class family — one CSS-module
+    // rename kills them together. Generic tail is only reached when the
+    // specific ones fail (per-selector wait is budget-clamped upstream).
+    '[class*="markdown"]',
+];
 
 module.exports = {
     key: 'deepseek',
@@ -33,16 +46,15 @@ module.exports = {
     ],
     sendSelectors: ['.ds-button--primary.ds-button--filled.ds-button--circle'],
     sendFallback: 'Enter',
-    responseSelectors: [
-        '.ds-markdown',
-        '.ds-assistant-message-main-content',
-        '[class*="ds-markdown"]',
-        // v10: all three above share the ds- class family — one CSS-module
-        // rename kills them together. Generic tail is only reached when the
-        // specific ones fail (per-selector wait is budget-clamped upstream).
-        '[class*="markdown"]',
-    ],
+    responseSelectors: RESPONSE_SELECTORS,
     responseSelectorTimeout: 60_000,
     stabilityWindow: 12_000,
     minResponseLength: 5,
+
+    // v11: R1 深度思考 stalls text mid-fold ("思考中…", collapsing reasoning
+    // panel shrinks innerText) and 联网搜索 has the same fetch-silence windows
+    // as Kimi. Shared detector + factory shrink-fingerprint cover both;
+    // hold cap bounds any false positive.
+    stillGeneratingCheck: makeStillWorkingCheck({ responseSelectors: RESPONSE_SELECTORS }),
+    stillGeneratingMaxHoldMs: 150_000,
 };

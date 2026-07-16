@@ -8,6 +8,11 @@
  */
 
 const { COMMON_CN_QUOTA_PATTERNS, COMMON_DISMISS_PATTERNS } = require('../../providerFactory');
+const { makeStillWorkingCheck } = require('../../stillWorking');
+
+// Hoisted so the still-working probe judges the same container family the
+// factory polls (see kimi.js v11 note).
+const RESPONSE_SELECTORS = ['.markdown-prose', '.Markdown_markdown__', '[class*="markdown"]'];
 
 module.exports = {
     key: 'mimo',
@@ -66,7 +71,12 @@ module.exports = {
         }
         if (!sent) await page.keyboard.press('Enter');
     },
-    responseSelectors: ['.markdown-prose', '.Markdown_markdown__', '[class*="markdown"]'],
+    responseSelectors: RESPONSE_SELECTORS,
     stabilityWindow: 15_000,
     minResponseLength: 5,
+
+    // v11: no stop selectors are known for this UI — the shared detector is
+    // the only completion guard during slow reasoning; hold cap bounds it.
+    stillGeneratingCheck: makeStillWorkingCheck({ responseSelectors: RESPONSE_SELECTORS }),
+    stillGeneratingMaxHoldMs: 120_000,
 };

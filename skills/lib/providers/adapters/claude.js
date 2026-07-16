@@ -28,9 +28,13 @@ module.exports = {
         /announcement/i,
     ],
     editorSelectors: [
-        '[contenteditable="true"]',
+        // v11 ORDER FIX: the page-global '[contenteditable="true"]' was FIRST,
+        // so .first() could bind a rename field / dialog editable instead of
+        // the composer whenever one existed. Specific → generic; the generic
+        // entry stays as the last-resort tail.
         '.ProseMirror',
         'div[role="textbox"]',
+        '[contenteditable="true"]',
     ],
     validateEditor: async (loc) => {
         return loc.evaluate(el =>

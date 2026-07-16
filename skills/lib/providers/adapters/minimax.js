@@ -7,6 +7,14 @@
  */
 
 const { COMMON_CN_QUOTA_PATTERNS, COMMON_DISMISS_PATTERNS } = require('../../providerFactory');
+const { makeStillWorkingCheck } = require('../../stillWorking');
+
+// Hoisted so the still-working probe judges the same container family the
+// factory polls (see kimi.js v11 note).
+const RESPONSE_SELECTORS = [
+    '[class*="message-content"]', '[class*="matrix-markdown"]',
+    '.markdown-body', '[class*="answer"]', '[class*="response"]',
+];
 
 module.exports = {
     key: 'minimax',
@@ -21,10 +29,15 @@ module.exports = {
     ],
     sendSelectors: ['[aria-label="发送消息"]', '[class*="send"]', '[class*="submit"]'],
     sendFallback: 'Enter',
-    responseSelectors: [
-        '[class*="message-content"]', '[class*="matrix-markdown"]',
-        '.markdown-body', '[class*="answer"]', '[class*="response"]',
-    ],
+    responseSelectors: RESPONSE_SELECTORS,
     stabilityWindow: 10_000,
     minResponseLength: 5,
+
+    // v11: agent.minimaxi.com is an AGENTIC product — tool/browse phases stall
+    // text for tens of seconds exactly like Kimi 联网搜索 (same truncation
+    // class). No stopSelectors are known for this UI, so the shared detector
+    // (stop control / spinner / CN+EN status vocabulary) is the completion
+    // guard; false positives are bounded by the hold cap.
+    stillGeneratingCheck: makeStillWorkingCheck({ responseSelectors: RESPONSE_SELECTORS }),
+    stillGeneratingMaxHoldMs: 150_000,
 };

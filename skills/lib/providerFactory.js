@@ -51,7 +51,15 @@ const flog = (key, msg) => { try { _tlog(key || 'factory', msg); } catch (_) {} 
 //   stopWaitMode?: 'hidden' | 'detached', // how stop button disappears (default: 'hidden')
 //   stopBtnExtensionMs?: number, // extra wait if stop btn still visible after initial timeout (default: 0)
 //   completionAnchor?: string | string[], // explicit completion signal (e.g. Action Toolbar)
-//   stillGeneratingCheck?: (page) => Promise<boolean>, // reset stability clock if true
+//   stillGeneratingCheck?: (page, info?) => Promise<boolean>, // reset stability clock if true.
+//       info = { text, sinceChangeMs, elapsedMs } — text is what the poller just
+//       read from responseEl (so checks can classify it with ZERO extra CDP
+//       round-trips and are automatically aligned with the polled element).
+//   stillGeneratingMaxHoldMs?: number, // v11: cap on how long ⚙ resets may hold
+//       the stability clock past the last REAL text change (default: 90000).
+//       Bounds the cost of a false-positive check to seconds instead of the
+//       whole provider budget. Long-thinking providers raise it (Gemini 300s,
+//       Kimi 180s); it re-arms on every actual text change.
 //   responseSelectorTimeout?: number, // ms per response selector wait (default: 30000)
 //   customSend?: (page, editor) => Promise<boolean>, // override clickSend entirely
 //   preInputHook?: (page, cfg) => Promise<void>,   // e.g. Gemini Pro detection
@@ -98,6 +106,7 @@ const DEFAULTS = {
     stopBtnExtensionMs: 0,
     completionAnchor: null,
     stillGeneratingCheck: null,
+    stillGeneratingMaxHoldMs: 90_000, // v11: ⚙ hold cap (see schema above)
     responseSelectorTimeout: 30_000,
     stabilityWindow: 10_000,
     pollInterval: 2_000,
@@ -557,10 +566,26 @@ async function dumpResponseDiagnostics(page, log = () => {}) {
  *
  * Strategy: stop button detection → response element → stability polling.
  * Calls config.onProgress(status) if provided:
- *   '+' = text grew, '.' = stable, '?' = DOM error, '⚙' = still generating
+ *   '+' = text grew, '~' = text changed without growing (shrink / in-place
+ *   mutation — e.g. a collapsing tool/thinking card), '.' = stable,
+ *   '?' = DOM error, '⚙' = still generating
  *
  * v2 (2026-07-03): Added stopBtnExtensionMs, completionAnchor, stillGeneratingCheck
  * for Pro Extended Thinking support (Gemini bursty output, 3-5 min generation).
+ * v11 (2026-07): Phase-3 rework for agentic tool phases (Kimi 联网搜索 truncation):
+ *   - CHANGE detection, not GROWTH detection. The old `text.length > lastLen`
+ *     never reset the clock when innerText SHRANK — exactly what happens when
+ *     a search/thinking card collapses and the real answer starts streaming:
+ *     until the answer grows back past the card's peak length, every poll
+ *     looked "stable" and the window could expire MID-ANSWER. Fingerprint
+ *     (length + 80-char tail) now catches shrink and same-length mutation.
+ *   - stillGeneratingCheck now receives (page, { text, sinceChangeMs,
+ *     elapsedMs }) and is only consulted when the text did NOT change
+ *     (its verdict was ignored on growth anyway — saves one CDP round-trip
+ *     per growing poll).
+ *   - ⚙ resets are capped by stillGeneratingMaxHoldMs since the last REAL
+ *     text change, so a false-positive check degrades to a bounded delay
+ *     instead of burning the whole provider budget.
  */
 async function waitForCompletion(page, config, startTime, timeoutMs) {
     const { stopSelectors, stabilityWindow, pollInterval, onProgress } = config;
@@ -682,8 +707,18 @@ async function waitForCompletion(page, config, startTime, timeoutMs) {
 
     // Phase 3: stability polling
     const stillGeneratingCheck = config.stillGeneratingCheck || (async () => false);
+    // v11: ⚙ hold cap — see docstring. Re-arms on every REAL text change.
+    const stillGenMaxHold = Number.isFinite(config.stillGeneratingMaxHoldMs)
+        ? config.stillGeneratingMaxHoldMs
+        : 90_000;
     let lastLen = 0;
+    // v11 fingerprint: length + tail. Catches shrink (collapsing tool cards)
+    // and same-length in-place mutation, which pure length-growth missed.
+    // Initialized to the empty-text fingerprint so an empty responseEl on
+    // poll 1 does NOT count as a change (exact parity with the old code).
+    let lastFp = '0\u0000';
     let lastChangeTime = Date.now();
+    let lastRealChangeTime = Date.now(); // only ACTUAL text changes re-arm the ⚙ cap
     const deadline = startTime + timeoutMs;
 
     // ROBUSTNESS: distinguish a transient read miss (element re-rendered mid-poll)
@@ -703,18 +738,35 @@ async function waitForCompletion(page, config, startTime, timeoutMs) {
             const text = await responseEl.evaluate(el => el.innerText || el.textContent || '');
             consecutiveErrors = 0;
 
-            // Check if generation is still in progress (e.g. bursty Pro Extended output)
-            const stillGen = await stillGeneratingCheck(page).catch(() => false);
+            const now = Date.now();
+            const fp = text.length + '\u0000' + text.slice(-80);
 
-            if (text.length > lastLen) {
+            if (fp !== lastFp) {
+                // ANY change — growth, shrink (collapsing search/thinking
+                // card), or same-length mutation — means generation is live.
+                const grew = text.length > lastLen;
                 lastLen = text.length;
-                lastChangeTime = Date.now();
-                tick('+');
-            } else if (stillGen) {
-                lastChangeTime = Date.now(); // reset clock — generation ongoing
-                tick('⚙');
+                lastFp = fp;
+                lastChangeTime = now;
+                lastRealChangeTime = now;
+                tick(grew ? '+' : '~');
             } else {
-                tick('.');
+                // Text static — ask the adapter whether the UI still says
+                // "working" (tool phase, bursty thinking). Only consulted
+                // here: its verdict was ignored on change anyway, so this
+                // also saves one CDP round-trip per changing poll.
+                const stillGen = await stillGeneratingCheck(page, {
+                    text,
+                    sinceChangeMs: now - lastRealChangeTime,
+                    elapsedMs: now - startTime,
+                }).catch(() => false);
+
+                if (stillGen && (now - lastRealChangeTime) < stillGenMaxHold) {
+                    lastChangeTime = now; // reset clock — generation ongoing
+                    tick('⚙');
+                } else {
+                    tick('.');
+                }
             }
         } catch (e) {
             tick('?');
@@ -766,11 +818,35 @@ async function waitForCompletion(page, config, startTime, timeoutMs) {
 
 /**
  * Extract and validate response text from the response element.
+ *
+ * v11 ECHO GUARD: adapters whose responseSelectors end in generic tails
+ * ([class*="message"], [class*="message-content"], …) can have `.last()`
+ * resolve to the USER's own bubble when the assistant node mounts slowly —
+ * the poller then sees perfectly stable text and returns the PROMPT as the
+ * "response" (silent-wrong-answer class). When the extracted text is
+ * essentially the prompt itself, fail the EXTRACT stage instead.
  */
-async function extractResponse(page, responseEl, config) {
+async function extractResponse(page, responseEl, config, prompt) {
     let text = await responseEl.evaluate(el => (el.innerText || el.textContent || '').trim());
 
     if (!text || text.length < config.minResponseLength) return null;
+
+    if (prompt && typeof prompt === 'string') {
+        const norm = s => s.replace(/\s+/g, ' ').trim();
+        const np = norm(prompt);
+        const nt = norm(text);
+        // Only guard non-trivial prompts, and only reject NEAR-IDENTICAL
+        // text (a user bubble carries the prompt plus at most a few UI
+        // labels). "Repeat after me: X" style answers, where the response
+        // is a small SUBSTRING of the prompt, must stay valid.
+        if (np.length >= 20) {
+            const ratio = nt.length / np.length;
+            const nearLen = ratio >= 0.9 && ratio <= 1.15;
+            if (nt === np || (nearLen && (nt.includes(np) || np.includes(nt)))) {
+                return null; // echoed prompt → EXTRACT error upstream
+            }
+        }
+    }
 
     // Post-response hook (e.g. Claude thinking filter)
     if (config.postResponseHook) {
@@ -860,7 +936,11 @@ async function checkOverlays(page, C) {
             if (pat.test(text)) return { block: 'quota', detail: text.slice(0, 120) };
         }
         // Hard block: login
-        if (/(?:log\s*in|sign\s*in|登\s*录|请先登录|Continue with Google)/i.test(text)) {
+        // v11: '登录' needs a negative lookbehind — settings dialogs contain
+        // 退出登录 (logout) and marketing copy contains 免登录/已登录, all of
+        // which hard-blocked a perfectly signed-in provider as 'auth'.
+        // \b around log in / sign in similarly stops "Blogindex"-style hits.
+        if (/(?:\blog\s*in\b|\bsign\s*in\b|(?<!退出|已|免)登\s*录|请先登录|Continue with Google)/i.test(text)) {
             return { block: 'auth', detail: text.slice(0, 120) };
         }
 
@@ -1117,7 +1197,7 @@ function createProviderRunner(cfg) {
         // used to always collapse to reason='error' — losing the safety signal.
         let response;
         try {
-            response = await extractResponse(page, responseEl, C);
+            response = await extractResponse(page, responseEl, C, prompt);
         } catch (e) {
             return classifyError(e, STAGES.EXTRACT, C.key);
         }

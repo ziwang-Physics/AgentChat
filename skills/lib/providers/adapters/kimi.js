@@ -6,9 +6,29 @@
  *   - customSend handles Kimi's .send-button-container with disabled class detection
  *   - navPostDelay=4s for React SPA mount
  *   - postResponseHook rejects truncated opening lines (e.g. "我来从...")
+ *   - v11: stillGeneratingCheck = shared multi-signal detector (stillWorking.js)
+ *     covering the full 联网搜索 phase vocabulary (搜索→获取网页→阅读→整理),
+ *     stop-control + spinner DOM signals, bounded by stillGeneratingMaxHoldMs
  */
 
 const { COMMON_DISMISS_PATTERNS } = require('../../providerFactory');
+const { makeStillWorkingCheck } = require('../../stillWorking');
+
+// Hoisted so responseSelectors and stillGeneratingCheck are guaranteed to
+// judge the SAME container family. The old check hardcoded selector [0]
+// ('[class*="chat-content-item-assistant"]') and silently read the wrong
+// element — or nothing — whenever the factory had matched a fallback
+// selector, disabling the check exactly when the DOM had drifted.
+const RESPONSE_SELECTORS = [
+    '[class*="chat-content-item-assistant"]',
+    '[class*="segment-content"]',
+    '[class*="chat-content-list"] [class*="assistant"]',
+    // v10: all three above anchor on the chat-content/segment naming
+    // family — one rename kills them together. Generic tails are only
+    // reached when the specific ones fail (budget-clamped upstream).
+    '[class*="assistant"]',
+    '[class*="markdown"]',
+];
 
 module.exports = {
     key: 'kimi',
@@ -79,46 +99,38 @@ module.exports = {
         }
     },
 
-    responseSelectors: [
-        '[class*="chat-content-item-assistant"]',
-        '[class*="segment-content"]',
-        '[class*="chat-content-list"] [class*="assistant"]',
-        // v10: all three above anchor on the chat-content/segment naming
-        // family — one rename kills them together. Generic tails are only
-        // reached when the specific ones fail (budget-clamped upstream).
-        '[class*="assistant"]',
-        '[class*="markdown"]',
-    ],
+    responseSelectors: RESPONSE_SELECTORS,
     responseSelectorTimeout: 60_000,
     stabilityWindow: 8_000,
     minResponseLength: 10,
 
     // ── Prevent premature "done" during Kimi's multi-round search pauses ──
     // Kimi's search process: query → pause(5-30s fetch) → analysis → next query → ...
-    // During pauses the text stops growing, which fools the stability poller into
-    // declaring completion. This check resets the stability clock when Kimi is
-    // clearly between search rounds (text ends with a query or result count).
-    stillGeneratingCheck: async (page) => {
-        try {
-            // Use the same selector as responseSelectors[0] for consistency
-            const el = page.locator('[class*="chat-content-item-assistant"]').last();
-            const text = (await el.evaluate(el => el.innerText || el.textContent || '')
-                .catch(() => '')).trim();
-            if (!text || text.length < 50) return false;
+    // During pauses the text stops growing, which fools the stability poller
+    // into declaring completion.
+    //
+    // v11 FIX (field-observed truncations at "正在获取网页..." and
+    // "获取网页 5 个网页"): the old tail regexes here had a VOCABULARY GAP —
+    // 正在[搜索检索查询] does not contain 获取, and "N 个网页" is not
+    // "N 个结果" — so the entire 网页获取 phase was invisible to the check
+    // and every fetch longer than the 8s stabilityWindow truncated the run.
+    // They were also $-anchored against innerText tails (any trailing
+    // source-chip line broke the anchor) and hardcoded to selector [0].
+    //
+    // Replaced with the shared multi-signal detector (lib/stillWorking.js):
+    //   S1 zero-cost classification of the factory-polled text,
+    //   S2 visible stop/pause control (wording/locale independent),
+    //   S3 spinner inside — or busy tail of — the last response container,
+    // with the fetch-phase verbs (获取/抓取/阅读/浏览/…) and "N 个网页"
+    // count lines in the vocabulary. False positives are bounded by
+    // stillGeneratingMaxHoldMs below instead of burning the budget.
+    stillGeneratingCheck: makeStillWorkingCheck({ responseSelectors: RESPONSE_SELECTORS }),
 
-            const tail = text.slice(-300);
-            const STILL_SEARCHING = [
-                /搜索[网页关键词资料].*\s*$/,     // ends with a search query line
-                /\d+\s*[个条]\s*结[果].*\s*$/,    // ends with "X 个结果"
-                /让我[再继续].*\s*$/,             // "让我再搜索..."
-                /正在[搜索检索查询].*\s*$/,       // "正在搜索..."
-                /还需[要更].*\s*$/,               // "还需要更多..."
-            ];
-            return STILL_SEARCHING.some(p => p.test(tail));
-        } catch (_) {
-            return false;
-        }
-    },
+    // Multi-round search legitimately alternates fetch-silence and text
+    // bursts for minutes; the cap re-arms on every REAL text change, so it
+    // only bounds a terminal stall (e.g. a final answer whose last line
+    // happens to look like a status chip).
+    stillGeneratingMaxHoldMs: 180_000,
 
     // ── Reject truncated responses (Kimi occasionally stops mid-sentence) ──
     postResponseHook: async (_page, text) => {

@@ -300,6 +300,13 @@ module.exports = {
     stabilityWindow: 10_000,
     minResponseLength: 10,
 
+    // v11: the factory now caps ⚙ stability-clock holds at
+    // stillGeneratingMaxHoldMs since the last REAL text change (default 90s).
+    // Pro Extended can think 3-5 min with the stop button visible and ZERO
+    // text output — raise the cap so isStillGenerating() keeps holding the
+    // clock for the full thinking phase, exactly as before the cap existed.
+    stillGeneratingMaxHoldMs: 300_000,
+
     // ── Completion anchor: Action Toolbar = definitive "done" ──
     // GAP FIX: the DIAG log shows a zh-CN UI ("选项 A", "搜索网页"), but the old
     // list only covered zh-TW ("複製") and English — on Simplified-Chinese
