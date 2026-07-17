@@ -240,7 +240,7 @@ const EVALUATE_RACE_TIMEOUT_MS = 30_000;     // guard for a wedged CDP evaluate
 // be a prose-only obligation on the calling agent, the exact compliance class
 // lib/receipt.js exists to eliminate. telemetry.image_prompt_enhanced records it.
 const IMAGE_ENHANCE_INSTRUCTION =
-    '\n\n[系统指令] 请使用你的图片生成模型/工具（如 DALL·E、Imagen 等）主动生成上述要求的图片。' +
+    '\n\n[系统指令] 请使用你的图片生成模型/工具（如 nano banana pro/gpt image/flux.2/seedream等）主动生成上述要求的图片。' +
     '生成后请提供图片的下载链接或在回答中嵌入图片。如果无法生成图片，请明确说明原因。';
 
 /**
