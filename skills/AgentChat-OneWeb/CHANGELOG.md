@@ -1,5 +1,17 @@
 # AgentChat-OneWeb Changelog
 
+## 2026-07-17 (v14)
+- **[P0] 图片下载阶段挂死修复**: tier-2 页面内 `fetch()` 此前无任何超时——一个挂起的图片端点让 `page.evaluate` 永久 pending, CDP socket 维持事件循环, 进程永不退出 (无 stdout flush、无 receipt); IndependentTasks 的 SIGTERM 看门狗随后把**答案已经完成**的 run 杀成 provider 失败。现: 页内 AbortSignal 25s + evaluate 外层 Promise.race 30s (late loser 吞掉避免 unhandledRejection) + 全阶段 120s 预算 + 单响应 20 张上限 (超出 loud-fail)
+- **[P0] direct 下载 tier 补齐 payload 嗅探**: HTTP 200 返回的 HTML 错误页此前直接落盘为损坏 `.png` 且报 status:ok (v13 只修了 browser tier); 现 buffered + sniffImageExt 门禁, 并加 30MB 单张上限 (含 content-length 预检与流式计数中断)
+- **[P0/安全] 响应内 URL 属不可信输入**: 拒绝 loopback/link-local/RFC1918 目标 (`![x](http://127.0.0.1:9222/json/list)` 注入曾可把 CDP 调试端点元数据——含所有 tab 的 debug websocket URL——写入用户 cwd, 且带 cookie 的 browser tier 可探测内网); `AGENTCHAT_ALLOW_PRIVATE_IMAGE_HOSTS=1` 放行 (测试/内网用)。重定向目标同检
+- **[P1] 重定向修复**: 相对 `Location:`(极常见) 此前直接断链, 303 不跟随; 现 `new URL(loc, base)` 解析、仅跟 http(s)、上限 3 跳
+- **[P1] 空 `--only=`/`--from=` 冒充修复**: `''.includes('')` 恒真 → 空值经子串回退静默解析到 chain[0]=Gemini, 在 --single 下运行与调用方持锁 provider 不同的实例 (正是 loud-fail 要防的互斥破坏); 现 parse 期 exit 64 硬失败; 且 --single/--only 下 provider 名必须精确匹配 (子串便利仅保留在级联路径)
+- **[P1] stdout 机器契约去污染**: 管道模式下 "📥 Downloaded Images" 摘要不再追加进响应正文 (execute.js/SDK/MCP 逐字消费 stdout 作为 AI 回答, 摘要曾混入子代理裁决文本); 摘要改走 stderr, 计数入 receipt (`images_ok`/`images_failed`); TTY 人类直跑行为不变。downloadAllImages 返回值新增 `rawResponse`/`summary` 字段
+- **[P1] 用法错误 exit 1 → 64 (EX_USAGE)**: 与 ERR_NO_CDP 解除冲突 (execute.js 的 conflation guard 所述问题), 且用法错误现在也产生 receipt
+- **[P1] providerFactory 检查顺序**: overlay 处理提前到 body 级 quota 扫描之前——可关闭的升级弹窗 ("请升级…" 命中 COMMON_CN_QUOTA_PATTERNS) 曾把可用 provider 误判为 quota 整轮跳过
+- **[P2] 未知 `--flag` WARN 而非静默丢弃** (--locale 空转/--keep-tabs 进 prompt 的 bug 类根除); 无效 timeout 值 WARN; `--image` flag: 生图增强指令由 index.js 进程内追加 (SKILL.md §1 从 prose 约束改为机器可验证), telemetry 记 `image_prompt_enhanced`
+- **[P2] 其他**: 下载文件名加 pid (并发 worker 同秒覆盖) + `wx` 写入防клobber; DIRECT_URL_RE query 段不再吞尾随 `)`; smokeTest 空 context 给修复指引而非 TypeError→exit 4; 顶层 require 守卫 (playwright-core 未装 / 只拷了 OneWeb 没拷 skills/lib 时给出确切修复命令); stdout EPIPE 守卫 (父进程先死不再在 exit-0 receipt 后崩成 exit 4); `~/start-chrome-debug.sh` 路径漂移修正; test_providers_v10.js 硬编码 `/home/wangzi` 绝对路径改 `__dirname` (可移植); 新增 6 组 v14 回归断言 (test_v13_image_capture.js 15/15)
+
 ## 2026-07-16 (v11)
 - **[P0] Kimi 联网搜索「获取网页」阶段截断修复** (实测: 45s/960 chars 截断于「正在获取网页...」, 78s/1522 chars 截断于「获取网页 5 个网页」)。三层复合根因:
   1. kimi.js `stillGeneratingCheck` 词表缺口 — `正在[搜索检索查询]` 不含「获取」, `\d+个结[果]` 不匹配「N 个网页」→ 抓取阶段 (5-30s 静默) 对检测器完全不可见, 8s stabilityWindow 到期即误判完成

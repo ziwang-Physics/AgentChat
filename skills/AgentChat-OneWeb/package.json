@@ -1,7 +1,7 @@
 {
   "name": "agentchat-web-extended",
-  "version": "1.1.0",
-  "description": "Multi-provider AI CDP bridge with automatic fallback: Gemini → ChatGPT → Claude → Qwen → Kimi → MiniMax",
+  "version": "1.2.0",
+  "description": "Multi-provider AI CDP bridge with automatic fallback: Gemini → ChatGPT → Claude → Qwen → Kimi → MiniMax → MiMo → DeepSeek",
   "main": "index.js",
   "bin": {
     "ai-fallback": "index.js"

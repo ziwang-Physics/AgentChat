@@ -27,14 +27,41 @@
  *   5 - All providers rate-limited (ERR_RATE_LIMITED)
  *   9 - All providers exhausted, mixed reasons (ERR_ALL_EXHAUSTED)
  *  10 - Total timeout reached (ERR_TIMEOUT)
+ *  64 - Usage error (empty prompt / malformed flag) — EX_USAGE. Was 1, which
+ *       collided with ERR_NO_CDP and read as "browser down" to orchestrators.
  */
 
-const { chromium } = require('playwright-core');
+// ── Guarded requires (v14) ──
+// Two install-time failure modes previously surfaced as a raw MODULE_NOT_FOUND
+// stack with no fix attached:
+//   1. playwright-core missing — user skipped `npm install` in the skill dir.
+//   2. ../lib missing — user copied ONLY AgentChat-OneWeb/ into
+//      ~/.claude/skills/ without the sibling skills/lib/ tree (all shared
+//      pipeline code lives there). Both now fail with the exact command.
+let chromium;
+try {
+    ({ chromium } = require('playwright-core'));
+} catch (e) {
+    process.stderr.write(
+        '[fallback] FATAL: playwright-core not installed.\n' +
+        `[fallback]   fix: cd ${__dirname} && npm install\n`);
+    process.exit(4);
+}
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const http = require('http');
 
+try {
+    require.resolve('../lib/errors');
+} catch (e) {
+    process.stderr.write(
+        '[fallback] FATAL: shared library ../lib not found.\n' +
+        '[fallback]   AgentChat-OneWeb requires the sibling skills/lib/ directory.\n' +
+        '[fallback]   fix: copy the WHOLE skills/ tree (AgentChat-OneWeb/ + lib/) so that\n' +
+        `[fallback]        ${path.resolve(__dirname, '..', 'lib')} exists.\n`);
+    process.exit(4);
+}
 const { ProviderError, classifyError } = require('../lib/errors');
 const { createProviderRunner, appendWithRotation } = require('../lib/providerFactory');
 const { makeRunId, emitReceipt } = require('../lib/receipt');
@@ -98,6 +125,14 @@ class InvocationContext {
                 provider_used: this.telemetry.provider_used,
                 providers_tried: this.telemetry.providers_tried,
                 total_ms: this.telemetry.total_ms,
+                // v14: image-download results ride in the receipt — in piped
+                // (non-TTY) mode the markdown summary no longer pollutes the
+                // stdout machine contract, so this is the machine-readable
+                // place a calling agent learns whether downloads happened.
+                ...(this.telemetry.images_ok !== undefined
+                    ? { images_ok: this.telemetry.images_ok,
+                        images_failed: this.telemetry.images_failed }
+                    : {}),
             },
             stream: 'stderr',
         });
@@ -181,7 +216,60 @@ function findProviderPage(context, provider) {
 const IMG_EXT_PATTERN = /\.(png|jpg|jpeg|gif|webp|svg)(\?.*)?$/i;
 const MARKDOWN_IMG_RE = /!\[.*?\]\((https?:\/\/[^\s)]+)\)/g;
 const HTML_IMG_RE = /<img[^>]+src=["'](https?:\/\/[^\s"']+)["'][^>]*>/gi;
-const DIRECT_URL_RE = /https?:\/\/[^\s"'`<>]+\.(?:png|jpg|jpeg|gif|webp|svg)(?:\?[^\s"'`<>]*)?/gi;
+// v14: `)` excluded from the query char class — `(see https://x/a.png?q=1)`
+// previously captured the closing paren into the URL and 404'd the download.
+const DIRECT_URL_RE = /https?:\/\/[^\s"'`<>]+\.(?:png|jpg|jpeg|gif|webp|svg)(?:\?[^\s"'`<>)]*)?/gi;
+
+// ── v14: download-phase hard limits ──
+// The download phase runs AFTER the provider chain, OUTSIDE totalTimeout, on
+// URLs extracted from UNTRUSTED text (the web AI's response — reachable by
+// prompt injection). Before v14 it had: no image-count cap, no byte cap, no
+// overall budget, and tier-2's in-page fetch had NO timeout at all — a single
+// hanging endpoint stalled page.evaluate forever, the CDP socket kept the
+// event loop alive, and the process NEVER exited: no stdout flush, no receipt.
+// Under IndependentTasks the SIGTERM watchdog then killed a run whose ANSWER
+// was already complete — a provider failure manufactured out of a stuck JPEG.
+const MAX_IMAGES_PER_RESPONSE = 20;          // urls beyond this are skipped, loudly
+const MAX_IMAGE_BYTES = 30 * 1024 * 1024;    // per-image payload cap
+const DOWNLOAD_PHASE_BUDGET_MS = 120_000;    // whole-phase deadline
+const IN_PAGE_FETCH_TIMEOUT_MS = 25_000;     // tier-2 fetch AbortSignal
+const EVALUATE_RACE_TIMEOUT_MS = 30_000;     // guard for a wedged CDP evaluate
+
+// v14: canonical image-generation enhancement (SKILL.md 图片协议 §1). Appended
+// by index.js itself when --image is passed — prompt-side enhancement used to
+// be a prose-only obligation on the calling agent, the exact compliance class
+// lib/receipt.js exists to eliminate. telemetry.image_prompt_enhanced records it.
+const IMAGE_ENHANCE_INSTRUCTION =
+    '\n\n[系统指令] 请使用你的图片生成模型/工具（如 DALL·E、Imagen 等）主动生成上述要求的图片。' +
+    '生成后请提供图片的下载链接或在回答中嵌入图片。如果无法生成图片，请明确说明原因。';
+
+/**
+ * v14: Refuse to fetch response-supplied URLs that point at loopback,
+ * link-local, or RFC1918 hosts. Attack shape: a prompt-injected
+ * `![x](http://127.0.0.1:9222/json/list)` in the web AI's answer would make
+ * the direct tier write the CDP target list (debug websocket URLs for every
+ * tab of the user's browser) into a file in the user's cwd — and the
+ * credentialed browser tiers could probe LAN endpoints with session cookies.
+ * Literal-IP/hostname check only (DNS rebinding is out of scope for a CLI
+ * that downloads a handful of images). Tests / intranet use can opt out via
+ * AGENTCHAT_ALLOW_PRIVATE_IMAGE_HOSTS=1.
+ */
+function isBlockedImageHost(url) {
+    if (process.env.AGENTCHAT_ALLOW_PRIVATE_IMAGE_HOSTS === '1') return false;
+    try {
+        const u = new URL(url);
+        if (!/^https?:$/.test(u.protocol)) return true;
+        const h = u.hostname.toLowerCase();
+        if (h === 'localhost' || h === '::1' || h === '[::1]' || h === '0.0.0.0') return true;
+        if (/^127\./.test(h)) return true;                    // loopback
+        if (/^169\.254\./.test(h)) return true;               // link-local / cloud metadata
+        if (/^10\./.test(h) || /^192\.168\./.test(h)) return true;   // RFC1918
+        if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;       // RFC1918
+        return false;
+    } catch (_) {
+        return true; // unparseable URL — never fetch blind
+    }
+}
 
 function extractImageUrls(text) {
     const urls = new Set();
@@ -191,27 +279,81 @@ function extractImageUrls(text) {
     return [...urls];
 }
 
-function downloadFile(url, destPath, redirects) {
+/**
+ * v14: Direct (cookieless) fetch, buffered with hard caps. Fixes three holes
+ * the streaming version had:
+ *   1. Relative `Location:` redirects (`/path` — extremely common) were passed
+ *      straight back into http.get and died with a bogus request; 303 wasn't
+ *      followed at all. Now resolved against the current URL; only http(s)
+ *      targets are followed; redirect targets re-pass the blocked-host check.
+ *   2. No size cap — a hostile/misbehaving endpoint could stream gigabytes to
+ *      disk. Aborts past MAX_IMAGE_BYTES (content-length checked first).
+ *   3. No payload sniffing — an HTML error page served with HTTP 200 was
+ *      written to disk as a corrupt ".png" and reported status:'ok' (the exact
+ *      class v13 fixed for the BROWSER tiers, left open on this one).
+ *
+ * @returns {Promise<{buffer: Buffer, contentType: string}>}
+ */
+function fetchDirectBuffered(url, redirects) {
     redirects = redirects || 0;
     if (redirects > 3) return Promise.reject(new Error('Too many redirects'));
     return new Promise((resolve, reject) => {
         const proto = url.startsWith('https') ? https : http;
         const req = proto.get(url, { timeout: 30000 }, (res) => {
-            if ([301, 302, 307, 308].includes(res.statusCode)) {
+            if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+                res.resume(); // drain — free the socket
                 const loc = res.headers.location;
-                if (loc) return downloadFile(loc, destPath, redirects + 1).then(resolve, reject);
+                if (!loc) return reject(new Error(`HTTP ${res.statusCode} redirect without Location`));
+                let next;
+                try { next = new URL(loc, url).toString(); } // relative Location support
+                catch (_) { return reject(new Error(`Unparseable redirect target: ${loc.slice(0, 80)}`)); }
+                if (!/^https?:/i.test(next)) return reject(new Error('Redirect to non-http(s) target'));
+                if (isBlockedImageHost(next)) return reject(new Error('Redirect to blocked host'));
+                return fetchDirectBuffered(next, redirects + 1).then(resolve, reject);
             }
             if (res.statusCode !== 200) {
+                res.resume();
                 return reject(new Error(`HTTP ${res.statusCode}`));
             }
-            const file = fs.createWriteStream(destPath);
-            res.pipe(file);
-            file.on('finish', () => { file.close(); resolve(destPath); });
-            file.on('error', reject);
+            const declared = parseInt(res.headers['content-length'] || '0', 10);
+            if (declared > MAX_IMAGE_BYTES) {
+                req.destroy();
+                return reject(new Error(`Image exceeds ${MAX_IMAGE_BYTES} byte cap (content-length ${declared})`));
+            }
+            const chunks = [];
+            let total = 0;
+            res.on('data', (c) => {
+                total += c.length;
+                if (total > MAX_IMAGE_BYTES) {
+                    req.destroy();
+                    return reject(new Error(`Image exceeds ${MAX_IMAGE_BYTES} byte cap`));
+                }
+                chunks.push(c);
+            });
+            res.on('end', () => resolve({
+                buffer: Buffer.concat(chunks),
+                contentType: res.headers['content-type'] || '',
+            }));
+            res.on('error', reject);
         });
         req.on('error', reject);
         req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
     });
+}
+
+/**
+ * Back-compat wrapper (was the streaming direct downloader). Now buffered,
+ * capped, redirect-correct, and sniff-gated: refuses to write a payload that
+ * isn't a real image.
+ */
+async function downloadFile(url, destPath, redirects) {
+    const { buffer, contentType } = await fetchDirectBuffered(url, redirects || 0);
+    const ext = sniffImageExt(buffer, contentType);
+    if (!buffer.length || !ext) {
+        throw new Error(`non-image payload (${(contentType || 'unknown type').slice(0, 40)})`);
+    }
+    fs.writeFileSync(destPath, buffer);
+    return destPath;
 }
 
 /**
@@ -262,23 +404,41 @@ async function fetchViaBrowser(page, url) {
         const resp = await page.request.get(url, { timeout: 30_000 });
         if (resp.ok()) {
             const buffer = await resp.body();
+            if (buffer.length > MAX_IMAGE_BYTES) throw new Error(`image exceeds ${MAX_IMAGE_BYTES} byte cap`);
             const ext = sniffImageExt(buffer, resp.headers()['content-type']);
             if (buffer.length && ext) return { buffer, ext, via: 'browser-session' };
         }
     } catch (_) { /* tier 2 */ }
 
-    // Tier 2: in-page fetch
-    const r = await page.evaluate(async (u) => {
-        const resp = await fetch(u, { credentials: 'include' });
+    // Tier 2: in-page fetch.
+    // v14: BOUNDED. The old fetch had no AbortSignal — a hanging endpoint kept
+    // page.evaluate pending forever, the CDP socket kept the event loop alive,
+    // and the whole invocation hung post-answer (no stdout flush, no receipt).
+    // Two layers: AbortSignal.timeout in-page, plus a Promise.race around the
+    // evaluate itself in case the CDP round-trip is what's wedged.
+    const evalPromise = page.evaluate(async ({ u, fetchTimeout, maxBytes }) => {
+        const opts = { credentials: 'include' };
+        try { if (AbortSignal && AbortSignal.timeout) opts.signal = AbortSignal.timeout(fetchTimeout); } catch (_) {}
+        const resp = await fetch(u, opts);
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const bytes = new Uint8Array(await resp.arrayBuffer());
+        if (bytes.length > maxBytes) throw new Error('image exceeds byte cap');
         let s = '';
         const CH = 0x8000;
         for (let i = 0; i < bytes.length; i += CH) {
             s += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
         }
         return { b64: btoa(s), type: resp.headers.get('content-type') || '' };
-    }, url);
+    }, { u: url, fetchTimeout: IN_PAGE_FETCH_TIMEOUT_MS, maxBytes: MAX_IMAGE_BYTES });
+    evalPromise.catch(() => {}); // a late loser must not become an unhandledRejection
+    const r = await Promise.race([
+        evalPromise,
+        new Promise((_, rej) => {
+            const t = setTimeout(() => rej(new Error('in-page fetch evaluate timed out')),
+                EVALUATE_RACE_TIMEOUT_MS);
+            if (typeof t.unref === 'function') t.unref(); // never keep the process alive
+        }),
+    ]);
     const buffer = Buffer.from(r.b64, 'base64');
     const ext = sniffImageExt(buffer, r.type);
     if (!buffer.length || !ext) throw new Error('in-page fetch returned a non-image payload');
@@ -287,8 +447,23 @@ async function fetchViaBrowser(page, url) {
 
 async function downloadAllImages(response, destDir, opts) {
     opts = opts || {};
-    const urls = extractImageUrls(response);
-    if (!urls.length) return { downloaded: [], response };
+    let urls = extractImageUrls(response);
+    if (!urls.length) {
+        return { downloaded: [], failed: [], response, rawResponse: response, summary: '' };
+    }
+
+    // v14: hard limits — see the constants block. Everything past the cap or
+    // the deadline is reported loudly as failed, never silently dropped.
+    const results = [];
+    if (urls.length > MAX_IMAGES_PER_RESPONSE) {
+        log(`  ⚠ ${urls.length} image URLs in response — capping at ${MAX_IMAGES_PER_RESPONSE}`);
+        for (const u of urls.slice(MAX_IMAGES_PER_RESPONSE)) {
+            results.push({ url: u, file: null, status: 'failed', error: `skipped: over ${MAX_IMAGES_PER_RESPONSE}-image cap` });
+        }
+        urls = urls.slice(0, MAX_IMAGES_PER_RESPONSE);
+    }
+    const budgetMs = Number.isFinite(opts.budgetMs) ? opts.budgetMs : DOWNLOAD_PHASE_BUDGET_MS;
+    const deadline = Date.now() + budgetMs;
 
     // v13: BROWSER-FIRST download when the provider tab is still available.
     // Generated-image endpoints are routinely session-gated (ChatGPT's
@@ -299,16 +474,29 @@ async function downloadAllImages(response, destDir, opts) {
 
     const now = new Date();
     const pad = (n) => String(n).padStart(2, '0');
+    // v14: pid in the filename — concurrent invocations (IndependentTasks runs
+    // up to 8 workers sharing the orchestrator's cwd) landing in the same
+    // second used to collide on ts+seq and silently overwrite each other.
     const ts = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-    const results = [];
+    const tag = `${ts}-${process.pid}`;
 
     for (let i = 0; i < urls.length; i++) {
         const extMatch = urls[i].match(IMG_EXT_PATTERN);
         let ext = extMatch ? extMatch[1] : 'png';
-        let filename = `ai-image-${ts}-${pad(i + 1)}.${ext}`;
-        let destPath = path.join(destDir, filename);
+        const nameFor = (e) => `ai-image-${tag}-${pad(i + 1)}.${e}`;
+        let filename = nameFor(ext);
+
+        if (Date.now() > deadline) {
+            results.push({ url: urls[i], file: filename, status: 'failed', error: `skipped: ${budgetMs}ms download budget exhausted` });
+            continue;
+        }
+        if (isBlockedImageHost(urls[i])) {
+            results.push({ url: urls[i], file: filename, status: 'failed', error: 'blocked host (loopback/link-local/private range)' });
+            log(`  ❌ Download refused: ${urls[i].slice(0, 80)} — blocked host`);
+            continue;
+        }
+
         try {
-            let via = 'direct';
             let got = null;
             if (pageUsable) {
                 got = await fetchViaBrowser(pg, urls[i]).catch((e) => {
@@ -316,21 +504,35 @@ async function downloadAllImages(response, destDir, opts) {
                     return null;
                 });
             }
-            if (got) {
-                // Extensionless URLs (estuary et al.) defaulted to .png — fix
-                // the extension from the sniffed payload before writing.
-                if (!extMatch && got.ext && got.ext !== ext) {
-                    ext = got.ext;
-                    filename = `ai-image-${ts}-${pad(i + 1)}.${ext}`;
-                    destPath = path.join(destDir, filename);
+            if (!got) {
+                // v14: the direct tier now returns a sniffed buffer too — both
+                // tiers share one write path, so an HTML-as-200 error page can
+                // no longer be written to disk as a corrupt ".png".
+                const { buffer, contentType } = await fetchDirectBuffered(urls[i]);
+                const sniffed = sniffImageExt(buffer, contentType);
+                if (!buffer.length || !sniffed) {
+                    throw new Error(`non-image payload (${(contentType || 'unknown type').slice(0, 40)})`);
                 }
-                fs.writeFileSync(destPath, got.buffer);
-                via = got.via;
-            } else {
-                await downloadFile(urls[i], destPath);
+                got = { buffer, ext: sniffed, via: 'direct' };
             }
-            results.push({ url: urls[i], file: filename, status: 'ok', path: destPath, via });
-            log(`  📥 Downloaded: ${filename} via ${via} (${destDir})`);
+            // Extensionless URLs (estuary et al.) defaulted to .png — fix the
+            // extension from the sniffed payload before writing (both tiers).
+            if (got.ext && got.ext !== ext) {
+                ext = got.ext;
+                filename = nameFor(ext);
+            }
+            let destPath = path.join(destDir, filename);
+            try {
+                fs.writeFileSync(destPath, got.buffer, { flag: 'wx' }); // never clobber
+            } catch (e) {
+                if (e && e.code === 'EEXIST') {
+                    filename = `ai-image-${tag}-${pad(i + 1)}-${Math.random().toString(36).slice(2, 6)}.${ext}`;
+                    destPath = path.join(destDir, filename);
+                    fs.writeFileSync(destPath, got.buffer, { flag: 'wx' });
+                } else { throw e; }
+            }
+            results.push({ url: urls[i], file: filename, status: 'ok', path: destPath, via: got.via });
+            log(`  📥 Downloaded: ${filename} via ${got.via} (${destDir})`);
         } catch (err) {
             results.push({ url: urls[i], file: filename, status: 'failed', error: err.message });
             log(`  ❌ Download failed: ${filename} — ${err.message}`);
@@ -344,8 +546,11 @@ async function downloadAllImages(response, destDir, opts) {
     if (failed.length) summary += failed.map(r => `❌ \`${r.file}\` — ${r.error}`).join('\n') + '\n';
     if (!ok.length && !failed.length) summary += '(no images found in response)\n';
 
+    // v14: `response` keeps the historical augmented shape (human/TTY view and
+    // existing tests); `rawResponse` is the untouched machine contract main()
+    // now emits when stdout is a pipe. `summary` lets callers place it themselves.
     const augmentedResponse = response + summary;
-    return { downloaded: ok, failed, response: augmentedResponse };
+    return { downloaded: ok, failed, response: augmentedResponse, rawResponse: response, summary };
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -374,18 +579,27 @@ async function tryAllProviders(browser, prompt, ctx, options = {}) {
 
     // Determine starting index
     let startIdx = 0;
-    if (options.startFrom) {
-        const searchName = options.startFrom.toLowerCase();
+    // v14: trim + emptiness guard. `''.includes('')` is true for EVERY string,
+    // so a blank --only=/--from= (shell interpolation of an unset variable is
+    // the typical source) previously resolved to chain index 0 via the
+    // substring fallback — silently running GEMINI under --single while the
+    // caller's lock is held on whatever provider it THOUGHT it named.
+    const startFromRaw = String(options.startFrom || '').trim();
+    if (startFromRaw) {
+        const searchName = startFromRaw.toLowerCase();
         // MATCHING FIX: exact key/name match first. Pure substring matching
         // resolved --only=mini to GEMINI ("gemini".includes("mini") wins by
         // chain order before MiniMax is ever considered) — under --single that
         // silently runs a different provider than the one the caller named
         // (and locked). Substring stays as a convenience fallback for humans
-        // typing --from=gpt etc.
+        // typing --from=gpt etc. — but ONLY on the cascading path: under
+        // --single/--only (v14) a non-exact name fails loudly below, because
+        // an ambiguous substring resolving to the wrong provider breaks the
+        // caller's mutual exclusion exactly like an unknown name does.
         startIdx = PROVIDER_CHAIN.findIndex(p =>
             p.key === searchName || p.name.toLowerCase() === searchName
         );
-        if (startIdx === -1) startIdx = PROVIDER_CHAIN.findIndex(p =>
+        if (startIdx === -1 && !options.singleAttempt) startIdx = PROVIDER_CHAIN.findIndex(p =>
             p.key.includes(searchName) || p.name.toLowerCase().includes(searchName)
         );
         if (startIdx === -1) {
@@ -399,14 +613,14 @@ async function tryAllProviders(browser, prompt, ctx, options = {}) {
             // singleAttempt) may fall back to starting from the top.
             if (options.singleAttempt) {
                 const valid = PROVIDER_CHAIN.map(p => p.key).join(', ');
-                log(`ERROR: --only/--single named unknown provider "${options.startFrom}". Valid: ${valid}`);
+                log(`ERROR: --only/--single named unknown or ambiguous provider "${startFromRaw}". Valid (exact): ${valid}`);
                 return {
                     success: false,
-                    reasons: { [options.startFrom]: { reason: 'error',
-                        error_details: { message: `unknown provider: ${options.startFrom}` } } },
+                    reasons: { [startFromRaw]: { reason: 'error',
+                        error_details: { message: `unknown provider: ${startFromRaw}` } } },
                 };
             }
-            log(`WARN: Provider "${options.startFrom}" not found in chain. Starting from beginning.`);
+            log(`WARN: Provider "${startFromRaw}" not found in chain. Starting from beginning.`);
             startIdx = 0;
         } else {
             log(`Starting from provider index ${startIdx} ("${PROVIDER_CHAIN[startIdx].name}")`);
@@ -592,6 +806,14 @@ async function tryAllProviders(browser, prompt, ctx, options = {}) {
 async function smokeTest(browser) {
     log('Running smoke test — checking provider reachability...');
     const context = browser.contexts()[0];
+    // v14: CDP can be reachable with ZERO contexts (headless shell, freshly
+    // crashed profile). The old code TypeError'd into exit 4 (ERR_INTERNAL);
+    // the actual fix is the same as no-CDP: restart the debug browser.
+    if (!context) {
+        log('❌ CDP reachable but no browser context exists.');
+        log('   fix: bash scripts/start-chrome-debug.sh');
+        return;
+    }
 
     for (const provider of PROVIDER_CHAIN) {
         let page;
@@ -644,6 +866,21 @@ async function main() {
     let keepTabs = true; // Always keep tabs — never close user's browser
     let singleAttempt = false; // --single: try exactly one provider, no cascade
     let downloadImages = true; // download images from response to cwd (--no-download-images to disable)
+    let imageIntent = false;   // v14 --image: append IMAGE_ENHANCE_INSTRUCTION in-process
+
+    const USAGE =
+        'Usage: node index.js [--timeout=MS] [--from=NAME] [--only=NAME] [--single] [--image] [--locale=xx_XX] [--keep-tabs] [--close] [--no-download-images] [--smoke] [--doctor] "Your prompt"\n' +
+        '       echo "prompt" | node index.js [flags]';
+    // v14: usage errors exit 64 (BSD EX_USAGE), WITH a receipt. They used to
+    // exit 1 — colliding with ERR_NO_CDP, so a caller-side bug (empty prompt)
+    // read as "browser down" and could terminally abort an orchestrator's
+    // whole chain (see the conflation guard in lib/execute.js).
+    const usageExit = (msg) => {
+        if (msg) log(`ERROR: ${msg}`);
+        console.error(USAGE);
+        ctx.recordTelemetry(64);
+        process.exit(64);
+    };
 
     // Timeouts are milliseconds. Values < 10000 are almost certainly seconds
     // typed by a human (--timeout=900) — normalize instead of silently giving
@@ -669,9 +906,11 @@ async function main() {
         } else if (a.startsWith('--timeout=')) {
             const v = parseInt(a.split('=')[1], 10);
             if (!isNaN(v) && v > 0) customTimeout = normalizeTimeout(v);
+            else log(`WARN: ignoring invalid ${a} (expected a positive integer in ms)`);
         } else if (a.startsWith('--timeout-per-provider=')) {
             const v = parseInt(a.split('=')[1], 10);
             if (!isNaN(v) && v > 0) customProvTimeout = normalizeTimeout(v);
+            else log(`WARN: ignoring invalid ${a} (expected a positive integer in ms)`);
         } else if (a === '--keep-tabs') {
             keepTabs = true;
         } else if (a === '--close' || a === '--close-browser') {
@@ -679,13 +918,21 @@ async function main() {
             keepTabs = false;
         } else if (a === '--single') {
             singleAttempt = true;
+        } else if (a === '--image') {
+            // v14: image-generation intent — index.js appends the canonical
+            // enhancement instruction itself (see IMAGE_ENHANCE_INSTRUCTION).
+            imageIntent = true;
         } else if (a.startsWith('--only=')) {
             // Try exactly ONE provider — no internal fallback. Used by IndependentTasks
             // so that fallback control lives solely in the orchestrator layer.
-            startFrom = a.split('=')[1];
+            // v14: an EMPTY value must fail loudly here — `''` used to slip
+            // through to the substring matcher and silently run Gemini.
+            startFrom = (a.split('=')[1] || '').trim();
+            if (!startFrom) usageExit('--only= requires a provider name (e.g. --only=chatgpt)');
             singleAttempt = true;
         } else if (a.startsWith('--from=')) {
-            startFrom = a.split('=')[1];
+            startFrom = (a.split('=')[1] || '').trim();
+            if (!startFrom) usageExit('--from= requires a provider name (e.g. --from=ChatGPT)');
         } else if (a.startsWith('--locale=')) {
             // FEATURE GAP FIX: --locale was documented (lib/locales/gemini.js
             // header: "CLI 传 --locale=xx_XX") and passed by the Python SDK
@@ -704,7 +951,13 @@ async function main() {
             // Image download opt-out — skip the automatic image download post-processing.
             // Images in the web AI response will be preserved as remote URLs only.
             downloadImages = false;
-        } else if (!a.startsWith('--')) {
+        } else if (a.startsWith('--')) {
+            // v14: unknown flags WARN instead of vanishing. Silent drops are the
+            // root of a recurring bug class here: --keep-tabs was once silently
+            // concatenated into the prompt, and --locale shipped as a months-long
+            // no-op because this parser had no branch for it and said nothing.
+            log(`WARN: unknown flag ${a.split('=')[0]} ignored (a prompt must not start with --; see --help/usage)`);
+        } else {
             remaining.push(a);
         }
     }
@@ -720,9 +973,15 @@ async function main() {
         prompt = chunks.join('').trim();
     }
     if (!prompt && !args.includes('--smoke')) {
-        console.error('Usage: node index.js [--timeout=MS] [--from=NAME] [--only=NAME] [--single] [--locale=xx_XX] [--keep-tabs] [--close] [--smoke] [--doctor] "Your prompt"');
-        console.error('       echo "prompt" | node index.js [flags]');
-        process.exit(1);
+        usageExit('no prompt given');
+    }
+
+    // v14: --image — append the canonical enhancement HERE, not in the calling
+    // agent's head. Applies to argv and stdin prompts alike; recorded in
+    // telemetry so the receipt trail shows whether enhancement really happened.
+    if (imageIntent && prompt) {
+        prompt += IMAGE_ENHANCE_INSTRUCTION;
+        ctx.telemetry.image_prompt_enhanced = true;
     }
 
     ctx.telemetry.prompt_length_chars = prompt.length;
@@ -733,7 +992,7 @@ async function main() {
         browser = await connectWithRetry(CDP_URL);
     } catch (err) {
         log(`FATAL: Cannot connect to Chrome CDP — ${err.message}`);
-        log('Ensure Chrome debug is running: bash ~/start-chrome-debug.sh');
+        log('Ensure Chrome debug is running: bash scripts/start-chrome-debug.sh');
         ctx.recordTelemetry(1);
         process.exit(1);
     }
@@ -762,7 +1021,25 @@ async function main() {
             if (downloadImages) {
                 try {
                     const dlResult = await downloadAllImages(result.response, process.cwd(), { page: result.page }); // v13: session-aware download
-                    finalResponse = dlResult.response;
+                    ctx.telemetry.images_ok = (dlResult.downloaded || []).length;
+                    ctx.telemetry.images_failed = (dlResult.failed || []).length;
+                    // v14: stdout is a MACHINE CONTRACT when piped (lib/execute.js,
+                    // the Python SDK, and the MCP server consume it verbatim as
+                    // the AI response) — the appended "📥 Downloaded Images"
+                    // markdown was polluting subagent answers fed to adjudication.
+                    // TTY (a human watching): keep the inline summary. Piped:
+                    // raw response on stdout, summary on stderr, counts in the
+                    // receipt (see recordTelemetry).
+                    if (process.stdout.isTTY) {
+                        finalResponse = dlResult.response;
+                    } else {
+                        finalResponse = dlResult.rawResponse != null ? dlResult.rawResponse : dlResult.response;
+                        if ((ctx.telemetry.images_ok + ctx.telemetry.images_failed) > 0 && dlResult.summary) {
+                            for (const line of dlResult.summary.split('\n')) {
+                                if (line.trim()) log(line);
+                            }
+                        }
+                    }
                 } catch (err) {
                     log(`Image download phase failed: ${err.message}`);
                 }
@@ -779,6 +1056,10 @@ async function main() {
             // websocket keeps the event loop alive, so a natural exit never
             // happens; exitCode-and-return is NOT an option in this file.)
             ctx.recordTelemetry(0);
+            // v14 EPIPE guard: if the parent died (head/timeout-kill), the write
+            // callback never fires and the async 'error' event would crash us
+            // with a spurious exit 4 AFTER an exit-0 receipt was persisted.
+            process.stdout.once('error', () => process.exit(0));
             process.stdout.write(finalResponse + '\n', () => process.exit(0));
             return;
         }

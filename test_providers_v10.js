@@ -1,5 +1,5 @@
 /* Patch-2 harness — factory hardening + adapter selectors, no browser. */
-const F = require('/home/wangzi/AgentChat/skills/lib/providerFactory.js');
+const F = require(__dirname + '/skills/lib/providerFactory.js');
 
 let failures = 0;
 const t = (cond, msg) => { console.log(cond ? '  PASS' : '  FAIL', msg); if (!cond) failures++; };
@@ -96,23 +96,23 @@ function makePage(state) {
     t(eff === 'unknown', 'evaluate throws → unknown, never throws outward');
 
     console.log('[5] adapter selector hardening');
-    const ds = require('/home/wangzi/AgentChat/skills/lib/providers/adapters/deepseek.js');
+    const ds = require(__dirname + '/skills/lib/providers/adapters/deepseek.js');
     t(ds.editorSelectors[0].includes('给 DeepSeek 发送消息'), 'deepseek: specific selector still FIRST');
     t(ds.editorSelectors.includes('textarea') && ds.editorSelectors.includes('[contenteditable="true"]'),
         'deepseek: structural fallbacks appended');
     t(ds.responseSelectors[ds.responseSelectors.length - 1] === '[class*="markdown"]',
         'deepseek: generic response tail appended LAST');
 
-    const mimo = require('/home/wangzi/AgentChat/skills/lib/providers/adapters/mimo.js');
+    const mimo = require(__dirname + '/skills/lib/providers/adapters/mimo.js');
     t(mimo.editorSelectors[0].includes('有问题，尽管问'), 'mimo: specific selector still FIRST');
     t(mimo.editorSelectors.includes('textarea') && mimo.editorSelectors.includes('[role="textbox"]'),
         'mimo: structural fallbacks appended');
 
-    const kimi = require('/home/wangzi/AgentChat/skills/lib/providers/adapters/kimi.js');
+    const kimi = require(__dirname + '/skills/lib/providers/adapters/kimi.js');
     t(kimi.responseSelectors.includes('[class*="markdown"]'), 'kimi: generic response tail appended');
     t(kimi.responseSelectors[0] === '[class*="chat-content-item-assistant"]', 'kimi: specific order preserved');
 
-    const qwen = require('/home/wangzi/AgentChat/skills/lib/providers/adapters/qwen.js');
+    const qwen = require(__dirname + '/skills/lib/providers/adapters/qwen.js');
     t(qwen.responseSelectors.includes('[class*="markdown"]'), 'qwen: generic response tail appended');
     t(qwen.responseSelectors[0] === '[class*="message-select-wrapper-answer"]', 'qwen: specific order preserved');
 
@@ -127,7 +127,7 @@ function makePage(state) {
     console.log('[7] all 8 adapters still load + build runners');
     for (const k of ['chatgpt', 'claude', 'deepseek', 'gemini', 'kimi', 'mimo', 'minimax', 'qwen']) {
         try {
-            const cfg = require(`/home/wangzi/AgentChat/skills/lib/providers/adapters/${k}.js`);
+            const cfg = require(`${__dirname}/skills/lib/providers/adapters/${k}.js`);
             const run = F.createProviderRunner(cfg);
             t(typeof run === 'function', `${k}: adapter loads, runner builds`);
         } catch (e) { t(false, `${k}: ${e.message}`); }

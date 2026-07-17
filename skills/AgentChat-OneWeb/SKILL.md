@@ -5,7 +5,7 @@ description: Multi-provider CDP bridge with automatic fallback (Gemini->ChatGPT-
 
 # AI Fallback Chain — Multi-Provider CDP Bridge
 
-> **最后更新**: 2026-07-04
+> **最后更新**: 2026-07-17
 > **核心功能**: 按优先级链自动降级，确保始终有一个可用的大模型
 > **变更日志**: 见 [CHANGELOG.md](CHANGELOG.md)
 
@@ -67,18 +67,17 @@ node ~/.claude/skills/AgentChat-OneWeb/index.js "<用户prompt>"
 * **图表类**: 流程图、架构图、示意图、思维导图、图表、拓扑图、chart、diagram、flowchart、mindmap、Mermaid
 * **可视化类**: 可视化、visualization、illustration、infographic、DALL·E、Imagen、Midjourney
 
-### 1. Prompt 自动增强（强制）
+### 1. Prompt 自动增强（强制 — 传 `--image` flag，v14 起由 index.js 内置）
 
-检测到图片生成请求时，**必须**在用户原始 prompt 末尾追加以下增强指令后再发送给 web AI：
+检测到图片生成请求时，**必须**在命令中加入 `--image` flag：
 
+```bash
+node ~/.claude/skills/AgentChat-OneWeb/index.js --image "<用户原始prompt>"
 ```
-[系统指令] 请使用你的图片生成模型/工具（如 DALL·E、Imagen 等）主动生成上述要求的图片。
-生成后请提供图片的下载链接或在回答中嵌入图片。如果无法生成图片，请明确说明原因。
-```
 
-增强后的完整 prompt 格式：`"<用户原始prompt> [系统指令] 请使用你的图片生成模型/工具..."`
+index.js 会在进程内把标准增强指令（"请使用你的图片生成模型/工具主动生成…"）追加到 prompt 末尾，并在 telemetry 中记录 `image_prompt_enhanced: true`。**禁止手工改写 prompt 来替代 `--image`** —— 手工追加是纯 prose 约束，属于 receipt 机制要消灭的那类"叙述性合规"；flag 路径是机器可验证的（telemetry 可查）。
 
-如果用户已明确指定 `--from=ChatGPT`（DALL·E）或 `--from=Gemini`（Imagen），优先使用该 provider 的生图能力，并在增强指令中提及对应的模型名称。
+如果用户已明确指定 `--from=ChatGPT`（DALL·E）或 `--from=Gemini`（Imagen），优先使用该 provider 的生图能力：`--image --from=Gemini`。
 
 ### 2. 图片自动下载（强制 — index.js 内置）
 
@@ -89,10 +88,17 @@ index.js 在收到 web AI 响应后，**自动执行**以下步骤：
    * HTML 标签：`<img src="url">`
    * 直链：以 `.png`/`.jpg`/`.jpeg`/`.gif`/`.webp`/`.svg` 结尾的 URL
 2. 将每张图片下载到 **当前工作目录**（`process.cwd()`，即用户执行 skill 时所在的目录）
-3. 文件名格式：`ai-image-{YYYYMMDD-HHmmss}-{序号}.{ext}`
-4. 在 stdout 末尾自动附加下载结果摘要（`## 📥 Downloaded Images` 段落）
+3. 文件名格式：`ai-image-{YYYYMMDD-HHmmss}-{pid}-{序号}.{ext}`（v14 加入 pid，避免并发 worker 同秒写同名互相覆盖）
+4. 下载结果摘要（`## 📥 Downloaded Images` 段落）：**stdout 为 TTY 时**（人类直接运行）附加在响应末尾；**stdout 为管道时**（execute.js / Python SDK / MCP server 消费）摘要只走 stderr，stdout 保持"AI 响应原文"机器契约不被污染，成功/失败计数记入 receipt（`images_ok` / `images_failed`）。
 
-下载由 index.js 内部自动完成，透明无感。如果响应中无图片 URL，该步骤为零开销 no-op。
+**v14 硬限制**（下载 URL 来自 web AI 响应这一不可信文本，可被 prompt injection 操控）：
+* 每次响应最多下载 **20 张**，超出部分在摘要中明确标记为 skipped
+* 单张 **30MB** 上限；下载阶段总预算 **120s**；tier-2 页面内 fetch 带 25s AbortSignal（此前无超时——一个挂起的图片端点会让整个进程永不退出）
+* 所有 tier 均做 **payload 嗅探**：HTTP 200 返回的 HTML 错误页判定为下载失败，不再落盘为损坏的 `.png`
+* **拒绝 loopback / link-local / RFC1918 私网地址**（如 `http://127.0.0.1:9222/...` —— 注入的 URL 曾可把 CDP 调试端点数据写进用户目录）；内网/测试环境可用 `AGENTCHAT_ALLOW_PRIVATE_IMAGE_HOSTS=1` 放行
+* 相对 `Location:` 重定向与 303 已正确跟随；重定向目标同样过 blocked-host 检查
+
+如果响应中无图片 URL，该步骤为零开销 no-op。
 
 ### 3. 下载目录说明
 
@@ -172,6 +178,9 @@ curl -s http://127.0.0.1:9222/json/version | python3 -c "import json,sys; print(
 
 # 3. playwright-core (npm, ~3MB)
 (cd ~/.claude/skills/AgentChat-OneWeb && npm install)
+#    ⚠️ 本 skill 依赖同级 skills/lib/ 共享库（require('../lib/…')）——
+#    安装到 ~/.claude/skills/ 时必须整棵拷贝：AgentChat-OneWeb/ 与 lib/ 并排。
+#    只拷 AgentChat-OneWeb/ 会在启动时报出带修复指引的 FATAL（v14 起，不再是裸 MODULE_NOT_FOUND）。
 
 # 4. 至少一个 AI service 已登录 (Chrome profile 中)
 #    各 service 登录 URL:
@@ -223,7 +232,10 @@ node ~/.claude/skills/AgentChat-OneWeb/index.js --from=ChatGPT "prompt"
 | `--smoke` | 环境检查：遍历所有 provider 确认至少一个可达 |
 | `--doctor` | CDP 端口连通性检查 |
 | `--close` / `--close-browser` | 执行完毕后关闭所有 tab 和浏览器连接（默认保留） |
+| `--image` | 图片生成意图：index.js 进程内追加标准生图增强指令并记录 `image_prompt_enhanced` telemetry（见图片协议 §1） |
 | `--no-download-images` | 禁用图片自动下载（默认启用，从响应中提取图片 URL 下载到当前工作目录） |
+
+> 未识别的 `--flag` 会打 `WARN` 日志后忽略（v14 起；此前静默丢弃，是 `--locale` 空转数月、`--keep-tabs` 曾被拼进 prompt 这一类 bug 的根源）。`--from=` / `--only=` 空值会以 exit 64 硬失败。`--only`/`--single` 下 provider 名必须**精确匹配** key 或显示名（子串匹配仅在级联路径作为人类便利保留）。
 
 ---
 
@@ -260,6 +272,7 @@ node ~/.claude/skills/AgentChat-OneWeb/index.js --from=ChatGPT "prompt"
 | 5 | `ERR_RATE_LIMITED` | 所有 provider 均被限流 |
 | 9 | `ERR_ALL_EXHAUSTED` | 遍历了全部 provider，全部不可用 |
 | 10 | `ERR_TIMEOUT` | 总超时，无完整响应 |
+| 64 | `EX_USAGE` | 用法错误（空 prompt / `--from=`、`--only=` 空值）。v14 前误用 exit 1，与 ERR_NO_CDP 冲突，会让编排方把调用方 bug 当成"浏览器挂了"终止整条链。用法错误同样产生 receipt |
 
 ---
 

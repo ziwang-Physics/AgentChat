@@ -1358,7 +1358,28 @@ function createProviderRunner(cfg) {
             return classifyError(e, STAGES.AUTH_CHECK, C.key);
         }
 
-        // ── Step 3: Quota check ──
+        // ── Step 3: Overlay check — dismiss modals or bail if blocked ──
+        // v14 ORDER FIX: overlays are handled BEFORE the body-wide quota scan.
+        // The old order read document.body.innerText while a DISMISSABLE upsell
+        // popup ("请升级解锁更多…" matches COMMON_CN_QUOTA_PATTERNS) was still
+        // mounted — hard-classifying a perfectly available provider as 'quota'
+        // and skipping it for the whole run. checkOverlays already hard-blocks
+        // overlays whose own text is a REAL quota/auth wall, so nothing real is
+        // lost; the body scan below now runs on the de-cluttered page
+        // (innerText excludes hidden/removed modal content).
+        try {
+            const ov = await checkOverlays(page, C);
+            if (ov.block) {
+                return classifyError(
+                    new Error(ov.detail),
+                    STAGES.OVERLAY_CHECK, C.key, ov.block
+                );
+            }
+        } catch (e) {
+            return classifyError(e, STAGES.OVERLAY_CHECK, C.key);
+        }
+
+        // ── Step 3.5: Quota check (post-overlay body scan) ──
         try {
             const bodyText = await page.evaluate(() => document.body?.innerText || '');
             for (const pattern of (C.quotaPatterns || [])) {
@@ -1371,19 +1392,6 @@ function createProviderRunner(cfg) {
             }
         } catch (e) {
             return classifyError(e, STAGES.QUOTA_CHECK, C.key);
-        }
-
-        // ── Step 3.5: Overlay check — dismiss modals or bail if blocked ──
-        try {
-            const ov = await checkOverlays(page, C);
-            if (ov.block) {
-                return classifyError(
-                    new Error(ov.detail),
-                    STAGES.OVERLAY_CHECK, C.key, ov.block
-                );
-            }
-        } catch (e) {
-            return classifyError(e, STAGES.OVERLAY_CHECK, C.key);
         }
 
         // ── Step 4: Pre-input hook (e.g. Gemini Pro detection) ──

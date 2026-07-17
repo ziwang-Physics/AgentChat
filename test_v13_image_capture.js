@@ -26,6 +26,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const http = require('http');
+// v14: the download phase blocks loopback/private hosts by default — this
+// harness's fixtures legitimately live on 127.0.0.1, so opt in. The dedicated
+// v14 test below temporarily clears the variable to assert the block itself.
+process.env.AGENTCHAT_ALLOW_PRIVATE_IMAGE_HOSTS = '1';
 const { extractResponse } = require('./skills/lib/providerFactory');
 const {
     extractImageUrls, downloadAllImages, sniffImageExt,
@@ -165,6 +169,14 @@ const server = http.createServer((req, res) => {
         res.writeHead(200, { 'content-type': 'image/png' });
         return res.end(PNG);
     }
+    if (req.url.startsWith('/html200.png')) { // v14a: HTML served with HTTP 200
+        res.writeHead(200, { 'content-type': 'text/html' });
+        return res.end('<!DOCTYPE html><html>error page pretending to be an image</html>');
+    }
+    if (req.url.startsWith('/rel.png')) { // v14b: RELATIVE Location redirect
+        res.writeHead(302, { location: '/public.png' });
+        return res.end();
+    }
     res.writeHead(404); res.end();
 });
 await new Promise(r => server.listen(0, '127.0.0.1', r));
@@ -216,6 +228,58 @@ await ok('L4c: no page → plain direct download unchanged for public URLs', asy
     assert.strictEqual(r.downloaded.length, 1);
     assert(r.downloaded[0].file.endsWith('.png'));
     assert(fs.readFileSync(r.downloaded[0].path).equals(PNG));
+});
+
+// ── v14 regressions ──────────────────────────────────────────────────────────
+await ok('v14a: direct tier sniffs the payload — HTML-as-200 is a FAILURE, not a corrupt .png on disk', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'v14-'));
+    // /gated without cookies would be a 403; use a dedicated HTML-200 route.
+    const r = await downloadAllImages(`![x](http://127.0.0.1:${PORT}/html200.png)`, dir, {});
+    assert.strictEqual(r.downloaded.length, 0, 'HTML payload must not be saved');
+    assert.strictEqual(r.failed.length, 1);
+    assert(/non-image payload/.test(r.failed[0].error), `got: ${r.failed[0].error}`);
+    assert.strictEqual(fs.readdirSync(dir).length, 0, 'nothing written to disk');
+});
+
+await ok('v14b: relative Location redirect (302 → "/public.png") is resolved and followed', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'v14-'));
+    const r = await downloadAllImages(`![y](http://127.0.0.1:${PORT}/rel.png)`, dir, {});
+    assert.strictEqual(r.downloaded.length, 1, JSON.stringify(r.failed));
+    assert(fs.readFileSync(r.downloaded[0].path).equals(PNG), 'redirect target bytes intact');
+});
+
+await ok('v14c: loopback/private hosts are refused when opt-in env is absent', async () => {
+    delete process.env.AGENTCHAT_ALLOW_PRIVATE_IMAGE_HOSTS;
+    try {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'v14-'));
+        const r = await downloadAllImages(`![cdp](http://127.0.0.1:9222/json/list.png)`, dir, {});
+        assert.strictEqual(r.downloaded.length, 0);
+        assert(/blocked host/.test(r.failed[0].error), `got: ${r.failed[0].error}`);
+    } finally {
+        process.env.AGENTCHAT_ALLOW_PRIVATE_IMAGE_HOSTS = '1';
+    }
+});
+
+await ok('v14d: image-count cap — URLs beyond 20 are reported as failed, not silently dropped', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'v14-'));
+    const many = Array.from({ length: 25 }, (_, i) => `![i${i}](http://127.0.0.1:${PORT}/nope-${i}.png)`).join('\n');
+    const r = await downloadAllImages(many, dir, {});
+    assert.strictEqual(r.downloaded.length + r.failed.length, 25, 'every URL accounted for');
+    assert(r.failed.some(f => /over 20-image cap/.test(f.error)), 'cap surfaced loudly');
+});
+
+await ok('v14e: DIRECT_URL_RE no longer captures a trailing ")" from query strings', () => {
+    const urls = extractImageUrls(`see (http://127.0.0.1:${PORT}/public.png?q=1) here`);
+    assert.deepStrictEqual(urls, [`http://127.0.0.1:${PORT}/public.png?q=1`]);
+});
+
+await ok('v14f: downloadAllImages returns rawResponse + summary for the stdout machine contract', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'v14-'));
+    const src = `![pub](${PUBLIC_URL})`;
+    const r = await downloadAllImages(src, dir, {});
+    assert.strictEqual(r.rawResponse, src, 'rawResponse is the untouched response');
+    assert(r.summary.includes('Downloaded Images'), 'summary carried separately');
+    assert.strictEqual(r.response, src + r.summary, 'augmented view preserved for TTY/back-compat');
 });
 
 server.close();
