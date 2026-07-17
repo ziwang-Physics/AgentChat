@@ -66,7 +66,7 @@ const { ProviderError, classifyError } = require('../lib/errors');
 const { createProviderRunner, appendWithRotation } = require('../lib/providerFactory');
 const { makeRunId, emitReceipt } = require('../lib/receipt');
 const { log: _log, startTimer: _startTimer, spinner } = require('../lib/terminal');
-const { connectWithRetry: _connectWithRetry, doctorCheck: _doctorCheck } = require('../lib/cdp');
+const { connectWithRetry: _connectWithRetry, doctorCheck: _doctorCheck, ensureChromeCdp, startHint, isWSL } = require('../lib/cdp');
 
 // ── Adapt shared modules to OneWeb naming conventions ──
 const PREFIX = 'fallback';
@@ -811,7 +811,7 @@ async function smokeTest(browser) {
     // the actual fix is the same as no-CDP: restart the debug browser.
     if (!context) {
         log('❌ CDP reachable but no browser context exists.');
-        log('   fix: bash scripts/start-chrome-debug.sh');
+        log('   fix: ' + startHint());
         return;
     }
 
@@ -986,13 +986,27 @@ async function main() {
 
     ctx.telemetry.prompt_length_chars = prompt.length;
 
-    // Connect to Chrome
+    // Connect to Chrome.
+    // v15: ensureChromeCdp() first — on Windows agent hosts (workbuddy etc.)
+    // nothing ever ran the SKILL.md bash preflight, so every cold run died
+    // ECONNREFUSED before this point. Now the skill starts its own debug
+    // Chrome (platform-aware, once, AGENTCHAT_NO_AUTOSTART=1 to opt out).
     let browser;
     try {
+        const ensured = await ensureChromeCdp(CDP_URL, log);
+        if (!ensured.up) {
+            log(`FATAL: Chrome CDP not reachable on ${CDP_URL}` +
+                (ensured.reason ? ` (${ensured.reason})` : ''));
+            log('Fix: ' + startHint());
+            if (isWSL()) log('WSL detected — if Chrome runs on the Windows host, 127.0.0.1 here is the WSL VM. See CDP_HOST in .env.example.');
+            ctx.recordTelemetry(1);
+            process.exit(1);
+        }
+        if (ensured.autostarted) ctx.telemetry.cdp_autostarted = true;
         browser = await connectWithRetry(CDP_URL);
     } catch (err) {
         log(`FATAL: Cannot connect to Chrome CDP — ${err.message}`);
-        log('Ensure Chrome debug is running: bash scripts/start-chrome-debug.sh');
+        log('Fix: ' + startHint());
         ctx.recordTelemetry(1);
         process.exit(1);
     }
@@ -1102,7 +1116,7 @@ async function main() {
         // reasons, hiding the one command that actually fixes it.
         const hasBrowserLost = reasonValues.some(r => r.includes('browser_lost'));
         if (hasBrowserLost) {
-            log('CDP connection was lost mid-run. Restart Chrome debug: bash scripts/start-chrome-debug.sh');
+            log('CDP connection was lost mid-run. Restart Chrome debug: ' + startHint());
             ctx.recordTelemetry(1);
             process.exit(1);
         }

@@ -171,7 +171,14 @@ Gemini 是 chain 中唯一要求 **Pro Extended Thinking** 的 provider。
 #    如果未配置，所有 AI 网站的登录态会丢失！
 
 # 1. Chrome debug 在端口 9222 运行
+#    v15 起 index.js 会在端口不通时自动执行本平台启动脚本（一次，等待 45s；
+#    AGENTCHAT_NO_AUTOSTART=1 关闭）。手动预启动仍然更快：
+#    Linux/macOS:
 pgrep -f "start-chrome-debug" || bash scripts/start-chrome-debug.sh
+#    Windows (PowerShell；首次使用加 -FirstLogin 登录 Gemini):
+#      powershell -ExecutionPolicy Bypass -File scripts\start-chrome.ps1
+#    WSL2 注意: WSL 内 127.0.0.1 是 VM 而非 Windows 宿主。Chrome 跑在
+#    Windows 侧时需设 CDP_HOST=<Windows 宿主 IP>（见 .env.example）。
 
 # 2. CDP 可达
 curl -s http://127.0.0.1:9222/json/version | python3 -c "import json,sys; print(json.load(sys.stdin).get('Browser','FAIL'))"

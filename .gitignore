@@ -5,4 +5,3 @@ node_modules/
 
 *.jsonl
 __pycache__/
-package-lock.json
