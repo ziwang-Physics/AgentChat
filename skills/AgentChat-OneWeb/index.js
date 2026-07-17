@@ -214,8 +214,11 @@ function findProviderPage(context, provider) {
 // ══════════════════════════════════════════════════════════════════════════════
 
 const IMG_EXT_PATTERN = /\.(png|jpg|jpeg|gif|webp|svg)(\?.*)?$/i;
-const MARKDOWN_IMG_RE = /!\[.*?\]\((https?:\/\/[^\s)]+)\)/g;
-const HTML_IMG_RE = /<img[^>]+src=["'](https?:\/\/[^\s"']+)["'][^>]*>/gi;
+// v17: also capture data: URIs — collectResponseImages converts blob: URLs to
+// self-contained data URIs so they survive serialization across the CDP boundary
+// and can be decoded + written by downloadAllImages without a browser round-trip.
+const MARKDOWN_IMG_RE = /!\[.*?\]\((https?:\/\/[^\s)]+|data:image\/[^\s)]+)\)/g;
+const HTML_IMG_RE = /<img[^>]+src=["']((?:https?:\/\/|data:image\/)[^\s"']+)["'][^>]*>/gi;
 // v14: `)` excluded from the query char class — `(see https://x/a.png?q=1)`
 // previously captured the closing paren into the URL and 404'd the download.
 const DIRECT_URL_RE = /https?:\/\/[^\s"'`<>]+\.(?:png|jpg|jpeg|gif|webp|svg)(?:\?[^\s"'`<>)]*)?/gi;
@@ -255,6 +258,8 @@ const IMAGE_ENHANCE_INSTRUCTION =
  * AGENTCHAT_ALLOW_PRIVATE_IMAGE_HOSTS=1.
  */
 function isBlockedImageHost(url) {
+    // v17: data: URIs have no host — always safe (self-contained payload).
+    if (/^data:/i.test(url)) return false;
     if (process.env.AGENTCHAT_ALLOW_PRIVATE_IMAGE_HOSTS === '1') return false;
     try {
         const u = new URL(url);
@@ -445,6 +450,28 @@ async function fetchViaBrowser(page, url) {
     return { buffer, ext, via: 'in-page fetch' };
 }
 
+/**
+ * v17: Decode a data: URI (base64 only) into { buffer, ext }.
+ * Used for generated images that collectResponseImages converted from blob:
+ * URLs — they arrive as self-contained data URIs and need no network fetch.
+ *
+ * @param {string} uri — "data:image/png;base64,iVBORw0KGgo…"
+ * @returns {{buffer: Buffer, ext: string}|null}
+ */
+function decodeDataUri(uri) {
+    const m = /^data:(image\/\w+);base64,(.+)$/i.exec(uri);
+    if (!m) return null;
+    const mime = m[1].toLowerCase();
+    const extMap = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/jpg': 'jpg',
+        'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg' };
+    const ext = extMap[mime] || 'png';
+    try {
+        return { buffer: Buffer.from(m[2], 'base64'), ext };
+    } catch (_) {
+        return null;
+    }
+}
+
 async function downloadAllImages(response, destDir, opts) {
     opts = opts || {};
     let urls = extractImageUrls(response);
@@ -498,7 +525,19 @@ async function downloadAllImages(response, destDir, opts) {
 
         try {
             let got = null;
-            if (pageUsable) {
+
+            // v17: data: URI fast path — decode in-process, no network round-trip.
+            // collectResponseImages converts blob: URLs to data URIs so generated
+            // images survive serialization across the CDP boundary.
+            if (/^data:/i.test(urls[i])) {
+                const decoded = decodeDataUri(urls[i]);
+                if (!decoded) {
+                    throw new Error('failed to decode data URI');
+                }
+                ext = decoded.ext || ext;
+                filename = nameFor(ext);
+                got = { buffer: decoded.buffer, ext: decoded.ext, via: 'data-uri' };
+            } else if (pageUsable) {
                 got = await fetchViaBrowser(pg, urls[i]).catch((e) => {
                     log(`  browser fetch failed (${e.message}) — falling back to direct download`);
                     return null;

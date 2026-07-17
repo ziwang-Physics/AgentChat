@@ -155,14 +155,52 @@ async function extractFirstDraft(page, polledText) {
         if (await drafts.count() === 0) return null;
 
         const panelTail = await drafts.last()
-            .evaluate(el => (el.innerText || el.textContent || '').trim())
+            .evaluate(el => {
+              const clone = el.cloneNode(true);
+              clone.querySelectorAll('.katex').forEach(node => {
+                const ann = node.querySelector('annotation[encoding="application/x-tex"]');
+                if (ann) {
+                  const tex = ann.textContent.trim();
+                  node.replaceWith(document.createTextNode(
+                    (node.closest('.katex-display') ? '\n$$' + tex + '$$\n' : '$' + tex + '$')
+                  ));
+                }
+              });
+              clone.querySelectorAll('mjx-container').forEach(node => {
+                const tex = node.getAttribute('data-tex');
+                if (tex) {
+                  const block = node.hasAttribute('display') && node.getAttribute('display') === 'true';
+                  node.replaceWith(document.createTextNode(block ? '\n$$' + tex + '$$\n' : '$' + tex + '$'));
+                }
+              });
+              return (clone.innerText || clone.textContent || '').trim();
+            })
             .catch(() => null);
         if (panelTail === null || panelTail !== (polledText || '').trim()) {
             return null; // panel is not the current turn — keep polled text
         }
 
         const text = await drafts.first()
-            .evaluate(el => (el.innerText || el.textContent || '').trim())
+            .evaluate(el => {
+              const clone = el.cloneNode(true);
+              clone.querySelectorAll('.katex').forEach(node => {
+                const ann = node.querySelector('annotation[encoding="application/x-tex"]');
+                if (ann) {
+                  const tex = ann.textContent.trim();
+                  node.replaceWith(document.createTextNode(
+                    (node.closest('.katex-display') ? '\n$$' + tex + '$$\n' : '$' + tex + '$')
+                  ));
+                }
+              });
+              clone.querySelectorAll('mjx-container').forEach(node => {
+                const tex = node.getAttribute('data-tex');
+                if (tex) {
+                  const block = node.hasAttribute('display') && node.getAttribute('display') === 'true';
+                  node.replaceWith(document.createTextNode(block ? '\n$$' + tex + '$$\n' : '$' + tex + '$'));
+                }
+              });
+              return (clone.innerText || clone.textContent || '').trim();
+            })
             .catch(() => '');
         return text || null;
     } catch (_) {
@@ -300,6 +338,14 @@ module.exports = {
     stabilityWindow: 10_000,
     minResponseLength: 10,
 
+    // v17: generated-image support — Imagen renders may lag behind text stability.
+    // Shadow-DOM piercing in collectResponseImages handles <img> inside custom
+    // elements; imageSettleMs adds a post-stability grace window for render
+    // completion before extraction scans the DOM.
+    imageScopeSelector: null,  // TreeWalker starts from responseEl; shadow roots covered
+    imageSettleMs: 5_000,      // 5s grace for Imagen render after text stable
+    imageMinPx: 200,           // v17: exclude AI sparkle-icons, avatars, thumbnails
+
     // v11: the factory now caps ⚙ stability-clock holds at
     // stillGeneratingMaxHoldMs since the last REAL text change (default 90s).
     // Pro Extended can think 3-5 min with the stop button visible and ZERO
@@ -337,7 +383,26 @@ module.exports = {
         // drives the stability clock (in dual mode that is draft B, the
         // document-order last — draft A is swapped in later by postResponseHook).
         const text = await page.locator(RESPONSE_SELECTOR).last()
-            .evaluate(el => el.innerText || el.textContent || '').catch(() => '');
+            .evaluate(el => {
+              const clone = el.cloneNode(true);
+              clone.querySelectorAll('.katex').forEach(node => {
+                const ann = node.querySelector('annotation[encoding="application/x-tex"]');
+                if (ann) {
+                  const tex = ann.textContent.trim();
+                  node.replaceWith(document.createTextNode(
+                    (node.closest('.katex-display') ? '\n$$' + tex + '$$\n' : '$' + tex + '$')
+                  ));
+                }
+              });
+              clone.querySelectorAll('mjx-container').forEach(node => {
+                const tex = node.getAttribute('data-tex');
+                if (tex) {
+                  const block = node.hasAttribute('display') && node.getAttribute('display') === 'true';
+                  node.replaceWith(document.createTextNode(block ? '\n$$' + tex + '$$\n' : '$' + tex + '$'));
+                }
+              });
+              return (clone.innerText || clone.textContent || '').trim();
+            }).catch(() => '');
         return looksLikePreGeneration(text);
     },
 

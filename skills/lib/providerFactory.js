@@ -72,8 +72,12 @@ const flog = (key, msg) => { try { _tlog(key || 'factory', msg); } catch (_) {} 
 //       for providers that mount the <img> as a SIBLING of the matched text
 //       container (ChatGPT: '[data-message-author-role="assistant"]'). Default:
 //       the response element itself.
-//   imageMinPx?: number,      // v13: min rendered/natural px to count as content
-//       (filters avatars/icons; default: 64)
+//   imageMinPx?: number,      // v17: min rendered/natural px per dimension to count
+//       as generated content (filters avatars/icons/logos/thumbnails; default: 200)
+//   imageSettleMs?: number,   // v17: post-stability grace window for image render
+//       completion. Generated images often lag behind text — an extra settle
+//       period after stabilityWindow elapses gives <img> elements time to
+//       mount before extraction scans the DOM. (default: 0)
 //   customSend?: (page, editor) => Promise<boolean>, // override clickSend entirely
 //   preInputHook?: (page, cfg) => Promise<void>,   // e.g. Gemini Pro detection
 //   postResponseHook?: (page, rawText, cfg) => Promise<string>, // e.g. Qwen prefix strip
@@ -124,7 +128,8 @@ const DEFAULTS = {
     salvageOnContextLoss: true, // v12: recover committed sends from dead tab contexts
     captureImages: true,        // v13: surface generated <img> URLs innerText drops
     imageScopeSelector: null,   // v13: ancestor scope for the image scan (see schema)
-    imageMinPx: 64,             // v13: avatar/icon size filter
+    imageMinPx: 200,            // v17: filter icons/logos/thumbnails (raised from 64)
+    imageSettleMs: 0,           // v17: post-stability image render grace window
     stabilityWindow: 10_000,
     pollInterval: 2_000,
     minResponseLength: 10,
@@ -802,7 +807,26 @@ async function waitForCompletion(page, config, startTime, timeoutMs) {
         // Fast path out: page/context gone → no point polling further.
         if (page.isClosed()) { tick('?'); break; }
         try {
-            const text = await responseEl.evaluate(el => el.innerText || el.textContent || '');
+            const text = await responseEl.evaluate(el => {
+              const clone = el.cloneNode(true);
+              clone.querySelectorAll('.katex').forEach(node => {
+                const ann = node.querySelector('annotation[encoding="application/x-tex"]');
+                if (ann) {
+                  const tex = ann.textContent.trim();
+                  node.replaceWith(document.createTextNode(
+                    (node.closest('.katex-display') ? '\n$$' + tex + '$$\n' : '$' + tex + '$')
+                  ));
+                }
+              });
+              clone.querySelectorAll('mjx-container').forEach(node => {
+                const tex = node.getAttribute('data-tex');
+                if (tex) {
+                  const block = node.hasAttribute('display') && node.getAttribute('display') === 'true';
+                  node.replaceWith(document.createTextNode(block ? '\n$$' + tex + '$$\n' : '$' + tex + '$'));
+                }
+              });
+              return (clone.innerText || clone.textContent || '');
+            });
             consecutiveErrors = 0;
 
             const now = Date.now();
@@ -846,6 +870,19 @@ async function waitForCompletion(page, config, startTime, timeoutMs) {
             // Otherwise treat as transient, but cap the run of failures so a
             // permanently-detached responseEl can't spin to the deadline either.
             if (++consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) break;
+        }
+    }
+
+    // Phase 3.5 (v17): image render settle — generated images often lag behind
+    // text DOM updates. Give the page a grace window after stability is declared
+    // so collectResponseImages() can find <img> elements that just mounted.
+    const imageSettleMs = Number.isFinite(config.imageSettleMs) ? config.imageSettleMs : 0;
+    if (imageSettleMs > 0) {
+        const settleStart = Date.now();
+        const settleCap = Math.min(imageSettleMs, Math.max(0, deadline - settleStart));
+        if (settleCap > 0) {
+            await page.waitForTimeout(settleCap);
+            tick('🖼');
         }
     }
 
@@ -894,30 +931,28 @@ async function waitForCompletion(page, config, startTime, timeoutMs) {
  * essentially the prompt itself, fail the EXTRACT stage instead.
  */
 /**
- * v13: Collect generated-image URLs from the response DOM.
+ * v17: Shadow-piercing image collection with blob URL acceptance.
  *
- * innerText/textContent DROP every non-text node — an assistant turn whose
- * payload is a generated <img> (ChatGPT/DALL·E, and increasingly others)
- * loses the image without a trace: downstream extractImageUrls() then regex-
- * scans plain text for <img>/markdown patterns that were never going to be
- * there, and downloadAllImages() reports "(no images found in response)".
- * Observed: a 1536×1024 DALL·E image silently reduced to the quota footer
- * text that happened to share the container.
+ * v13's querySelectorAll('img') was blind to images inside web components
+ * (shadow DOM). Generated-image UIs (Gemini Imagen, and increasingly others)
+ * render inside custom elements whose <img> children are invisible to light-
+ * DOM queries — exactly the gap the editor-finding TreeWalker already closes.
  *
- * Scope: the response element itself — or, when config.imageScopeSelector is
- * set, its closest matching ancestor. Needed because some providers mount the
- * <img> as a SIBLING of the text container the responseSelector matched
- * (ChatGPT: <img> and <p> are both children of the assistant turn, while
- * responseSelectors[0]='.markdown' matches only the text part).
+ * Two-tier URL handling:
+ *   1. http(s) — accepted as before; downloaded from Node via CDP or direct fetch.
+ *   2. blob: — converted in-page to data URIs via canvas.drawImage(). Blob URLs
+ *      are only valid inside their origin's browsing context; a data URI embeds
+ *      the pixel payload so downstream downloadAllImages() can decode and write
+ *      it without any browser round-trip.
+ *   3. data: — accepted directly (already self-contained).
  *
- * Filters:
- *   - http(s) src only. blob:/data: srcs are counted and surfaced to the
- *     caller for diagnostics (capturing those requires an in-page read and
- *     is provider-specific — not attempted here), UI noise is not.
- *   - rendered/natural size ≥ imageMinPx (default 64) — drops avatars,
- *     favicons, emoji, and toolbar icons.
+ * Tainted-canvas failures (cross-origin images the page embedded) skip the
+ * image with a diagnostic counter — same contract as the old skippedNonHttp.
  *
- * @returns {Promise<{images: {src,alt,w,h}[], skippedNonHttp: number}>}
+ * Shadow DOM traversal: mirrors heuristicFindEditor's TreeWalker pattern
+ * (roots = [document] → walk → collect shadowRoots → querySelectorAll on each).
+ *
+ * @returns {Promise<{images: {src,alt,w,h}[], skippedUncapturable: number}>}
  */
 async function collectResponseImages(responseEl, config) {
     const scopeSel = config.imageScopeSelector || null;
@@ -927,23 +962,75 @@ async function collectResponseImages(responseEl, config) {
         if (args.scopeSel) {
             try { scope = el.closest(args.scopeSel) || el; } catch (_) { /* keep el */ }
         }
-        const imgs = scope.tagName === 'IMG'
-            ? [scope]
-            : Array.from(scope.querySelectorAll('img'));
+
+        // Shadow-piercing root collection — same TreeWalker pattern as
+        // heuristicFindEditor (line ~200). Light DOM is document; every
+        // shadowRoot discovered during the walk extends the search space.
+        const roots = [document];
+        try {
+            const w = document.createTreeWalker(
+                scope, NodeFilter.SHOW_ELEMENT
+            );
+            let n;
+            while ((n = w.nextNode())) {
+                if (n.shadowRoot) roots.push(n.shadowRoot);
+            }
+        } catch (_) {}
+
+        // Collect all <img> elements across light + shadow DOM
+        const allImgs = [];
+        for (const root of roots) {
+            try {
+                const list = root.tagName === 'IMG'
+                    ? [root]
+                    : Array.from(root.querySelectorAll('img'));
+                for (const img of list) allImgs.push(img);
+            } catch (_) {}
+        }
+
         const seen = new Set();
         const images = [];
-        let skippedNonHttp = 0;
-        for (const img of imgs) {
-            const src = img.currentSrc || img.src || '';
-            if (!/^https?:\/\//i.test(src)) {
-                if (src) skippedNonHttp++; // blob:/data: — diagnosable, not silent
+        let skippedUncapturable = 0;
+
+        for (const img of allImgs) {
+            let src = img.currentSrc || img.src || '';
+            if (!src) continue;
+
+            // ── Blob URL → data URI conversion ──
+            // Blob URLs are only valid in this browsing context; downstream
+            // Node-side downloadAllImages() can't fetch them. Convert to a
+            // self-contained data URI via canvas so the payload survives
+            // serialization across the CDP boundary.
+            if (/^blob:/i.test(src)) {
+                try {
+                    const cw = img.naturalWidth || img.width || 512;
+                    const ch = img.naturalHeight || img.height || 512;
+                    const canvas = document.createElement('canvas');
+                    canvas.width = cw;
+                    canvas.height = ch;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0);
+                    src = canvas.toDataURL('image/png');
+                } catch (_) {
+                    // Tainted canvas (cross-origin image) — uncapturable.
+                    skippedUncapturable++;
+                    continue;
+                }
+            } else if (/^data:/i.test(src)) {
+                // Data URIs are self-contained — accept as-is.
+            } else if (!/^https?:\/\//i.test(src)) {
+                // Unknown scheme — uncapturable.
+                skippedUncapturable++;
                 continue;
             }
+
             if (seen.has(src)) continue;
+
             const rect = img.getBoundingClientRect();
             const w = Math.max(rect.width || 0, img.naturalWidth || 0);
             const h = Math.max(rect.height || 0, img.naturalHeight || 0);
             if (w < args.minPx || h < args.minPx) continue; // avatar/icon noise
+
             seen.add(src);
             images.push({
                 src,
@@ -952,12 +1039,32 @@ async function collectResponseImages(responseEl, config) {
                 h: Math.round(h),
             });
         }
-        return { images, skippedNonHttp };
+
+        return { images, skippedUncapturable };
     }, { scopeSel, minPx });
 }
 
 async function extractResponse(page, responseEl, config, prompt) {
-    let text = await responseEl.evaluate(el => (el.innerText || el.textContent || '').trim());
+    let text = await responseEl.evaluate(el => {
+      const clone = el.cloneNode(true);
+      clone.querySelectorAll('.katex').forEach(node => {
+        const ann = node.querySelector('annotation[encoding="application/x-tex"]');
+        if (ann) {
+          const tex = ann.textContent.trim();
+          node.replaceWith(document.createTextNode(
+            (node.closest('.katex-display') ? '\n$$' + tex + '$$\n' : '$' + tex + '$')
+          ));
+        }
+      });
+      clone.querySelectorAll('mjx-container').forEach(node => {
+        const tex = node.getAttribute('data-tex');
+        if (tex) {
+          const block = node.hasAttribute('display') && node.getAttribute('display') === 'true';
+          node.replaceWith(document.createTextNode(block ? '\n$$' + tex + '$$\n' : '$' + tex + '$'));
+        }
+      });
+      return (clone.innerText || clone.textContent || '').trim();
+    });
 
     // v13: capture image URLs BEFORE the text-length gate — a pure-image
     // response ("here's your picture", no prose) previously died right here
@@ -971,8 +1078,8 @@ async function extractResponse(page, responseEl, config, prompt) {
             // images captured", never to a crashed extraction.
             if (r && Array.isArray(r.images)) {
                 images = r.images.filter(im => im && typeof im.src === 'string');
-                if (r.skippedNonHttp > 0) {
-                    flog(config.key, `extract: ${r.skippedNonHttp} non-http image src(s) (blob:/data:) skipped — not capturable via URL`);
+                if (r.skippedUncapturable > 0) {
+                    flog(config.key, `extract: ${r.skippedUncapturable} image src(s) skipped — uncapturable (tainted canvas / unknown scheme)`);
                 }
             }
         } catch (_) { /* best-effort — never fail extraction over image scan */ }
