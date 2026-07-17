@@ -1,5 +1,12 @@
 # AgentChat-OneWeb Changelog
 
+## 2026-07-17 (v17) — 反脆弱层：墙检测 / ARIA 定位层 / 浏览器级准入控制
+- **[P0] 墙检测 (`lib/pageHealth.js` 新增)**: CAPTCHA / 登录墙 / 限流拦截页的单次 evaluate 检测——结构性证据 (reCAPTCHA/hCaptcha/Turnstile/Cloudflare/Arkose iframe、challenge form、可见 password 输入) 无条件判定; 文案证据受双门限 (页面无可见聊天编辑器 + body <1500 字符) 防误报。设计立场: **检测并交给人, 绝不绕过**。三处接线: 导航后 (同 URL 渲染的墙, URL 检查抓不到)、编辑器找不到时 (墙是 "no editor" 的头号真实成因)、响应等待超时时 (发送后弹出的会话过期/限流)。分类 captcha/login→`auth` (触发 recoveryHint)、ratelimit→`quota` (exit 5 重试语义), 替代原先烧完预算归 `error`/`timeout` 的静默模式
+- **[P1] ARIA 定位层**: `findEditableElement` 在 CSS 列表全灭后、shadow-DOM 启发式之前插入 `getByRole('textbox')` 语义层 (主流抗漂移首选: role 定位在 class 重命名/hash class churn 下存活)。三层命中打 `_fsTier` 标签落入 `ctx.telemetry.editor_tier`——aria/heuristic 命中即 adapter selector 列表已漂移的早期告警, 无需等全灭
+- **[P1] 浏览器级准入信号量 (`lib/locks.js`)**: `acquireBrowserSlot`/`releaseBrowserSlot` 复用既有原子锁全部竞态防护 (TOCTOU rename、死 PID 回收、30min TTL、orphan 恢复), 跨进程封顶同一 Chrome 内并发页面自动化数 (`AGENTCHAT_MAX_CONCURRENT_PAGES`, 默认 3, 上限 16)——provider 锁只序列化同 provider, 7 个 worker 打 7 个**不同** provider 的并发爆发此前不受任何约束。等待带 1.5–3s 抖动; 等待耗尽显式降级为不限流并告警 (准入控制不引入新死锁类); 获得 slot 后 0.3–1.2s 抖动打散屏障释放的同步爆发。主流程 try/finally 包裹, 崩溃路径由死 PID 回收兜底
+- **[P2] auth 恢复提示全覆盖**: 无专属 recoveryHint 的 provider 现打通用指令 (在调试 Chrome 中手动完成登录/人机验证)
+- 新增 `test_v17_resilience.js` — 33 断言 (三类墙判定、编辑器否决+长度门限误报防护、隐藏元素否决、slot 信号量语义与有界等待、8 组接线断言); 既有 57+19+15 断言全部保持通过
+
 ## 2026-07-17 (v14)
 - **[P0] 图片下载阶段挂死修复**: tier-2 页面内 `fetch()` 此前无任何超时——一个挂起的图片端点让 `page.evaluate` 永久 pending, CDP socket 维持事件循环, 进程永不退出 (无 stdout flush、无 receipt); IndependentTasks 的 SIGTERM 看门狗随后把**答案已经完成**的 run 杀成 provider 失败。现: 页内 AbortSignal 25s + evaluate 外层 Promise.race 30s (late loser 吞掉避免 unhandledRejection) + 全阶段 120s 预算 + 单响应 20 张上限 (超出 loud-fail)
 - **[P0] direct 下载 tier 补齐 payload 嗅探**: HTTP 200 返回的 HTML 错误页此前直接落盘为损坏 `.png` 且报 status:ok (v13 只修了 browser tier); 现 buffered + sniffImageExt 门禁, 并加 30MB 单张上限 (含 content-length 预检与流式计数中断)

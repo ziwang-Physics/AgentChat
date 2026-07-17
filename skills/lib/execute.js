@@ -136,7 +136,7 @@ function createExecutor({
             return Promise.resolve({ ok: false, text: "", provider, reason: "empty_prompt" });
         }
         return new Promise((resolve) => {
-            const child = spawn("node", [
+            const child = spawn(process.execPath, [
                 webextPath,
                 `--only=${provider}`,
                 "--single",

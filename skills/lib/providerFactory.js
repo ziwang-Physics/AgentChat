@@ -17,6 +17,7 @@
  */
 
 const { ProviderError, classifyError, STAGES } = require('./errors');
+const { detectChallenge, CHALLENGE_REASON } = require('./pageHealth');
 const { appendWithRotation } = require('./telemetry');
 // v10: stderr logger for factory-level diagnostics (stdout is a machine
 // contract — see lib/receipt.js stream policy; terminal.log writes stderr).
@@ -179,13 +180,43 @@ async function findEditableElement(page, selectors, validateFn, log) {
                 if (!ok) continue;
             }
 
+            loc._fsTier = 'css'; // v17: drift telemetry — adapter list healthy
             return loc;
         } catch (_) { /* next selector */ }
     }
 
+    // v17: ARIA tier — role-based lookup is the mainstream resilience layer
+    // (semantic locators survive class renames, wrapper insertion, and hash-
+    // generated class churn that kills every CSS selector at once). Runs only
+    // after the adapter's CSS list misses, so healthy adapters pay nothing.
+    try {
+        const roleLoc = page.getByRole('textbox');
+        const n = Math.min(await roleLoc.count(), 6);
+        for (let i = 0; i < n; i++) {
+            const cand = roleLoc.nth(i);
+            if (!(await cand.isVisible({ timeout: 800 }).catch(() => false))) continue;
+            const editable = await cand.evaluate(el => {
+                if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+                    return !el.hasAttribute('readonly') && !el.hasAttribute('disabled');
+                }
+                return el.getAttribute('contenteditable') !== 'false'
+                    && !el.hasAttribute('readonly')
+                    && !el.hasAttribute('disabled');
+            }).catch(() => false);
+            if (!editable) continue;
+            if (validateFn) {
+                const ok = await validateFn(cand).catch(() => false);
+                if (!ok) continue;
+            }
+            _log(`editor rescued via ARIA tier (getByRole textbox #${i}) — adapter CSS selectors have drifted`);
+            cand._fsTier = 'aria';
+            return cand;
+        }
+    } catch (_) { /* ARIA tier is best-effort */ }
+
     // v10: heuristic last resort — selector drift should degrade, not kill
     const rescued = await heuristicFindEditor(page, validateFn, _log).catch(() => null);
-    if (rescued) return rescued;
+    if (rescued) { rescued._fsTier = 'heuristic'; return rescued; }
 
     await dumpEditorDiagnostics(page, _log).catch(() => {});
     return null;
@@ -1465,6 +1496,22 @@ function createProviderRunner(cfg) {
             return classifyError(e, STAGES.AUTH_CHECK, C.key);
         }
 
+        // ── Step 2.6: Challenge check (v17) ──
+        // CAPTCHA / login walls / throttle interstitials frequently render ON
+        // the provider URL — invisible to the URL-based auth check above.
+        // Structural evidence (vendor iframes, challenge forms, password
+        // inputs) plus short-page text evidence; see lib/pageHealth.js.
+        // Detection is best-effort — a probe failure must never fail the run.
+        try {
+            const ch = await detectChallenge(page);
+            if (ch.kind) {
+                return classifyError(
+                    new Error(`${ch.kind} wall detected — ${ch.detail}`),
+                    STAGES.CHALLENGE_CHECK, C.key, CHALLENGE_REASON[ch.kind]
+                );
+            }
+        } catch (_) { /* best-effort */ }
+
         // ── Step 3: Overlay check — dismiss modals or bail if blocked ──
         // v14 ORDER FIX: overlays are handled BEFORE the body-wide quota scan.
         // The old order read document.body.innerText while a DISMISSABLE upsell
@@ -1517,9 +1564,29 @@ function createProviderRunner(cfg) {
             page, C.editorSelectors, C.validateEditor, (m) => flog(C.key, m)
         );
         if (!editor) {
+            // v17: the #1 real-world cause of "no editor" is a wall that
+            // mounted AFTER the nav-time checks (lazy challenge, session drop
+            // during SPA hydration). Re-probe before blaming selector drift —
+            // an auth/quota classification carries the recovery hint; 'error'
+            // carries nothing.
+            const ch = await detectChallenge(page).catch(() => ({ kind: null }));
+            if (ch.kind) {
+                return classifyError(
+                    new Error(`${ch.kind} wall behind missing editor — ${ch.detail}`),
+                    STAGES.CHALLENGE_CHECK, C.key, CHALLENGE_REASON[ch.kind]
+                );
+            }
             return classifyError(
                 new Error('No editable input found'),
                 STAGES.EDITOR_FIND, C.key, 'error'
+            );
+        }
+        if (ctx && ctx.telemetry) {
+            // v17: selector-drift telemetry — which tier found the editor
+            // (css = adapter list healthy; aria/heuristic = the list has
+            // drifted and needs a refresh BEFORE it fully dies).
+            ctx.telemetry.editor_tier = Object.assign(
+                {}, ctx.telemetry.editor_tier, { [C.key]: editor._fsTier || 'css' }
             );
         }
 
@@ -1613,6 +1680,17 @@ function createProviderRunner(cfg) {
         // so per-run state (baselineCounts) must never be written onto it.
         const responseEl = await waitForCompletion(page, { ...C, baselineCounts }, provStart, timeoutMs);
         if (!responseEl) {
+            // v17: a wall can also mount MID-WAIT (post-send throttle, session
+            // expiry during generation). Probe once before classifying, so the
+            // orchestrator gets auth/quota (+ recovery hint) instead of a bare
+            // 'timeout' that reads like a slow model.
+            const ch = await detectChallenge(page).catch(() => ({ kind: null }));
+            if (ch.kind) {
+                return classifyError(
+                    new Error(`${ch.kind} wall during response wait — ${ch.detail}`),
+                    STAGES.CHALLENGE_CHECK, C.key, CHALLENGE_REASON[ch.kind]
+                );
+            }
             // v10: dump the largest visible text blocks BEFORE classifying —
             // a response-selector drift is now diagnosable from one log.
             await dumpResponseDiagnostics(page, (m) => flog(C.key, m)).catch(() => {});

@@ -67,6 +67,7 @@ const { createProviderRunner, appendWithRotation } = require('../lib/providerFac
 const { makeRunId, emitReceipt } = require('../lib/receipt');
 const { log: _log, startTimer: _startTimer, spinner } = require('../lib/terminal');
 const { connectWithRetry: _connectWithRetry, doctorCheck: _doctorCheck, ensureChromeCdp, startHint, isWSL } = require('../lib/cdp');
+const { acquireBrowserSlot, releaseBrowserSlot } = require('../lib/locks');
 
 // ── Adapt shared modules to OneWeb naming conventions ──
 const PREFIX = 'fallback';
@@ -784,9 +785,12 @@ async function tryAllProviders(browser, prompt, ctx, options = {}) {
             };
             log(`✗ ${provider.name}: FAILED — ${result.reason} → falling to next provider`);
             // Auth-class failures are operator-fixable — print the fix instead
-            // of leaving only an opaque reason string in the logs.
-            if (result.reason === 'auth' && provider.recoveryHint) {
-                log(`  ↳ fix: ${provider.recoveryHint}`);
+            // of leaving only an opaque reason string in the logs. v17: every
+            // provider now gets a hint; the generic one covers login walls AND
+            // CAPTCHAs (both need a human in the shared browser, never a bot).
+            if (result.reason === 'auth') {
+                log(`  ↳ fix: ${provider.recoveryHint
+                    || `在调试 Chrome 中打开 ${provider.url} ，手动完成登录/人机验证后重试`}`);
             }
             continue;
         }
@@ -1062,16 +1066,42 @@ async function main() {
             process.exit(0);
         }
 
+        // ── v17: browser-level admission control ──
+        // Provider locks (in the orchestrators) serialize same-provider access;
+        // this caps how many page automations run CONCURRENTLY in the ONE
+        // shared Chrome across ALL callers (CLI / MCP / SDK / IndependentTasks
+        // workers) — the burst pattern of 7 simultaneous automations is what
+        // trips per-browser throttling. Cap via AGENTCHAT_MAX_CONCURRENT_PAGES
+        // (default 3). Timing out the wait degrades EXPLICITLY to uncapped
+        // (loud warning) — admission control must never add a deadlock class.
+        let browserSlot = null;
+        {
+            const slotWait = Math.min(60_000, Math.floor(customTimeout * 0.25));
+            browserSlot = await acquireBrowserSlot({ waitMs: slotWait, log });
+            if (browserSlot === null) {
+                log(`⚠ admission wait exhausted (${Math.round(slotWait / 1000)}s) — proceeding WITHOUT a slot; heavy concurrency may trigger provider throttling`);
+            } else if (slotWait > 0) {
+                // Post-acquire jitter: workers released by a barrier otherwise
+                // hit the sites in a synchronized burst even WITH slots.
+                await new Promise(r => setTimeout(r, 300 + Math.floor(Math.random() * 900)));
+            }
+        }
+
         // Run fallback chain (ctx carries isolated state through the chain)
-        const result = await tryAllProviders(browser, prompt, ctx, {
-            totalTimeout: customTimeout,
-            providerTimeout: customProvTimeout,
-            startFrom,
-            keepTabs,
-            singleAttempt,
-            // v12: one-shot mid-chain CDP recovery (see browser-loss fail-fast)
-            reconnect: () => connectWithRetry(CDP_URL, 2),
-        });
+        let result;
+        try {
+            result = await tryAllProviders(browser, prompt, ctx, {
+                totalTimeout: customTimeout,
+                providerTimeout: customProvTimeout,
+                startFrom,
+                keepTabs,
+                singleAttempt,
+                // v12: one-shot mid-chain CDP recovery (see browser-loss fail-fast)
+                reconnect: () => connectWithRetry(CDP_URL, 2),
+            });
+        } finally {
+            releaseBrowserSlot(browserSlot);
+        }
 
         if (result.success) {
             // ── Post-process: download images from response (if enabled) ──

@@ -25,10 +25,29 @@ const path = require("path");
 const fs = require("fs");
 
 // ═══════════════════════════════════════════════════════════════════
+// GUARD: ../lib is a sibling tree shared by all AgentChat skills.
+// Copying ONLY this skill directory to ~/.claude/skills/ loses it —
+// every ../lib require would throw a bare MODULE_NOT_FOUND stack.
+// Mirror of the v14 guard in AgentChat-OneWeb/index.js.
+// ═══════════════════════════════════════════════════════════════════
+let acquireLock, releaseLock, cleanupAllLocks, makeRunId, emitReceipt;
+try {
+    ({ acquireLock, releaseLock, cleanupAllLocks } = require('../lib/locks'));
+    ({ makeRunId, emitReceipt } = require('../lib/receipt'));
+} catch (e) {
+    if (e.code === 'MODULE_NOT_FOUND') {
+        process.stderr.write(
+            '[orch] FATAL: ../lib not found — this skill requires the sibling skills/lib/ tree.\n' +
+            `[orch]   fix: cp -r ${path.resolve(__dirname, '..', 'lib')} ${path.resolve(__dirname, 'lib')}\n` +
+            '[orch]   (or clone the full AgentChat repo instead of copying a single skill directory)\n');
+        process.exit(4);
+    }
+    throw e;
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // CONSTANTS
 // ═══════════════════════════════════════════════════════════════════
-const { acquireLock, releaseLock, cleanupAllLocks } = require('../lib/locks');
-const { makeRunId, emitReceipt } = require('../lib/receipt');
 process.on("exit", cleanupAllLocks);
 process.on("SIGINT", () => { cleanupAllLocks(); process.exit(130); });
 process.on("SIGTERM", () => { cleanupAllLocks(); process.exit(143); });

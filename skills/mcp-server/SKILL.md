@@ -1,3 +1,8 @@
+---
+name: mcp-server
+description: AgentChat MCP Server — expose 8 AI providers as MCP tools for any MCP-compatible client (Claude Desktop, Cursor, Continue.dev). Configuration/reference skill, not executable
+---
+
 # AgentChat MCP Server
 
 > **最后更新**: 2026-07-06

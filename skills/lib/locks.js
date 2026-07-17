@@ -136,6 +136,68 @@ function releaseLock(provider) {
     } catch (_) {}
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// BROWSER ADMISSION SLOTS — cross-process cap on CONCURRENT page automations
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// Provider locks serialize same-provider access, but 7 workers each grabbing a
+// DIFFERENT provider still means 7 simultaneous page automations inside ONE
+// shared Chrome — CPU contention plus a burst pattern that trips per-browser
+// throttling on some provider sites. The mainstream fix is client-side
+// bounded concurrency (semaphore / token bucket), NOT anti-bot evasion.
+//
+// Implementation: N slot locks named browser-slot-0..N-1, acquired through the
+// SAME acquireLock/releaseLock machinery above — inheriting, for free, the
+// atomic-mkdir mutex, orphan recovery, dead-PID reclaim, 30min TTL, and the
+// rename-based TOCTOU protections. cleanupAllLocks() sweeps held slots too.
+//
+// Failure policy (deliberate): acquireBrowserSlot returning null after waitMs
+// means "browser is busy", and the CALLER decides — OneWeb logs a loud warning
+// and proceeds uncapped rather than failing, so admission control can never
+// introduce a new deadlock/starvation failure class. Crash safety needs no
+// extra code: a crashed holder's slot is reclaimed by the dead-PID check.
+
+const BROWSER_SLOT_PREFIX = "browser-slot-";
+const DEFAULT_MAX_SLOTS = 3;
+
+/** Resolve the slot cap: AGENTCHAT_MAX_CONCURRENT_PAGES env, clamped 1..16. */
+function resolveMaxSlots(env = process.env) {
+    const n = parseInt(env.AGENTCHAT_MAX_CONCURRENT_PAGES, 10);
+    if (Number.isFinite(n) && n >= 1) return Math.min(n, 16);
+    return DEFAULT_MAX_SLOTS;
+}
+
+/**
+ * Acquire one browser-automation slot.
+ *
+ * @param {object} [o]
+ * @param {number} [o.max]     slot count (default: resolveMaxSlots())
+ * @param {number} [o.waitMs]  how long to keep retrying (0 = single pass)
+ * @param {(msg: string) => void} [o.log]
+ * @returns {Promise<number|null>} slot index, or null if none free in time
+ */
+async function acquireBrowserSlot({ max, waitMs = 0, log = () => {} } = {}) {
+    const slots = max || resolveMaxSlots();
+    const deadline = Date.now() + waitMs;
+    for (;;) {
+        for (let i = 0; i < slots; i++) {
+            if (acquireLock(BROWSER_SLOT_PREFIX + i)) return i;
+        }
+        const left = deadline - Date.now();
+        if (left <= 0) return null;
+        // Jittered retry — de-synchronizes workers that arrived in a wave
+        // (fixed intervals re-collide forever under barrier-released workers).
+        const nap = Math.min(left, 1500 + Math.floor(Math.random() * 1500));
+        log(`browser busy (all ${slots} automation slots taken) — retrying in ${(nap / 1000).toFixed(1)}s`);
+        await new Promise(r => setTimeout(r, nap));
+    }
+}
+
+/** Release a slot from acquireBrowserSlot. null/undefined no-ops. */
+function releaseBrowserSlot(slot) {
+    if (Number.isInteger(slot) && slot >= 0) releaseLock(BROWSER_SLOT_PREFIX + slot);
+}
+
 function cleanupAllLocks() {
     let entries;
     try { entries = fs.readdirSync(LOCK_DIR); } catch (_) { return; }
@@ -152,4 +214,8 @@ function cleanupAllLocks() {
     }
 }
 
-module.exports = { acquireLock, releaseLock, cleanupAllLocks, LOCK_DIR };
+module.exports = {
+    acquireLock, releaseLock, cleanupAllLocks, LOCK_DIR,
+    // v17: browser-level admission control
+    acquireBrowserSlot, releaseBrowserSlot, resolveMaxSlots, BROWSER_SLOT_PREFIX,
+};

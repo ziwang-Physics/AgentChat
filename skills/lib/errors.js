@@ -16,6 +16,7 @@
 const STAGES = Object.freeze({
     NAVIGATE:       'navigate',
     AUTH_CHECK:     'auth_check',
+    CHALLENGE_CHECK:'challenge_check', // CAPTCHA / login wall / throttle interstitial (lib/pageHealth)
     QUOTA_CHECK:    'quota_check',
     OVERLAY_CHECK:  'overlay_check',   // modal/dialog blocking editor
     PRE_EDITOR:     'pre_editor',      // e.g., Gemini Pro Extended activation
