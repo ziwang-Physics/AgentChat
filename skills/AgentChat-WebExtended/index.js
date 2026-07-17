@@ -121,7 +121,7 @@ const { PROVIDER_CHAIN } = require('../lib/providers/chain');
 //   MiMo:    DOM-traversal send button, React SPA 4s delay
 //   DeepSeek: Standard pipeline, ds-markdown response
 
-const PROVIDER_KEYS = ['gemini','chatgpt','claude','qwen','kimi','minimax','mimo','deepseek'];
+const PROVIDER_KEYS = ['gemini','chatgpt','claude','qwen','kimi','minimax','mimo','deepseek','doubao'];
 const RUNNERS = Object.fromEntries(PROVIDER_KEYS.map(k => {
   const cfg = require(`../lib/providers/adapters/${k}`);
   // Gemini uses its own spinner-free runner; all others share the progress spinner
