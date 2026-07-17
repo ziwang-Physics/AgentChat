@@ -31,6 +31,9 @@ const turndown = new TurndownService({
     emDelimiter: '*',
 });
 
+// Session URL persistence for multi-turn conversations
+const { getSessionUrl, saveSessionUrl, clearSessionUrl } = require('./sessions');
+
 // ══════════════════════════════════════════════════════════════════════════════
 // CONFIG SCHEMA (JSDoc reference — not enforced at runtime)
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1037,17 +1040,58 @@ function createProviderRunner(cfg) {
         const provStart = Date.now();
 
         // ── Step 1: Navigate ──
+        // Resume a previous session if available, otherwise start fresh.
+        // Session URLs are provider-specific (e.g. /chat/38435105284969218)
+        // and allow multi-turn conversations to continue.
+        let usedSessionUrl = false;
         try {
-            await page.goto(C.url, {
+            const sessionUrl = C.resumeSession !== false ? getSessionUrl(C.key) : null;
+            const navUrl = sessionUrl || C.url;
+
+            await page.goto(navUrl, {
                 waitUntil: C.navWaitUntil,
                 timeout: C.navTimeout,
             });
+
+            if (sessionUrl) {
+                // Verify the session URL didn't redirect to login/auth/404
+                const landedUrl = page.url();
+                const isAuth = (C.authDomains || []).some(d => landedUrl.includes(d))
+                            || landedUrl.includes('/auth')
+                            || landedUrl.includes('/login');
+                if (isAuth || landedUrl.includes('/404') || landedUrl.includes('/error')) {
+                    flog(C.key, `session URL expired — clearing and retrying with base URL`);
+                    clearSessionUrl(C.key);
+                    await page.goto(C.url, {
+                        waitUntil: C.navWaitUntil,
+                        timeout: C.navTimeout,
+                    });
+                } else {
+                    usedSessionUrl = true;
+                    flog(C.key, `resumed session: ${landedUrl.slice(0, 80)}`);
+                }
+            }
+
             // SPA render wait — some providers need extra time for React/Angular to mount
             if (C.navPostDelay > 0) {
                 await page.waitForTimeout(C.navPostDelay);
             }
         } catch (e) {
-            return classifyError(e, STAGES.NAVIGATE, C.key);
+            // If the session URL fails (e.g. 404), clear and fall back
+            if (getSessionUrl(C.key)) {
+                clearSessionUrl(C.key);
+                try {
+                    await page.goto(C.url, {
+                        waitUntil: C.navWaitUntil,
+                        timeout: C.navTimeout,
+                    });
+                    if (C.navPostDelay > 0) await page.waitForTimeout(C.navPostDelay);
+                } catch (e2) {
+                    return classifyError(e2, STAGES.NAVIGATE, C.key);
+                }
+            } else {
+                return classifyError(e, STAGES.NAVIGATE, C.key);
+            }
         }
 
         // ── Step 2: Auth check ──
@@ -1232,6 +1276,15 @@ function createProviderRunner(cfg) {
         if (ctx && ctx.telemetry) {
             ctx.telemetry.per_provider_ms[C.key] = Date.now() - provStart;
         }
+
+        // Save session URL for future resume (multi-turn conversations)
+        if (C.resumeSession !== false) {
+            try {
+                const currentUrl = page.url();
+                saveSessionUrl(C.key, currentUrl, C.url);
+            } catch (_) { /* best-effort */ }
+        }
+
         return { success: true, response };
     };
 }
