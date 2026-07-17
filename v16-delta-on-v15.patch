@@ -1,0 +1,599 @@
+diff --git a/.env.example b/.env.example
+index f5bd441..8a5f13a 100644
+--- a/.env.example
++++ b/.env.example
+@@ -4,9 +4,15 @@
+ #
+ # 脚本会自动加载项目根目录的 .env 文件，无需手动 source。
+ 
++# 本文件自 v16 起由 Node 侧 (skills/lib/cdp.js) 直接安全加载 — 不再依赖
++# shell wrapper source。查找顺序: AGENTCHAT_ENV_FILE → <仓库根>/.env → <CWD>/.env。
++# 已存在的进程环境变量优先于本文件。值永远按字面字符串处理，绝不执行。
++
+ # Chrome/Chromium 二进制路径 (REQUIRED — 必须设置为系统 Chrome，不能用 Playwright 自带)
+ # Linux 常见路径: /usr/bin/google-chrome-stable, /usr/bin/chromium
+ # macOS 常见路径: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
++# Windows 常见路径: C:\Program Files\Google\Chrome\Application\chrome.exe
++# 未设置时 v16 内嵌启动器按上述标准路径自动探测（含 Edge 兜底）。
+ CHROMIUM_PATH=
+ 
+ # CDP 调试端口
+diff --git a/skills/AgentChat-OneWeb/SKILL.md b/skills/AgentChat-OneWeb/SKILL.md
+index 745a1ad..d048438 100644
+--- a/skills/AgentChat-OneWeb/SKILL.md
++++ b/skills/AgentChat-OneWeb/SKILL.md
+@@ -170,9 +170,19 @@ Gemini 是 chain 中唯一要求 **Pro Extended Thinking** 的 provider。
+ #      CHROME_PROFILE=~/.chrome-debug-profile
+ #    如果未配置，所有 AI 网站的登录态会丢失！
+ 
+-# 1. Chrome debug 在端口 9222 运行
+-#    v15 起 index.js 会在端口不通时自动执行本平台启动脚本（一次，等待 45s；
+-#    AGENTCHAT_NO_AUTOSTART=1 关闭）。手动预启动仍然更快：
++# 1. Chrome debug 在端口 9222 运行 — v16 起完全自动，零外部脚本依赖
++#    index.js 端口不通时自动启动 Chrome（AGENTCHAT_NO_AUTOSTART=1 关闭）：
++#      Tier 1: 平台启动脚本（若部署了 scripts/ — 仓库完整 clone 场景）
++#      Tier 2: 内嵌启动器 — 直接定位 Chrome 二进制并以加固 flag 集启动。
++#              workbuddy 等只拷贝 skills 树的宿主（scripts/ 永远缺失）走此路径。
++#    skill-only 部署（workbuddy / ~/.claude/skills/）只需保证:
++#      a) .env 放在 skills/ 的上级目录（与 scripts/ 本应在的位置相同），
++#         或设 AGENTCHAT_ENV_FILE 指向它 — Node 侧自 v16 起自行安全加载 .env
++#      b) .env 里 CHROMIUM_PATH 指向系统 Chrome（Windows 例:
++#         C:\Program Files\Google\Chrome\Application\chrome.exe；
++#         未设时按标准安装路径自动探测，含 Edge 兜底）
++#    首次登录: 内嵌启动器默认 headful，窗口打开后直接在其中登录 Gemini 即可。
++#    手动预启动（可选，完整 clone 下更快）：
+ #    Linux/macOS:
+ pgrep -f "start-chrome-debug" || bash scripts/start-chrome-debug.sh
+ #    Windows (PowerShell；首次使用加 -FirstLogin 登录 Gemini):
+diff --git a/skills/AgentChat-OneWeb/index.js b/skills/AgentChat-OneWeb/index.js
+index 35c1151..98bb228 100644
+--- a/skills/AgentChat-OneWeb/index.js
++++ b/skills/AgentChat-OneWeb/index.js
+@@ -1002,7 +1002,12 @@ async function main() {
+             ctx.recordTelemetry(1);
+             process.exit(1);
+         }
+-        if (ensured.autostarted) ctx.telemetry.cdp_autostarted = true;
++        if (ensured.autostarted) {
++            ctx.telemetry.cdp_autostarted = true;
++            // v16: 'script' = deployed start script; 'direct' = embedded
++            // launcher (workbuddy-style installs without scripts/)
++            ctx.telemetry.cdp_autostart_method = ensured.method || 'script';
++        }
+         browser = await connectWithRetry(CDP_URL);
+     } catch (err) {
+         log(`FATAL: Cannot connect to Chrome CDP — ${err.message}`);
+diff --git a/skills/lib/cdp.js b/skills/lib/cdp.js
+index d12aabb..e962d28 100644
+--- a/skills/lib/cdp.js
++++ b/skills/lib/cdp.js
+@@ -2,19 +2,21 @@
+  * Shared CDP utilities — connect, health check, doctor diagnostics, and
+  * platform-aware Chrome auto-start.
+  *
+- * Used by OneWeb and IndependentTasks skills.
+- *
+- * v15 (Windows/workbuddy fix):
+- *   - CDP_HOST env support — WSL2 users can point at the Windows host
+- *     (127.0.0.1 inside WSL2 is the VM, NOT the Windows machine running Chrome).
+- *   - ensureChromeCdp(): if the port is down, auto-run the platform's start
+- *     script ONCE (powershell start-chrome.ps1 on win32, bash
+- *     start-chrome-debug.sh elsewhere) and wait for the port. Previously the
+- *     auto-start path existed only as a bash one-liner in SKILL.md — invisible
+- *     to any Windows agent host, which is exactly how every workbuddy run
+- *     died with ECONNREFUSED. Disable with AGENTCHAT_NO_AUTOSTART=1.
+- *   - startHint(): per-platform fix command — the old hardcoded
+- *     "bash scripts/start-chrome-debug.sh" was a dead end on Windows.
++ * v15: ensureChromeCdp() auto-runs the platform start script; CDP_HOST;
++ *      platform-aware startHint().
++ * v16 (workbuddy deployment fix): the start scripts live in <repo>/scripts/ —
++ *      OUTSIDE skills/ — so any host that deploys only the skills tree
++ *      (workbuddy: C:\Users\<u>\.workbuddy\skills\AgentChat\) never has them,
++ *      and v15's autostart died with "starter not found" on every cold run.
++ *      Now:
++ *        Tier 1: platform start script, searched across candidate dirs
++ *                (AGENTCHAT_SCRIPTS_DIR env → repo layout → CWD/scripts)
++ *        Tier 2: EMBEDDED launcher — find Chrome, build the same hardened
++ *                flag set as the scripts, spawn detached, wait for the port.
++ *                Zero external files required.
++ *      Plus: Node now loads .env itself (safe KEY=VALUE parse, process.env
++ *      wins) — under workbuddy there is no shell wrapper to source it, so
++ *      CHROMIUM_PATH / CHROME_PROFILE / PROXY_SERVER were invisible before.
+  *
+  * NOTE: connectWithRetry takes `chromium` as first arg (imported by caller)
+  *       because this lib/ dir has no node_modules — playwright-core lives
+@@ -27,25 +29,184 @@ const path = require('path');
+ const fs = require('fs');
+ const { spawn } = require('child_process');
+ 
++// ── .env loading (v16) ──────────────────────────────────────────────────────
++// Safe line parser — NEVER shell-sourced (see the 2026-06-29 P0 on the bash
++// side: `source .env` was an arbitrary-code-execution vector). Values are
++// plain strings; $(...), backticks, $VAR stay literal. process.env wins.
++function loadDotEnv() {
++    const candidates = [
++        process.env.AGENTCHAT_ENV_FILE,
++        path.resolve(__dirname, '..', '..', '.env'),   // repo layout
++        path.resolve(process.cwd(), '.env'),           // caller's project
++    ].filter(Boolean);
++    for (const f of candidates) {
++        let text;
++        try { text = fs.readFileSync(f, 'utf8'); } catch (_) { continue; }
++        for (const raw of text.split(/\r?\n/)) {
++            const line = raw.trim();
++            if (!line || line.startsWith('#')) continue;
++            const m = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
++            if (!m) continue;
++            let val = m[2].trim();
++            if ((val.startsWith('"') && val.endsWith('"')) ||
++                (val.startsWith("'") && val.endsWith("'"))) val = val.slice(1, -1);
++            if (!(m[1] in process.env)) process.env[m[1]] = val;
++        }
++        return f; // first found wins (mirrors the shell loaders)
++    }
++    return null;
++}
++const LOADED_ENV_FILE = loadDotEnv();
++
+ const DEFAULT_CDP_PORT = process.env.CDP_PORT || '9222';
+ // CDP_HOST: override for WSL2 → Windows-host Chrome, remote CDP, etc.
+ const DEFAULT_CDP_HOST = process.env.CDP_HOST || '127.0.0.1';
+ const CDP_URL = `http://${DEFAULT_CDP_HOST}:${DEFAULT_CDP_PORT}`;
+ 
+-const SCRIPTS_DIR = path.resolve(__dirname, '..', '..', 'scripts');
+-const AUTOSTART_WAIT_MS = 45_000;   // start-chrome.ps1's own port wait is 30s
++const AUTOSTART_WAIT_MS = 45_000;
+ const AUTOSTART_POLL_MS = 1_000;
++// Same filename the ps1/daemon use — keeps `start-chrome.ps1 -Stop` able to
++// stop a Chrome the embedded launcher started (and vice versa).
++const CHROME_PID_FILE = path.join(os.tmpdir(), 'chrome-debug.chrome.pid');
++
++/** `~` / `~/x` → homedir. Anything else passes through untouched. */
++function expandHome(p) {
++    if (!p) return p;
++    if (p === '~') return os.homedir();
++    if (p.startsWith('~/') || p.startsWith('~\\')) return path.join(os.homedir(), p.slice(2));
++    return p;
++}
+ 
+ /** True when running inside WSL (any version). */
+ function isWSL() {
+     return process.platform === 'linux' && /microsoft/i.test(os.release());
+ }
+ 
++/** First existing platform start script, searched across deployment layouts.
++ *  AGENTCHAT_SCRIPTS_DIR, when set, is authoritative — no fallback guessing. */
++function findStartScript() {
++    const name = process.platform === 'win32' ? 'start-chrome.ps1' : 'start-chrome-debug.sh';
++    const dirs = process.env.AGENTCHAT_SCRIPTS_DIR
++        ? [process.env.AGENTCHAT_SCRIPTS_DIR]
++        : [
++            path.resolve(__dirname, '..', '..', 'scripts'),  // repo layout
++            path.resolve(process.cwd(), 'scripts'),          // caller's project
++        ];
++    for (const d of dirs) {
++        const p = path.join(d, name);
++        try { if (fs.existsSync(p)) return p; } catch (_) {}
++    }
++    return null;
++}
++
++/** Locate a Chrome/Chromium/Edge binary. CHROMIUM_PATH (validated) wins. */
++function findChromeBinary() {
++    const envPath = expandHome(process.env.CHROMIUM_PATH);
++    if (envPath && fs.existsSync(envPath)) return envPath;
++    let candidates = [];
++    if (process.platform === 'win32') {
++        const pf   = process.env['ProgramFiles'] || 'C:\\Program Files';
++        const pf86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
++        const lad  = process.env['LOCALAPPDATA'] || '';
++        candidates = [
++            path.join(pf,   'Google', 'Chrome', 'Application', 'chrome.exe'),
++            path.join(pf86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
++            lad && path.join(lad, 'Google', 'Chrome', 'Application', 'chrome.exe'),
++            path.join(pf,   'Chromium', 'Application', 'chrome.exe'),
++            path.join(pf86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
++            path.join(pf,   'Microsoft', 'Edge', 'Application', 'msedge.exe'),
++        ].filter(Boolean);
++    } else if (process.platform === 'darwin') {
++        candidates = [
++            '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
++            '/Applications/Chromium.app/Contents/MacOS/Chromium',
++            '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
++        ];
++    } else {
++        candidates = [
++            '/usr/bin/google-chrome-stable', '/usr/bin/google-chrome',
++            '/usr/bin/chromium', '/usr/bin/chromium-browser',
++            '/snap/bin/chromium', '/usr/bin/microsoft-edge',
++        ];
++    }
++    for (const c of candidates) {
++        try { if (fs.existsSync(c)) return c; } catch (_) {}
++    }
++    return null;
++}
++
++/** Hardened flag set — parity with start-chrome.ps1 / start-chrome-debug.py.
++ *  SECURITY: no --remote-allow-origins=* and no --ignore-certificate-errors
++ *  (both were removed repo-wide; see the scripts' comments). */
++function buildChromeArgs(port, profileDir) {
++    const args = [
++        `--remote-debugging-port=${port}`,
++        '--remote-debugging-address=127.0.0.1',
++        `--user-data-dir=${profileDir}`,
++        '--disable-features=OptimizationHints,Translate,HttpsUpgrades',
++        '--disable-background-networking',
++        '--disable-client-side-phishing-detection',
++        '--disable-field-trial-config',
++        '--disable-component-update',
++        '--disable-sync',
++        '--disable-extensions',
++        '--disable-default-apps',
++        '--disable-breakpad',
++        '--disable-hang-monitor',
++        '--disable-popup-blocking',
++        '--disable-renderer-backgrounding',
++        '--no-first-run',
++        '--no-default-browser-check',
++        '--noerrdialogs',
++        '--hide-scrollbars',
++        '--mute-audio',
++        '--disable-dev-shm-usage',
++    ];
++    if (process.env.PROXY_SERVER) args.push(`--proxy-server=${process.env.PROXY_SERVER}`);
++    // Headful by default — a headless never-logged-in profile cannot be signed
++    // in interactively and trips bot checks. HEADLESS=1/true/yes opts in.
++    if (/^(1|true|yes)$/i.test(process.env.HEADLESS || '')) {
++        args.push('--headless=new', '--disable-gpu', '--window-size=1920,1080');
++    }
++    args.push(process.env.GEMINI_URL || 'https://gemini.google.com/u/0/app');
++    return args;
++}
++
++/**
++ * Tier-2 embedded launcher — no external script needed.
++ * @returns {{ok: boolean, reason?: string, pid?: number}}
++ */
++function launchChromeDirect(port, log) {
++    const chrome = findChromeBinary();
++    if (!chrome) {
++        return { ok: false, reason: 'Chrome not found — set CHROMIUM_PATH in .env to your chrome.exe / chrome binary' };
++    }
++    const profileDir = path.resolve(expandHome(process.env.CHROME_PROFILE || path.join(os.homedir(), '.chrome-debug-profile')));
++    try { fs.mkdirSync(profileDir, { recursive: true }); } catch (_) {}
++    // Stale singleton locks from a crashed instance block startup silently.
++    for (const lock of ['SingletonLock', 'SingletonSocket', 'SingletonCookie', 'Lockfile']) {
++        try { fs.rmSync(path.join(profileDir, lock), { force: true }); } catch (_) {}
++    }
++    const args = buildChromeArgs(port, profileDir);
++    log(`Launching Chrome directly: ${chrome}`);
++    log(`  profile: ${profileDir}`);
++    try {
++        const child = spawn(chrome, args, { detached: true, stdio: 'ignore' });
++        child.on('error', () => { /* surfaced by the port wait */ });
++        child.unref();
++        try { fs.writeFileSync(CHROME_PID_FILE, String(child.pid)); } catch (_) {}
++        return { ok: true, pid: child.pid };
++    } catch (e) {
++        return { ok: false, reason: `spawn failed: ${e.message}` };
++    }
++}
++
+ /** Per-platform "how to start Chrome debug" fix command. */
+ function startHint() {
+     if (process.platform === 'win32') {
+         return 'powershell -ExecutionPolicy Bypass -File scripts\\start-chrome.ps1' +
+-               '   (first time: add -FirstLogin and sign in to Gemini)';
++               '   (first time: add -FirstLogin and sign in to Gemini)' +
++               ' — or just set CHROMIUM_PATH in .env; the skill can launch Chrome itself';
+     }
+     if (isWSL()) {
+         return 'bash scripts/start-chrome-debug.sh — OR, if Chrome runs on the ' +
+@@ -70,16 +231,22 @@ function probeCdp(cdpUrl, timeoutMs = 2000) {
+     });
+ }
+ 
++async function waitForPort(url, log, budgetMs = AUTOSTART_WAIT_MS) {
++    const deadline = Date.now() + budgetMs;
++    while (Date.now() < deadline) {
++        if (await probeCdp(url)) return true;
++        await new Promise(r => setTimeout(r, AUTOSTART_POLL_MS));
++    }
++    return false;
++}
++
+ /**
+- * Ensure a Chrome CDP endpoint is up, auto-starting the platform's debug
+- * Chrome once if needed. Safe to call unconditionally before connecting.
+- *
+- * Auto-start is skipped when:
+- *   - the port is already up (fast path, one probe)
+- *   - AGENTCHAT_NO_AUTOSTART=1
+- *   - CDP_HOST points at a non-local address (we can't start remote Chrome)
++ * Ensure a Chrome CDP endpoint is up, auto-starting once if needed.
++ *   Tier 1: platform start script (if deployed)
++ *   Tier 2: embedded launcher (always available)
++ * Skipped when the port is up, AGENTCHAT_NO_AUTOSTART=1, or CDP_HOST is remote.
+  *
+- * @returns {Promise<{up: boolean, autostarted: boolean, reason?: string}>}
++ * @returns {Promise<{up: boolean, autostarted: boolean, method?: 'script'|'direct', reason?: string}>}
+  */
+ async function ensureChromeCdp(cdpUrl, onLog) {
+     const log = onLog || (() => {});
+@@ -94,53 +261,54 @@ async function ensureChromeCdp(cdpUrl, onLog) {
+     if (host !== '127.0.0.1' && host !== 'localhost') {
+         return { up: false, autostarted: false, reason: `CDP_HOST=${host} is remote — cannot auto-start Chrome there` };
+     }
++    const port = new URL(url).port || '9222';
++    const reasons = [];
+ 
+-    // Pick the platform starter. Windows: powershell script (headful by
+-    // default post-v15 — headless Gemini can't be logged in interactively and
+-    // trips bot checks). Linux/macOS: existing daemon wrapper.
+-    let cmd, argv;
+-    if (process.platform === 'win32') {
+-        const ps1 = path.join(SCRIPTS_DIR, 'start-chrome.ps1');
+-        if (!fs.existsSync(ps1)) return { up: false, autostarted: false, reason: `starter not found: ${ps1}` };
+-        cmd = 'powershell.exe';
+-        argv = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1];
++    // ── Tier 1: deployed start script ──────────────────────────────────────
++    const script = findStartScript();
++    if (script) {
++        const isPs1 = script.endsWith('.ps1');
++        const cmd = isPs1 ? 'powershell.exe' : 'bash';
++        const argv = isPs1
++            ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script]
++            : [script];
++        log(`CDP port down — auto-starting via start script: ${script}`);
++        try {
++            const child = spawn(cmd, argv, { detached: true, stdio: 'ignore', cwd: path.dirname(path.dirname(script)) });
++            child.on('error', () => {});
++            child.unref();
++            if (await waitForPort(url, log)) {
++                log('Chrome CDP is up (auto-started via script).');
++                return { up: true, autostarted: true, method: 'script' };
++            }
++            reasons.push('start script ran but port stayed down 45s');
++        } catch (e) {
++            reasons.push(`script spawn failed: ${e.message}`);
++        }
+     } else {
+-        const sh = path.join(SCRIPTS_DIR, 'start-chrome-debug.sh');
+-        if (!fs.existsSync(sh)) return { up: false, autostarted: false, reason: `starter not found: ${sh}` };
+-        cmd = 'bash';
+-        argv = [sh];
++        reasons.push('no start script deployed (scripts/ not copied — normal under workbuddy/skill-only installs)');
+     }
+ 
+-    log(`CDP port down — auto-starting Chrome debug (${cmd} ${argv[argv.length - 1]})...`);
+-    try {
+-        // detached + ignore: the starter daemonizes (or the ps1 launches Chrome
+-        // via Start-Process); we must not inherit its stdio into our stdout
+-        // machine contract, and we must not die with it.
+-        const child = spawn(cmd, argv, { detached: true, stdio: 'ignore', cwd: path.resolve(SCRIPTS_DIR, '..') });
+-        child.on('error', () => { /* surfaced by the port wait below */ });
+-        child.unref();
+-    } catch (e) {
+-        return { up: false, autostarted: false, reason: `spawn failed: ${e.message}` };
++    // ── Tier 2: embedded launcher ──────────────────────────────────────────
++    // Re-probe first: a slow Tier-1 Chrome may have just bound the port.
++    if (await probeCdp(url)) return { up: true, autostarted: true, method: 'script' };
++    log('Falling back to embedded Chrome launcher (no external scripts needed)...');
++    const launched = launchChromeDirect(port, log);
++    if (!launched.ok) {
++        reasons.push(launched.reason);
++        return { up: false, autostarted: false, reason: reasons.join('; ') };
+     }
+-
+-    const deadline = Date.now() + AUTOSTART_WAIT_MS;
+-    while (Date.now() < deadline) {
+-        if (await probeCdp(url)) {
+-            log('Chrome CDP is up (auto-started).');
+-            return { up: true, autostarted: true };
+-        }
+-        await new Promise(r => setTimeout(r, AUTOSTART_POLL_MS));
++    if (await waitForPort(url, log)) {
++        log('Chrome CDP is up (embedded launcher).');
++        return { up: true, autostarted: true, method: 'direct' };
+     }
+-    return { up: false, autostarted: true, reason: `port still down ${AUTOSTART_WAIT_MS / 1000}s after auto-start` };
++    reasons.push(`embedded launch: port still down ${AUTOSTART_WAIT_MS / 1000}s after spawn (pid ${launched.pid})`);
++    return { up: false, autostarted: true, method: 'direct', reason: reasons.join('; ') };
+ }
+ 
+ /**
+  * Connect to Chrome CDP with retries.
+  * @param {object} chromium — playwright-core chromium object (from caller's require)
+- * @param {string} [cdpUrl] — CDP endpoint
+- * @param {number} [retries=3]
+- * @param {(msg: string) => void} [onLog] — log callback
+- * @returns {Promise<Browser>}
+  */
+ async function connectWithRetry(chromium, cdpUrl, retries = 3, onLog) {
+     const url = cdpUrl || CDP_URL;
+@@ -160,12 +328,7 @@ async function connectWithRetry(chromium, cdpUrl, retries = 3, onLog) {
+     }
+ }
+ 
+-/**
+- * Check CDP connectivity. Exit on failure (CLI mode), or return boolean.
+- * @param {boolean} [exitOnFail=true] — if true, process.exit on failure
+- * @param {(msg: string) => void} [onLog]
+- * @returns {Promise<boolean>}
+- */
++/** Check CDP connectivity. Exit on failure (CLI mode), or return boolean. */
+ async function doctorCheck(exitOnFail = true, onLog) {
+     const log = onLog || console.error;
+     if (await probeCdp(CDP_URL, 5000)) {
+@@ -179,4 +342,8 @@ async function doctorCheck(exitOnFail = true, onLog) {
+     return false;
+ }
+ 
+-module.exports = { connectWithRetry, doctorCheck, ensureChromeCdp, probeCdp, startHint, isWSL, CDP_URL };
++module.exports = {
++    connectWithRetry, doctorCheck, ensureChromeCdp, probeCdp, startHint, isWSL,
++    expandHome, findChromeBinary, findStartScript, launchChromeDirect, buildChromeArgs,
++    CDP_URL, CHROME_PID_FILE, LOADED_ENV_FILE,
++};
+diff --git a/test_v16_direct_launch.js b/test_v16_direct_launch.js
+new file mode 100644
+index 0000000..e52f846
+--- /dev/null
++++ b/test_v16_direct_launch.js
+@@ -0,0 +1,155 @@
++/**
++ * v16 regression — embedded Chrome launcher (workbuddy skill-only deployment).
++ *
++ * Root cause covered: scripts/ lives OUTSIDE skills/, so skill-only installs
++ * (C:\Users\<u>\.workbuddy\skills\AgentChat\) never have the start scripts;
++ * v15's autostart died with "starter not found" on every cold run.
++ *
++ *   A. expandHome
++ *   B. loadDotEnv safety: values with $(...)/backticks stay literal strings,
++ *      never executed; process.env precedence; quotes stripped
++ *   C. findChromeBinary: CHROMIUM_PATH (incl. ~ form) wins when it exists
++ *   D. buildChromeArgs: security parity (no allow-origins/*, no
++ *      ignore-certificate-errors), headful default, HEADLESS opt-in,
++ *      PROXY_SERVER passthrough
++ *   E. E2E: scripts dir ABSENT (AGENTCHAT_SCRIPTS_DIR → empty tmp) +
++ *      CHROMIUM_PATH → stub binary that serves /json/version ⇒
++ *      ensureChromeCdp returns {up:true, autostarted:true, method:'direct'};
++ *      pid file written with the same name the ps1 -Stop manages;
++ *      stale SingletonLock removed
++ *   F. Wiring: telemetry records cdp_autostart_method
++ */
++const assert = require('assert');
++const http = require('http');
++const fs = require('fs');
++const os = require('os');
++const path = require('path');
++
++let passed = 0;
++const ok = (n) => { console.log('  ✓ ' + n); passed++; };
++const tmp = (n) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), n)); return d; };
++
++(async () => {
++    // Fresh module instance per phase where env matters
++    const freshCdp = () => { delete require.cache[require.resolve('./skills/lib/cdp.js')]; return require('./skills/lib/cdp.js'); };
++
++    // ── B: .env safe parse (must run before other phases touch env) ──────
++    const envDir = tmp('ac-env-');
++    fs.writeFileSync(path.join(envDir, '.env'), [
++        '# comment',
++        'AC_TEST_PLAIN=hello',
++        'AC_TEST_QUOTED="with spaces"',
++        "AC_TEST_INJ=$(touch /tmp/ac_pwned_v16)`touch /tmp/ac_pwned2_v16`",
++        'AC_TEST_PRECEDENCE=from_file',
++        'not a kv line',
++    ].join('\n'));
++    process.env.AGENTCHAT_ENV_FILE = path.join(envDir, '.env');
++    process.env.AC_TEST_PRECEDENCE = 'from_env';
++    fs.rmSync('/tmp/ac_pwned_v16', { force: true });
++    fs.rmSync('/tmp/ac_pwned2_v16', { force: true });
++    let cdp = freshCdp();
++    assert.strictEqual(process.env.AC_TEST_PLAIN, 'hello');
++    assert.strictEqual(process.env.AC_TEST_QUOTED, 'with spaces');
++    assert.strictEqual(process.env.AC_TEST_INJ, '$(touch /tmp/ac_pwned_v16)`touch /tmp/ac_pwned2_v16`');
++    assert.ok(!fs.existsSync('/tmp/ac_pwned_v16') && !fs.existsSync('/tmp/ac_pwned2_v16'),
++        '.env values must NEVER be executed');
++    assert.strictEqual(process.env.AC_TEST_PRECEDENCE, 'from_env');
++    assert.strictEqual(cdp.LOADED_ENV_FILE, path.join(envDir, '.env'));
++    ok('B1: .env parsed safely — injection stays literal, env wins, quotes stripped');
++
++    // ── A: expandHome ────────────────────────────────────────────────────
++    assert.strictEqual(cdp.expandHome('~'), os.homedir());
++    assert.strictEqual(cdp.expandHome('~/x/y'), path.join(os.homedir(), 'x/y'));
++    assert.strictEqual(cdp.expandHome('/abs/p'), '/abs/p');
++    assert.strictEqual(cdp.expandHome('C:\\Users\\DELL\\p'), 'C:\\Users\\DELL\\p');
++    assert.strictEqual(cdp.expandHome(undefined), undefined);
++    ok('A1: expandHome — ~, ~/x, absolute & win paths, undefined passthrough');
++
++    // ── C: findChromeBinary honors CHROMIUM_PATH (incl. ~) ───────────────
++    const stubDir = tmp('ac-chrome-');
++    const stubBin = path.join(stubDir, 'chrome-stub');
++    fs.writeFileSync(stubBin, '#!/bin/bash\ntrue\n'); fs.chmodSync(stubBin, 0o755);
++    process.env.CHROMIUM_PATH = stubBin;
++    assert.strictEqual(cdp.findChromeBinary(), stubBin);
++    ok('C1: CHROMIUM_PATH wins when the file exists');
++
++    // ── D: buildChromeArgs contract ──────────────────────────────────────
++    delete process.env.HEADLESS; delete process.env.PROXY_SERVER;
++    let args = cdp.buildChromeArgs('9333', '/p/rofile');
++    const joined = args.join(' ');
++    assert.ok(joined.includes('--remote-debugging-port=9333'));
++    assert.ok(joined.includes('--user-data-dir=/p/rofile'));
++    assert.ok(!joined.includes('--remote-allow-origins'), 'security parity: no allow-origins');
++    assert.ok(!joined.includes('--ignore-certificate-errors'), 'security parity: no ignore-cert');
++    assert.ok(!joined.includes('--headless'), 'headful by default');
++    process.env.HEADLESS = 'true'; process.env.PROXY_SERVER = 'http://127.0.0.1:7897';
++    args = cdp.buildChromeArgs('9333', '/p/rofile');
++    assert.ok(args.includes('--headless=new') && args.includes('--proxy-server=http://127.0.0.1:7897'));
++    delete process.env.HEADLESS; delete process.env.PROXY_SERVER;
++    ok('D1: hardened flag set — security parity, headful default, HEADLESS/PROXY_SERVER honored');
++
++    // ── E: E2E — no scripts dir → embedded launcher brings the port up ───
++    const port = 19333;
++    const emptyScripts = tmp('ac-noscripts-');
++    process.env.AGENTCHAT_SCRIPTS_DIR = emptyScripts;          // tier-1 miss
++    const profileDir = tmp('ac-profile-');
++    process.env.CHROME_PROFILE = profileDir;
++    fs.writeFileSync(path.join(profileDir, 'SingletonLock'), 'stale');
++    // Stub "Chrome": parses --remote-debugging-port and serves /json/version.
++    const fakeChrome = path.join(stubDir, 'fake-chrome.sh');
++    fs.writeFileSync(fakeChrome, `#!/bin/bash
++for a in "$@"; do case "$a" in --remote-debugging-port=*) PORT="\${a#*=}";; esac; done
++exec python3 -c "
++import http.server, socketserver, json, sys
++class H(http.server.BaseHTTPRequestHandler):
++    def do_GET(self):
++        if self.path=='/json/version':
++            b=json.dumps({'Browser':'FakeChrome/1.0'}).encode()
++            self.send_response(200); self.send_header('Content-Length',len(b)); self.end_headers(); self.wfile.write(b)
++        else: self.send_response(404); self.end_headers()
++    def log_message(self,*a): pass
++socketserver.TCPServer(('127.0.0.1', int('\$PORT')), H).serve_forever()
++"
++`); fs.chmodSync(fakeChrome, 0o755);
++    process.env.CHROMIUM_PATH = fakeChrome;
++    // v15 F-series guard must not fire: findStartScript should be null here
++    cdp = freshCdp();
++    assert.strictEqual(cdp.findStartScript(), null);
++    ok('E1: skill-only deployment simulated — findStartScript() === null');
++
++    const t0 = Date.now();
++    const r = await cdp.ensureChromeCdp(`http://127.0.0.1:${port}`, () => {});
++    assert.strictEqual(r.up, true);
++    assert.strictEqual(r.autostarted, true);
++    assert.strictEqual(r.method, 'direct');
++    ok(`E2: ensureChromeCdp → {up:true, method:'direct'} in ${Date.now() - t0}ms with ZERO external scripts`);
++
++    assert.ok(!fs.existsSync(path.join(profileDir, 'SingletonLock')), 'stale singleton lock must be cleared');
++    ok('E3: stale SingletonLock removed before launch');
++
++    const pidFile = cdp.CHROME_PID_FILE;
++    assert.strictEqual(path.basename(pidFile), 'chrome-debug.chrome.pid');
++    assert.ok(fs.existsSync(pidFile), 'pid file must be written');
++    const pid = parseInt(fs.readFileSync(pidFile, 'utf8'), 10);
++    assert.ok(pid > 0);
++    ok('E4: pid file written with ps1-compatible name (start-chrome.ps1 -Stop interop)');
++    try { process.kill(-pid, 'SIGKILL'); } catch (_) { try { process.kill(pid, 'SIGKILL'); } catch (_) {} }
++    fs.rmSync(pidFile, { force: true });
++
++    // ps1 parity pin — both sides must keep using the same pid filename
++    const ps1 = fs.readFileSync('./scripts/start-chrome.ps1', 'utf8');
++    assert.ok(ps1.includes('chrome-debug.chrome.pid'));
++    ok('E5: ps1 uses the identical pid filename (interop pinned)');
++
++    // ── F: telemetry wiring ──────────────────────────────────────────────
++    const idx = fs.readFileSync('./skills/AgentChat-OneWeb/index.js', 'utf8');
++    assert.match(idx, /cdp_autostart_method/);
++    ok('F1: index.js records cdp_autostart_method (script|direct) in telemetry');
++
++    // cleanup env for downstream suites
++    delete process.env.AGENTCHAT_ENV_FILE; delete process.env.AGENTCHAT_SCRIPTS_DIR;
++    delete process.env.CHROMIUM_PATH; delete process.env.CHROME_PROFILE;
++
++    console.log(`\n${passed} assertion groups passed`);
++    process.exit(0);
++})().catch(e => { console.error('FAIL:', e.message); process.exit(1); });

@@ -170,9 +170,19 @@ Gemini 是 chain 中唯一要求 **Pro Extended Thinking** 的 provider。
 #      CHROME_PROFILE=~/.chrome-debug-profile
 #    如果未配置，所有 AI 网站的登录态会丢失！
 
-# 1. Chrome debug 在端口 9222 运行
-#    v15 起 index.js 会在端口不通时自动执行本平台启动脚本（一次，等待 45s；
-#    AGENTCHAT_NO_AUTOSTART=1 关闭）。手动预启动仍然更快：
+# 1. Chrome debug 在端口 9222 运行 — v16 起完全自动，零外部脚本依赖
+#    index.js 端口不通时自动启动 Chrome（AGENTCHAT_NO_AUTOSTART=1 关闭）：
+#      Tier 1: 平台启动脚本（若部署了 scripts/ — 仓库完整 clone 场景）
+#      Tier 2: 内嵌启动器 — 直接定位 Chrome 二进制并以加固 flag 集启动。
+#              workbuddy 等只拷贝 skills 树的宿主（scripts/ 永远缺失）走此路径。
+#    skill-only 部署（workbuddy / ~/.claude/skills/）只需保证:
+#      a) .env 放在 skills/ 的上级目录（与 scripts/ 本应在的位置相同），
+#         或设 AGENTCHAT_ENV_FILE 指向它 — Node 侧自 v16 起自行安全加载 .env
+#      b) .env 里 CHROMIUM_PATH 指向系统 Chrome（Windows 例:
+#         C:\Program Files\Google\Chrome\Application\chrome.exe；
+#         未设时按标准安装路径自动探测，含 Edge 兜底）
+#    首次登录: 内嵌启动器默认 headful，窗口打开后直接在其中登录 Gemini 即可。
+#    手动预启动（可选，完整 clone 下更快）：
 #    Linux/macOS:
 pgrep -f "start-chrome-debug" || bash scripts/start-chrome-debug.sh
 #    Windows (PowerShell；首次使用加 -FirstLogin 登录 Gemini):

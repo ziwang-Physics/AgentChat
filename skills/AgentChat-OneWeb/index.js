@@ -1002,7 +1002,12 @@ async function main() {
             ctx.recordTelemetry(1);
             process.exit(1);
         }
-        if (ensured.autostarted) ctx.telemetry.cdp_autostarted = true;
+        if (ensured.autostarted) {
+            ctx.telemetry.cdp_autostarted = true;
+            // v16: 'script' = deployed start script; 'direct' = embedded
+            // launcher (workbuddy-style installs without scripts/)
+            ctx.telemetry.cdp_autostart_method = ensured.method || 'script';
+        }
         browser = await connectWithRetry(CDP_URL);
     } catch (err) {
         log(`FATAL: Cannot connect to Chrome CDP — ${err.message}`);
