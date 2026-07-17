@@ -73,6 +73,7 @@ module.exports = {
     },
     responseSelectors: RESPONSE_SELECTORS,
     stabilityWindow: 15_000,
+    responseFormat: 'markdown',
     minResponseLength: 5,
 
     // v11: no stop selectors are known for this UI — the shared detector is

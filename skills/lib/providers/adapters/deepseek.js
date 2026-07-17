@@ -49,6 +49,7 @@ module.exports = {
     responseSelectors: RESPONSE_SELECTORS,
     responseSelectorTimeout: 60_000,
     stabilityWindow: 12_000,
+    responseFormat: 'markdown',
     minResponseLength: 5,
 
     // v11: R1 深度思考 stalls text mid-fold ("思考中…", collapsing reasoning

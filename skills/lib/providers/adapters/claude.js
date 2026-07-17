@@ -65,6 +65,7 @@ module.exports = {
         '[class*="message"]',
     ],
     stabilityWindow: 10_000,
+    responseFormat: 'markdown',
     minResponseLength: 5,
 
     // ── Post-processing: strip "Thinking" placeholder + search-result blocks ──

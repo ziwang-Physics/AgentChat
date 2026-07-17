@@ -102,6 +102,7 @@ module.exports = {
     responseSelectors: RESPONSE_SELECTORS,
     responseSelectorTimeout: 60_000,
     stabilityWindow: 8_000,
+    responseFormat: 'markdown',
     minResponseLength: 10,
 
     // ── Prevent premature "done" during Kimi's multi-round search pauses ──

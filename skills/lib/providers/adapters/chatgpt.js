@@ -81,6 +81,7 @@ module.exports = {
     // responseEl misses it. Widen the image scan to the enclosing turn.
     imageScopeSelector: '[data-message-author-role="assistant"]',
     stabilityWindow: 10_000,
+    responseFormat: 'markdown',
     minResponseLength: 5,
 
     // ── Pre-input hook: wait for ProseMirror editor to be ready ──
