@@ -23,6 +23,14 @@ const { appendWithRotation } = require('./telemetry');
 const { log: _tlog } = require('./terminal');
 const flog = (key, msg) => { try { _tlog(key || 'factory', msg); } catch (_) {} };
 
+// HTML → Markdown converter for responseFormat: 'markdown'
+const TurndownService = require('turndown');
+const turndown = new TurndownService({
+    headingStyle: 'atx',
+    codeBlockStyle: 'fenced',
+    emDelimiter: '*',
+});
+
 // ══════════════════════════════════════════════════════════════════════════════
 // CONFIG SCHEMA (JSDoc reference — not enforced at runtime)
 // ══════════════════════════════════════════════════════════════════════════════
@@ -827,7 +835,19 @@ async function waitForCompletion(page, config, startTime, timeoutMs) {
  * essentially the prompt itself, fail the EXTRACT stage instead.
  */
 async function extractResponse(page, responseEl, config, prompt) {
-    let text = await responseEl.evaluate(el => (el.innerText || el.textContent || '').trim());
+    let text;
+
+    if (config.responseFormat === 'markdown') {
+        // Extract innerHTML and convert to Markdown.
+        // innerText loses all formatting (bold, code, lists, tables, links).
+        // innerHTML preserves the rendered structure, and turndown converts
+        // it back to well-formed Markdown.
+        const html = await responseEl.evaluate(el => el.innerHTML);
+        if (!html || html.trim().length < config.minResponseLength) return null;
+        text = turndown.turndown(html).trim();
+    } else {
+        text = await responseEl.evaluate(el => (el.innerText || el.textContent || '').trim());
+    }
 
     if (!text || text.length < config.minResponseLength) return null;
 

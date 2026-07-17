@@ -298,6 +298,7 @@ module.exports = {
     responseSelectors: [RESPONSE_SELECTOR, '.markdown.markdown-main-panel'],
     responseSelectorTimeout: 60_000,
     stabilityWindow: 10_000,
+    responseFormat: 'markdown',
     minResponseLength: 10,
 
     // v11: the factory now caps ⚙ stability-clock holds at

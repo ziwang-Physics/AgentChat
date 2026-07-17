@@ -47,6 +47,7 @@ module.exports = {
     responseSelectors: RESPONSE_SELECTORS,
     responseSelectorTimeout: 60_000,
     stabilityWindow: 8_000,
+    responseFormat: 'markdown',
     minResponseLength: 5,
 
     // v11: phase-3 defense for 深度搜索 rounds. Phase-1 handles the detached

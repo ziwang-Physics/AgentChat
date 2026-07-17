@@ -77,6 +77,7 @@ module.exports = {
         '[class*="response"]',
     ],
     stabilityWindow: 10_000,
+    responseFormat: 'markdown',
     minResponseLength: 5,
 
     // ── Pre-input hook: wait for ProseMirror editor to be ready ──

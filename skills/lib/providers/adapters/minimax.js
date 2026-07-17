@@ -31,6 +31,7 @@ module.exports = {
     sendFallback: 'Enter',
     responseSelectors: RESPONSE_SELECTORS,
     stabilityWindow: 10_000,
+    responseFormat: 'markdown',
     minResponseLength: 5,
 
     // v11: agent.minimaxi.com is an AGENTIC product — tool/browse phases stall

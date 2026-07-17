@@ -3,7 +3,8 @@
   "name": "agentchat",
   "description": "Multi-provider AI CDP bridge — Claude Code skills for free web AI agents",
   "dependencies": {
-    "playwright-core": "^1.61.0"
+    "playwright-core": "^1.61.0",
+    "turndown": "^7.2.4"
   },
   "engines": {
     "node": ">=18.0.0"
