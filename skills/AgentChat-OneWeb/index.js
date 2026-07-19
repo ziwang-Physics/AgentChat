@@ -66,7 +66,7 @@ const { ProviderError, classifyError } = require('../lib/errors');
 const { createProviderRunner, appendWithRotation } = require('../lib/providerFactory');
 const { makeRunId, emitReceipt } = require('../lib/receipt');
 const { log: _log, startTimer: _startTimer, spinner } = require('../lib/terminal');
-const { connectWithRetry: _connectWithRetry, doctorCheck: _doctorCheck, ensureChromeCdp, startHint, isWSL } = require('../lib/cdp');
+const { connectWithRetry: _connectWithRetry, doctorCheck: _doctorCheck, ensureChromeCdp, startHint, isWSL, CDP_URL: LIB_CDP_URL } = require('../lib/cdp');
 const { acquireBrowserSlot, releaseBrowserSlot } = require('../lib/locks');
 
 // ── Adapt shared modules to OneWeb naming conventions ──
@@ -80,7 +80,12 @@ const doctorCheck = () => _doctorCheck(true, log);
 // CONFIG
 // ══════════════════════════════════════════════════════════════════════════════
 
-const CDP_URL = `http://127.0.0.1:${process.env.CDP_PORT || '9222'}`;
+// v18: single source of truth — lib/cdp.js folds in CDP_HOST (WSL2 →
+// Windows-host Chrome) and CDP_PORT via the v16 .env loader. The old local
+// `http://127.0.0.1:${CDP_PORT}` silently ignored CDP_HOST, so WSL users who
+// configured .env.example's escape hatch still probed the VM-local loopback
+// and got ERR_NO_CDP on every run.
+const CDP_URL = LIB_CDP_URL;
 const DEFAULT_TOTAL_TIMEOUT = 600_000; // 10 min total across all providers
 const DEFAULT_PROVIDER_TIMEOUT = 180_000; // 3 min per provider
 const SKILL_DIR = path.dirname(__filename); // skill directory for telemetry

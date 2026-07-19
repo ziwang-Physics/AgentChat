@@ -237,13 +237,24 @@ if ($FirstLogin) {
     Write-Host ""
 }
 
-$chromeProc = Start-Process -FilePath $CHROME_PATH -ArgumentList $ArgString -PassThru
-Set-Content -Path $CHROME_PID_FILE -Value $chromeProc.Id
+# v18: 经 WMI Win32_Process.Create 启动 — 新进程父进程是 WmiPrvSE.exe，
+# 位于调用方的 Job Object 之外。agent 宿主（Claude Code 等）的工具调用跑在
+# kill-on-close Job 里，Start-Process 出来的 Chrome 会在工具调用结束瞬间被
+# 连带杀掉（"回答完问题，下一轮 CDP 端口不可达"的直接成因之一）。
+$WmiCmdLine = ('"{0}" {1}' -f $CHROME_PATH, $ArgString)
+$wmi = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $WmiCmdLine }
+if ($wmi.ReturnValue -ne 0) {
+    Write-Host "[ERROR] WMI process create failed (ReturnValue=$($wmi.ReturnValue))" -ForegroundColor Red
+    Write-Host "  Diagnose: run the same command via Start-Process manually, or check AV policy on chrome.exe debug flags"
+    exit 1
+}
+$chromePid = $wmi.ProcessId
+Set-Content -Path $CHROME_PID_FILE -Value $chromePid
 
 # v15 [P1]: 立即退出检测 — flag 错误 / profile 被另一实例占用时 Chrome 秒退，
 # 旧版会傻等 30s 然后（更糟地）假装成功。
 Start-Sleep -Milliseconds 1500
-$alive = Get-Process -Id $chromeProc.Id -ErrorAction SilentlyContinue
+$alive = Get-Process -Id $chromePid -ErrorAction SilentlyContinue
 if (-not $alive) {
     # Chrome 单例机制：若同 profile 已有实例，新进程把 URL 转交后退出 —
     # 此时端口可能仍会由旧实例提供。先探测一次再判死刑。
@@ -275,8 +286,8 @@ if (-not $ready) {
     Write-Host "  Diagnose:"
     Write-Host "   1. Is another process holding the port?"
     netstat -ano | Select-String ":$CDP_PORT " | ForEach-Object { Write-Host "      $_" }
-    Write-Host "   2. Is chrome.exe alive?  (managed PID: $($chromeProc.Id))"
-    Get-Process -Id $chromeProc.Id -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "      alive: $($_.ProcessName) $($_.Id)" }
+    Write-Host "   2. Is chrome.exe alive?  (managed PID: $chromePid)"
+    Get-Process -Id $chromePid -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "      alive: $($_.ProcessName) $($_.Id)" }
     Write-Host "   3. Check %TEMP%\chrome-debug.chrome.pid and retry with -Stop first"
     exit 1
 }

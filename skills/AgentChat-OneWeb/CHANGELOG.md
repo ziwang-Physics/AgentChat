@@ -1,5 +1,14 @@
 # AgentChat-OneWeb Changelog
 
+## 2026-07-19 (v18) — Windows CDP 端口不可达四联修
+- **[P0] Job Object 陪葬 (`lib/cdp.js` + `scripts/start-chrome.ps1`)**: agent 宿主的工具调用跑在 kill-on-close Job 里，Node `detached: true` 不设置 `CREATE_BREAKAWAY_FROM_JOB`，autostart/Start-Process 出来的 Chrome 在 skill 进程退出瞬间被连带杀掉——"回答完问题，下一轮 ERR_NO_CDP" 的直接成因。现: 内嵌启动器与 ps1 均经 WMI `Win32_Process.Create` 创建进程（父进程 WmiPrvSE.exe，位于任何调用方 Job 之外），同时拿到真实 PID 写入 PID 文件保持 `-Stop` 互操作；WMI 不可用时降级为 plain spawn 并显式告警
+- **[P0] Windows 单例吸收 (`launchChromeDirect`)**: Windows Chrome 单例是命名 mutex/消息窗口而非 `Singleton*` 文件——v16 的删文件解锁在 Windows 上是 no-op，同 profile 已有存活实例时新 chrome.exe 被吸收秒退、端口永不绑定、傻等 45s 后报泛化失败。现: 启动前经 CIM 扫描持有 `--user-data-dir=<profile>` 的 chrome/msedge/chromium 进程；命中且为 PID 文件记录的受管实例 → `taskkill /T /F` 回收后重启，他人实例 → 快速 loud-fail 并给出 PID 与三条处置指引（POLICY 不变: 绝不动用户自己的 Chrome）。`Singleton*` 文件清理收窄至 POSIX
+- **[P0] `index.js` 硬编码 `127.0.0.1` 无视 CDP_HOST**: OneWeb 自拼 CDP_URL 与 lib/cdp.js 分叉，WSL2 按 .env.example 配了 `CDP_HOST=<Windows 宿主 IP>` 仍探测 VM 内 loopback → 每轮 ERR_NO_CDP。现: 改用 lib 导出的 `CDP_URL` 单一事实源（CDP_HOST + CDP_PORT + v16 .env 加载全部生效）
+- **[P1] 早退检测与诊断对齐 ps1 (`waitForPortOrDeath`)**: 内嵌启动器新增 PID 存活监视（1.5s 宽限 + 死亡后二次探测端口以容忍单例转交），launched 进程死亡即刻中止等待并给出定向 reason（单例吸收 / AV 拦截），不再烧满 45s；win32 失败路径追加 `netstat -ano | findstr :<port>` 诊断输出
+- **[P1] Chrome ≥136 默认目录守卫**: `CHROME_PROFILE` 指向浏览器默认 User Data 目录（Win/Linux/macOS 三平台布局识别）时直接拒绝并说明——Chrome ≥136 在默认数据目录上静默禁用 `--remote-debugging-port`，旧行为是端口永不打开的无声超时
+- **[docs] SKILL.md**: Windows agent 宿主部署段新增 `setx AGENTCHAT_ENV_FILE / AGENTCHAT_SCRIPTS_DIR` 逃生门——skill-only 布局下 lib 的 .env 候选路径解析到 `~/.claude/.env`，仓库根配置（CDP_PORT/CHROME_PROFILE/CHROMIUM_PATH/PROXY_SERVER/CDP_HOST）此前对 skill 进程完全不可见，是端口/profile 分裂的根源
+- 新增 `test_v18_windows_cdp.js` — CDP_URL 接线断言（源级 + 子进程环境功能验证）、`winArgQuote` CommandLineToArgvW 语义、WMI 命令构造（PS 单引号转义）、`parseProfileHolders`（带引号/尾斜杠/大小写/非命中排除）、默认 User Data 目录识别三平台正反例、`isProcessAlive`、`waitForPortOrDeath` 死亡早退时间界
+
 ## 2026-07-17 (v17) — 反脆弱层：墙检测 / ARIA 定位层 / 浏览器级准入控制
 - **[P0] 墙检测 (`lib/pageHealth.js` 新增)**: CAPTCHA / 登录墙 / 限流拦截页的单次 evaluate 检测——结构性证据 (reCAPTCHA/hCaptcha/Turnstile/Cloudflare/Arkose iframe、challenge form、可见 password 输入) 无条件判定; 文案证据受双门限 (页面无可见聊天编辑器 + body <1500 字符) 防误报。设计立场: **检测并交给人, 绝不绕过**。三处接线: 导航后 (同 URL 渲染的墙, URL 检查抓不到)、编辑器找不到时 (墙是 "no editor" 的头号真实成因)、响应等待超时时 (发送后弹出的会话过期/限流)。分类 captcha/login→`auth` (触发 recoveryHint)、ratelimit→`quota` (exit 5 重试语义), 替代原先烧完预算归 `error`/`timeout` 的静默模式
 - **[P1] ARIA 定位层**: `findEditableElement` 在 CSS 列表全灭后、shadow-DOM 启发式之前插入 `getByRole('textbox')` 语义层 (主流抗漂移首选: role 定位在 class 重命名/hash class churn 下存活)。三层命中打 `_fsTier` 标签落入 `ctx.telemetry.editor_tier`——aria/heuristic 命中即 adapter selector 列表已漂移的早期告警, 无需等全灭

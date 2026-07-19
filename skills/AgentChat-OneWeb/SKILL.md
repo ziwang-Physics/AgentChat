@@ -181,7 +181,19 @@ Gemini 是 chain 中唯一要求 **Pro Extended Thinking** 的 provider。
 #      b) .env 里 CHROMIUM_PATH 指向系统 Chrome（Windows 例:
 #         C:\Program Files\Google\Chrome\Application\chrome.exe；
 #         未设时按标准安装路径自动探测，含 Edge 兜底）
-#    首次登录: 内嵌启动器默认 headful，窗口打开后直接在其中登录 Gemini 即可。
+#      c) Windows + agent 宿主（skill 装在 ~/.claude/skills/ 等）: skill 进程
+#         看不到仓库根的 .env 与 scripts/（lib 的候选路径会解析到
+#         ~/.claude/.env）。用两个逃生门环境变量接回来（设为用户级，
+#         工具调用子进程自动继承）:
+#           setx AGENTCHAT_ENV_FILE    "C:\path\to\AgentChat\.env"
+#           setx AGENTCHAT_SCRIPTS_DIR "C:\path\to\AgentChat\scripts"
+#         否则 skill 只会按默认值探测 127.0.0.1:9222 + ~/.chrome-debug-profile，
+#         与 ps1 按仓库 .env 启动的 Chrome（自定义端口/profile）分裂 —— 端口
+#         探测失败后再拉起的同 profile 实例会被 Windows 单例机制吸收秒退。
+#         v18 起: 内嵌启动器经 WMI 创建 Chrome（脱离工具调用的 Job Object，
+#         不再随 run 结束被连带杀掉）；启动前侦测占用 profile 的存活实例
+#         （仅回收 PID 文件记录的受管实例，他人实例快速报错）；拒绝浏览器
+#         默认 User Data 目录（Chrome ≥136 在其上静默禁用调试端口）。
 #    手动预启动（可选，完整 clone 下更快）：
 #    Linux/macOS:
 pgrep -f "start-chrome-debug" || bash scripts/start-chrome-debug.sh
