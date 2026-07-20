@@ -17,6 +17,14 @@
 const { COMMON_DISMISS_PATTERNS } = require('../../providerFactory');
 const { makeStillWorkingCheck } = require('../../stillWorking');
 
+// v20: safe stderr logger — replaces the try{require('../../terminal')}catch
+// boilerplate that had been copy-pasted at every log site in this adapter.
+let klog = () => {};
+try {
+    const { log: _tlog } = require('../../terminal');
+    klog = (msg) => { try { _tlog('kimi', msg); } catch (_) {} };
+} catch (_) { /* logger unavailable — stay silent */ }
+
 // ── v12: Fast mode selector for Kimi ─────────────────────────────────────────
 // Kimi's model selector lets users pick between models (快速模式 / 深入思考 /
 // k1.5 / k2 / etc.). The fast mode (快速模式) is the lighter, cheaper model
@@ -202,6 +210,69 @@ async function ensureKimiFastMode(page) {
     }
 }
 
+// ── v19: Deep-think toggle-off ───────────────────────────────────────────────
+// Field failure: Kimi runs frequently blew the 180s per-call cap and were
+// SIGKILL'd by the orchestrator's watchdog (budget + 35s). Fast mode alone
+// (above) doesn't help when the 深度思考 toggle is ON — long-thinking easily
+// exceeds any bulk-dispatch budget. For independent homework-style tasks the
+// fast path is the right default; opt out via AGENTCHAT_KIMI_KEEP_DEEPTHINK=1.
+
+const DEEPTHINK_RE = /深度思考|深入思考|长思考|深度推理|Deep\s*Think(?:ing)?|Long\s*Think/i;
+
+/**
+ * Turn OFF Kimi's deep-thinking toggle if — and only if — it is PROVABLY
+ * active. Clicking a toggle whose state we cannot read risks turning
+ * deep-think ON, which is strictly worse than doing nothing; every ambiguity
+ * therefore resolves to "don't touch".
+ *
+ * @param {import('playwright-core').Page} page
+ * @returns {Promise<boolean>} true if an active deep-think toggle was clicked off
+ */
+async function ensureKimiDeepThinkOff(page) {
+    if (process.env.AGENTCHAT_KIMI_KEEP_DEEPTHINK === '1') return false;
+    try {
+        const clicked = await page.evaluate((reSrc, reFlags) => {
+            const re = new RegExp(reSrc, reFlags);
+            // Word-ish boundaries: "interactive" must NOT count as "active".
+            const ACTIVE_CLS_RE = /(?:^|[\s_-])(?:active|checked|selected|enabled|on)(?:$|[\s_-])/i;
+            const isActive = (el) => {
+                if (!el || !el.getAttribute) return false;
+                const cls = typeof el.className === 'string' ? el.className : '';
+                if (ACTIVE_CLS_RE.test(cls)) return true;
+                if (el.getAttribute('aria-pressed') === 'true') return true;
+                if (el.getAttribute('aria-checked') === 'true') return true;
+                const ds = el.dataset || {};
+                if (ds.state === 'checked' || ds.state === 'on' || ds.active === 'true') return true;
+                return false;
+            };
+            const candidates = document.querySelectorAll(
+                'button, [role="switch"], [role="button"], [class*="switch"], [class*="toggle"], [class*="chip"]'
+            );
+            for (const el of candidates) {
+                if (el.offsetParent === null) continue; // hidden
+                const t = ((el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '')).trim();
+                if (!t || t.length > 40 || !re.test(t)) continue;
+                // Active state may live on the element or a close wrapper —
+                // climb at most 3 ancestors, each judged with the SAME strict
+                // predicate (never a bare substring match).
+                let active = false;
+                let probe = el;
+                for (let d = 0; d < 4 && probe; d++, probe = probe.parentElement) {
+                    if (isActive(probe)) { active = true; break; }
+                }
+                if (!active) continue; // unknown/off state — never click blind
+                el.click();
+                return true;
+            }
+            return false;
+        }, DEEPTHINK_RE.source, DEEPTHINK_RE.flags);
+        if (clicked) await page.waitForTimeout(800);
+        return !!clicked;
+    } catch (_) {
+        return false; // best-effort — never fail the provider over a toggle
+    }
+}
+
 // Hoisted so responseSelectors and stillGeneratingCheck are guaranteed to
 // judge the SAME container family. The old check hardcoded selector [0]
 // ('[class*="chat-content-item-assistant"]') and silently read the wrong
@@ -262,15 +333,25 @@ module.exports = {
         // Best-effort — degrades gracefully to page default if selector not found
         try {
             const fastOk = await ensureKimiFastMode(page);
-            if (fastOk) {
-                // v12: use require'd terminal logger like gemini adapter does
-                try {
-                    const { log: _tlog } = require('../../terminal');
-                    _tlog('kimi', '快速模式 (fast mode) active');
-                } catch (_) { /* logger not available in all contexts */ }
-            }
+            // v19: log BOTH outcomes — a silent activation failure previously
+            // looked identical to success in the logs, hiding the root cause
+            // of budget-overrun SIGKILLs behind "kimi is just slow".
+            klog(fastOk
+                ? '快速模式 (fast mode) active'
+                : '⚠ 快速模式激活失败（选择器未命中或 UI 变更）— 使用页面默认模型');
         } catch (_) { /* best-effort — proceed with page default */ }
+
+        // Step 3 (v19): turn OFF 深度思考 — the main per-call-budget killer
+        // for bulk independent dispatch. Provably-active toggles only;
+        // AGENTCHAT_KIMI_KEEP_DEEPTHINK=1 opts out.
+        try {
+            const offed = await ensureKimiDeepThinkOff(page);
+            if (offed) klog('深度思考已关闭（v19：避免超出 per-call 预算被 SIGKILL）');
+        } catch (_) { /* best-effort */ }
     },
+
+    // v19: exported for tests (factory ignores unknown keys)
+    _ensureKimiDeepThinkOff: ensureKimiDeepThinkOff,
 
     editorSelectors: [
         '.chat-input-editor',

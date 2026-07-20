@@ -73,7 +73,6 @@ const STAGGER_MS = 1500; // inter-worker launch delay
 
 const { log: _log } = require('../lib/terminal');
 const log = (msg) => _log('orch', msg);
-function ts() { return new Date().toISOString().slice(11, 19); }
 
 // ═══════════════════════════════════════════════════════════════════
 // PROVIDER CALL — shared executor (lib/execute.js)
@@ -244,7 +243,9 @@ async function runOneWorker(node, budgetMs, skipList = [], prompt = node.prompt)
     log(`  [${node.id}] ✗ exception: ${String(e).slice(0, 60)}`);
     return {
       nodeId: node.id,
-      output: { provider_used: null, response: null, error: String(e), degradation: { reason: "EXCEPTION", confidence_adjustment: -1.0 } },
+      // v20: primary_intended included — every other failure shape carries it,
+      // and assignTrust/receipt consumers shouldn't special-case this branch.
+      output: { provider_used: null, primary_intended: primaryKey, response: null, error: String(e), degradation: { reason: "EXCEPTION", confidence_adjustment: -1.0 } },
       quality: { passed: false, issues: ["EXCEPTION"], quality_score: 0 },
       node,
     };
@@ -639,7 +640,7 @@ function printStructuredOutput(dag, results, arb, totalMs) {
 
 async function main() {
   const args = process.argv.slice(2);
-  let timeout = 600_000, prompt = "", smoke = false, doctor = false;
+  let timeout = 600_000, prompt = "", smoke = false, doctor = false, planFile = null;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i].startsWith("--timeout=")) {
@@ -649,6 +650,12 @@ async function main() {
       i++;
     } else if (args[i] === "--smoke") smoke = true;
     else if (args[i] === "--doctor") doctor = true;
+    // v19 --plan: read the JSON plan from a FILE instead of argv. A 10KB+ plan
+    // passed as "$(cat plan.json)" risks shell truncation / quote mangling —
+    // one corrupted byte silently downgrades tryParsePreDecomposedPlan() to a
+    // full AI re-decomposition of the (mangled) text.
+    else if (args[i].startsWith("--plan=")) planFile = args[i].slice("--plan=".length);
+    else if (args[i] === "--plan" && args[i + 1]) { planFile = args[i + 1]; i++; }
     // --keep-tabs is always-on (no longer configurable — we never close user's Chrome).
     // It must still be recognized and swallowed here, otherwise it falls into the
     // `else` branch below and gets concatenated into `prompt`, corrupting the
@@ -658,6 +665,19 @@ async function main() {
     else prompt += args[i] + " ";
   }
   prompt = prompt.trim();
+  if (planFile) {
+    // v20: an argv prompt AND --plan together is almost always a caller bug
+    // (e.g. quoting slipped and half the JSON became positional args) — the
+    // file wins, but say so instead of silently discarding the argv text.
+    if (prompt) log(`WARN: both --plan and an argv prompt given — argv prompt (${prompt.length} chars) ignored, using ${planFile}`);
+    try {
+      prompt = fs.readFileSync(planFile, "utf8").trim();
+      log(`Plan loaded from ${planFile} (${prompt.length} chars)`);
+    } catch (e) {
+      log(`ERROR: cannot read --plan file "${planFile}": ${e.message}`);
+      process.exit(64); // EX_USAGE — matches OneWeb's usage-error convention
+    }
+  }
   if (!prompt && !smoke && !doctor && !process.stdin.isTTY) {
     const chunks = [];
     for await (const chunk of process.stdin) chunks.push(chunk);
@@ -675,7 +695,7 @@ async function main() {
   }
 
   if (!prompt && !smoke) {
-    log("Usage: node index.js [--timeout=N] [--smoke] [--doctor] <prompt>");
+    log("Usage: node index.js [--timeout=MS] [--plan=FILE] [--smoke] [--doctor] <prompt>   (或: node index.js < plan.json)");
     process.exit(1);
   }
 
@@ -693,7 +713,8 @@ async function main() {
   // UNIT FIX: timeouts are milliseconds, but SKILL.md examples were written in
   // seconds (--timeout=900 → 900ms → M1 got a 270ms budget and always failed).
   // Normalize implausibly small values instead of silently starving the run.
-  if (timeout > 0 && timeout < 10_000) {
+  // (timeout > 0 is guaranteed by the NaN guard above.)
+  if (timeout < 10_000) {
     log(`WARN: --timeout=${timeout} interpreted as ${timeout}s (${timeout * 1000}ms). Timeouts are in milliseconds.`);
     timeout *= 1000;
   }
@@ -732,7 +753,11 @@ async function main() {
 
   // M1: Build DAG
   const dag = await buildDAG(prompt, Math.floor(timeout * 0.3));
-  log(`  DAG: ${dag.nodes.map(n => `${n.id}(${n.ai}/${n.role})`).join(" → ")}`);
+  // v19: " | " separator — the node ARRAY carries no ordering, and "→" falsely
+  // implied a 9-node sequential dependency chain for plans where every
+  // depends_on is []. Actual execution order (if any) is shown by the
+  // "Wave N:" lines from dispatchWaves().
+  log(`  DAG nodes: ${dag.nodes.map(n => `${n.id}(${n.ai}/${n.role})`).join(" | ")}`);
 
   // M2: Wave dispatch (topological layers, depends_on now honored)
   // M2 gets 85% of the time ACTUALLY remaining after M1. Floor is a 60s

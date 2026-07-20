@@ -17,6 +17,9 @@
  *                                   # (used by AgentChat-IndependentTasks, which owns
  *                                   # its own cross-provider fallback + locking)
  *   node index.js --no-download-images "..."  # skip image download post-processing
+ *   node index.js --ephemeral-tab "..."  # dedicated new tab, never reused, closed on exit
+ *                                   # (required by same-provider concurrency:
+ *                                   # AGENTCHAT_MAX_TABS_PER_PROVIDER > 1)
  *
  * Exit codes:
  *   0 - Success (response on stdout)
@@ -465,17 +468,15 @@ async function fetchViaBrowser(page, url) {
  * @returns {{buffer: Buffer, ext: string}|null}
  */
 function decodeDataUri(uri) {
-    const m = /^data:(image\/\w+);base64,(.+)$/i.exec(uri);
+    const m = /^data:(image\/[\w.+-]+);base64,(.+)$/i.exec(uri);
     if (!m) return null;
-    const mime = m[1].toLowerCase();
-    const extMap = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/jpg': 'jpg',
-        'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg' };
-    const ext = extMap[mime] || 'png';
-    try {
-        return { buffer: Buffer.from(m[2], 'base64'), ext };
-    } catch (_) {
-        return null;
-    }
+    let buffer;
+    try { buffer = Buffer.from(m[2], 'base64'); } catch (_) { return null; }
+    // v20: sniffImageExt is the single payload-identification authority —
+    // magic bytes win over the URI's self-declared mime (a mislabelled
+    // data:image/png carrying JPEG bytes now gets the RIGHT extension).
+    const ext = sniffImageExt(buffer, m[1]) || 'png';
+    return { buffer, ext };
 }
 
 async function downloadAllImages(response, destDir, opts) {
@@ -615,6 +616,7 @@ async function tryAllProviders(browser, prompt, ctx, options = {}) {
     // POLICY: Never close the user's Chrome browser. We are a guest in their session.
     // Only manage our own tabs — page.close() for cleanup, but NEVER browser.close().
     const { keepTabs = true } = options;
+    const ephemeralTab = !!options.ephemeralTab; // v19: never reuse, close on exit
     const totalTimeout = options.totalTimeout || DEFAULT_TOTAL_TIMEOUT;
     const providerTimeout = options.providerTimeout
         || (options.singleAttempt
@@ -679,6 +681,18 @@ async function tryAllProviders(browser, prompt, ctx, options = {}) {
     const fallbackReasons = {};
     const triedProviders = [];
 
+    // v20 CDP perf: clipboard permissions are a CONTEXT property — granting
+    // once covers every page/attempt in it. This used to run inside the
+    // provider loop (one redundant CDP round-trip per attempt).
+    let permissionsGranted = false;
+    const ensureClipboardPermissions = async () => {
+        if (permissionsGranted) return;
+        try {
+            await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+            permissionsGranted = true;
+        } catch (_) { /* best-effort — defaultInput has non-clipboard fallbacks */ }
+    };
+
     // singleAttempt: bound the loop to exactly one provider (startIdx) instead of
     // cascading through the rest of PROVIDER_CHAIN on failure. Used by callers
     // (e.g. AgentChat-IndependentTasks) that implement their own cross-provider
@@ -713,6 +727,7 @@ async function tryAllProviders(browser, prompt, ctx, options = {}) {
                     if (freshCtx) {
                         browser = fresh;
                         context = freshCtx;
+                        permissionsGranted = false; // v20: new context — re-grant lazily
                         recovered = true;
                         log('✓ CDP reconnected — resuming chain');
                     }
@@ -753,7 +768,10 @@ async function tryAllProviders(browser, prompt, ctx, options = {}) {
         try {
             // ── Reuse an existing tab for this provider, or create a new one ──
             // (see findProviderPage() for why reuse replaced the old skip logic)
-            page = findProviderPage(context, provider);
+            // v19: under --ephemeral-tab reuse is FORBIDDEN — a dedicated tab
+            // is the isolation contract that makes same-provider concurrency
+            // safe, and it can never inherit a previous session's stale chat.
+            page = ephemeralTab ? null : findProviderPage(context, provider);
             if (page) {
                 log(`  ${provider.name}: reusing existing tab`);
             } else {
@@ -761,8 +779,8 @@ async function tryAllProviders(browser, prompt, ctx, options = {}) {
                 createdPage = true;
             }
 
-            // Grant clipboard permissions
-            try { await context.grantPermissions(['clipboard-read', 'clipboard-write']); } catch (_) { }
+            // Grant clipboard permissions (once per context — see above)
+            await ensureClipboardPermissions();
 
             // Dispatch to provider runner (each receives ctx for telemetry tracking)
             const runner = RUNNERS[provider.key];
@@ -915,9 +933,16 @@ async function main() {
     let singleAttempt = false; // --single: try exactly one provider, no cascade
     let downloadImages = true; // download images from response to cwd (--no-download-images to disable)
     let imageIntent = false;   // v14 --image: append IMAGE_ENHANCE_INSTRUCTION in-process
+    // v19 --ephemeral-tab: run in a DEDICATED new tab (never reuse an existing
+    // provider tab; close our tab on exit). Required for same-provider
+    // concurrency (AGENTCHAT_MAX_TABS_PER_PROVIDER > 1): with reuse, two
+    // concurrent subprocesses can findProviderPage() onto the SAME tab and
+    // cross-contaminate prompts/answers (串题). Also a hard mitigation for
+    // stale-answer extraction from tabs left over by previous sessions.
+    let ephemeralTab = false;
 
     const USAGE =
-        'Usage: node index.js [--timeout=MS] [--from=NAME] [--only=NAME] [--single] [--image] [--locale=xx_XX] [--keep-tabs] [--close] [--no-download-images] [--smoke] [--doctor] "Your prompt"\n' +
+        'Usage: node index.js [--timeout=MS] [--from=NAME] [--only=NAME] [--single] [--image] [--locale=xx_XX] [--keep-tabs] [--close] [--ephemeral-tab] [--no-download-images] [--smoke] [--doctor] "Your prompt"\n' +
         '       echo "prompt" | node index.js [flags]';
     // v14: usage errors exit 64 (BSD EX_USAGE), WITH a receipt. They used to
     // exit 1 — colliding with ERR_NO_CDP, so a caller-side bug (empty prompt)
@@ -964,6 +989,8 @@ async function main() {
         } else if (a === '--close' || a === '--close-browser') {
             // Only closes our own tab on success (page.close()) — never browser.close().
             keepTabs = false;
+        } else if (a === '--ephemeral-tab') {
+            ephemeralTab = true;
         } else if (a === '--single') {
             singleAttempt = true;
         } else if (a === '--image') {
@@ -1101,6 +1128,7 @@ async function main() {
                 startFrom,
                 keepTabs,
                 singleAttempt,
+                ephemeralTab, // v19: dedicated tab, no reuse, closed on exit
                 // v12: one-shot mid-chain CDP recovery (see browser-loss fail-fast)
                 reconnect: () => connectWithRetry(CDP_URL, 2),
             });
@@ -1136,6 +1164,14 @@ async function main() {
                 } catch (err) {
                     log(`Image download phase failed: ${err.message}`);
                 }
+            }
+
+            // v19: --ephemeral-tab contract — OUR dedicated tab is closed once
+            // the session-aware image download above no longer needs it.
+            // Only self-created tabs can reach here under ephemeralTab, so this
+            // never touches a user tab.
+            if (ephemeralTab && result.page && !result.page.isClosed()) {
+                try { await result.page.close(); } catch (_) { /* already gone */ }
             }
 
             // P0 FLUSH FIX: console.log + immediate process.exit truncates piped

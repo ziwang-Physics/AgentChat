@@ -690,6 +690,35 @@ async function dumpResponseDiagnostics(page, log = () => {}) {
  *     text change, so a false-positive check degrades to a bounded delay
  *     instead of burning the whole provider budget.
  */
+// ══════════════════════════════════════════════════════════════════════════════
+// IN-PAGE TEXT EXTRACTION — KaTeX/MathJax → LaTeX source
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// v20: single definition. This closure was duplicated VERBATIM in the phase-3
+// stability poller and extractResponse — any fix to one silently missed the
+// other (exact drift class the factory exists to prevent). Runs IN-PAGE via
+// locator.evaluate; must stay self-contained (no outer-scope references).
+const IN_PAGE_TEXT_WITH_MATH = (el) => {
+    const clone = el.cloneNode(true);
+    clone.querySelectorAll('.katex').forEach(node => {
+        const ann = node.querySelector('annotation[encoding="application/x-tex"]');
+        if (ann) {
+            const tex = ann.textContent.trim();
+            node.replaceWith(document.createTextNode(
+                (node.closest('.katex-display') ? '\n$$' + tex + '$$\n' : '$' + tex + '$')
+            ));
+        }
+    });
+    clone.querySelectorAll('mjx-container').forEach(node => {
+        const tex = node.getAttribute('data-tex');
+        if (tex) {
+            const block = node.hasAttribute('display') && node.getAttribute('display') === 'true';
+            node.replaceWith(document.createTextNode(block ? '\n$$' + tex + '$$\n' : '$' + tex + '$'));
+        }
+    });
+    return (clone.innerText || clone.textContent || '');
+};
+
 async function waitForCompletion(page, config, startTime, timeoutMs) {
     const { stopSelectors, stabilityWindow, pollInterval, onProgress } = config;
     const tick = onProgress || (() => {});
@@ -779,6 +808,59 @@ async function waitForCompletion(page, config, startTime, timeoutMs) {
     const selTimeout = config.responseSelectorTimeout || 30_000;
     const baseline = config.baselineCounts || null;
     let responseEl = null;
+
+    // ── v19 STALE-ANSWER FIX (answer cross-talk / 串题) ──
+    // Field failure: on a REUSED tab whose SPA restored a PREVIOUS run's
+    // conversation, the baseline gate above times out (send silently failed,
+    // or the new node mounts slowly), and the unconditional `.last()` fallback
+    // below then attaches to the OLD conversation's final answer. Phase-3
+    // stability polling sees perfectly stable stale text and returns it — the
+    // provider "answers" a DIFFERENT run's question (observed as R1_Q1 getting
+    // R1_Q4's answer across a 9-task IndependentTasks dispatch).
+    //
+    // Guard: before accepting the legacy `.last()` fallback ON A REUSED TAB
+    // (baseline > 0), require prompt-echo evidence — a normalized prefix of
+    // THIS call's prompt must be visible on the page OUTSIDE editable inputs
+    // (the user bubble of OUR send). Echo provably absent → the send never
+    // committed into this conversation, so `.last()` can only be stale: skip
+    // it and let the caller classify an honest 'timeout' instead of returning
+    // a silent wrong answer. Fresh pages (baseline 0) are untouched; probe
+    // failures degrade OPEN (legacy behavior) so a transient CDP hiccup can't
+    // convert good runs into timeouts.
+    let echoVerdict; // undefined = not probed yet; true/false = probe result
+    const promptEchoPresent = async () => {
+        if (echoVerdict !== undefined) return echoVerdict;
+        const raw = typeof config.promptForEcho === 'string' ? config.promptForEcho : '';
+        const norm = (s) => s.replace(/\s+/g, ' ').trim();
+        const np = norm(raw);
+        if (np.length < 20) { echoVerdict = true; return echoVerdict; } // trivial prompt — guard off
+        // Prefix (not full text): user bubbles may be collapsed from the END
+        // by the UI ("展开" affordances), but the head survives collapse.
+        const needle = np.slice(0, 60).toLowerCase();
+        try {
+            // v20 CDP perf: match in-page and return ONE boolean — shipping the
+            // whole body innerText (100s of KB on long chats) across CDP just
+            // to run .includes() on it was the probe's dominant cost.
+            echoVerdict = await page.evaluate((needleIn) => {
+                const body = document.body;
+                if (!body) return false;
+                const clone = body.cloneNode(true);
+                // Exclude editors: after a failed send the prompt often still
+                // sits IN the input box — that must not count as echo.
+                clone.querySelectorAll('[contenteditable], textarea, input')
+                    .forEach((n) => n.remove());
+                const text = clone.innerText || clone.textContent || '';
+                return text.replace(/\s+/g, ' ').trim().toLowerCase().includes(needleIn);
+            }, needle);
+            if (!echoVerdict) {
+                flog(config.key, 'stale-guard: prompt echo NOT found on reused tab — refusing legacy .last() fallback (prevents cross-talk)');
+            }
+        } catch (_) {
+            echoVerdict = true; // probe failed — degrade open
+        }
+        return echoVerdict;
+    };
+
     for (const sel of config.responseSelectors) {
         const remaining = timeoutMs - (Date.now() - startTime);
         const perWait = Math.min(selTimeout, Math.max(1000, remaining));
@@ -792,7 +874,11 @@ async function waitForCompletion(page, config, startTime, timeoutMs) {
                 responseEl = page.locator(sel).last(); // live locator tracks newest
                 break;
             }
-            // gate failed — fall through to the legacy .last() probe below
+            // gate failed — legacy `.last()` fallback below is only legitimate
+            // when OUR prompt provably reached this conversation (v19).
+            if (!(await promptEchoPresent())) {
+                continue; // stale-only content — never extract it
+            }
         }
 
         const loc = page.locator(sel).last();
@@ -838,26 +924,7 @@ async function waitForCompletion(page, config, startTime, timeoutMs) {
         // Fast path out: page/context gone → no point polling further.
         if (page.isClosed()) { tick('?'); break; }
         try {
-            const text = await responseEl.evaluate(el => {
-              const clone = el.cloneNode(true);
-              clone.querySelectorAll('.katex').forEach(node => {
-                const ann = node.querySelector('annotation[encoding="application/x-tex"]');
-                if (ann) {
-                  const tex = ann.textContent.trim();
-                  node.replaceWith(document.createTextNode(
-                    (node.closest('.katex-display') ? '\n$$' + tex + '$$\n' : '$' + tex + '$')
-                  ));
-                }
-              });
-              clone.querySelectorAll('mjx-container').forEach(node => {
-                const tex = node.getAttribute('data-tex');
-                if (tex) {
-                  const block = node.hasAttribute('display') && node.getAttribute('display') === 'true';
-                  node.replaceWith(document.createTextNode(block ? '\n$$' + tex + '$$\n' : '$' + tex + '$'));
-                }
-              });
-              return (clone.innerText || clone.textContent || '');
-            });
+            const text = await responseEl.evaluate(IN_PAGE_TEXT_WITH_MATH);
             consecutiveErrors = 0;
 
             const now = Date.now();
@@ -1076,26 +1143,7 @@ async function collectResponseImages(responseEl, config) {
 }
 
 async function extractResponse(page, responseEl, config, prompt) {
-    let text = await responseEl.evaluate(el => {
-      const clone = el.cloneNode(true);
-      clone.querySelectorAll('.katex').forEach(node => {
-        const ann = node.querySelector('annotation[encoding="application/x-tex"]');
-        if (ann) {
-          const tex = ann.textContent.trim();
-          node.replaceWith(document.createTextNode(
-            (node.closest('.katex-display') ? '\n$$' + tex + '$$\n' : '$' + tex + '$')
-          ));
-        }
-      });
-      clone.querySelectorAll('mjx-container').forEach(node => {
-        const tex = node.getAttribute('data-tex');
-        if (tex) {
-          const block = node.hasAttribute('display') && node.getAttribute('display') === 'true';
-          node.replaceWith(document.createTextNode(block ? '\n$$' + tex + '$$\n' : '$' + tex + '$'));
-        }
-      });
-      return (clone.innerText || clone.textContent || '').trim();
-    });
+    let text = (await responseEl.evaluate(IN_PAGE_TEXT_WITH_MATH)).trim();
 
     // v13: capture image URLs BEFORE the text-length gate — a pure-image
     // response ("here's your picture", no prose) previously died right here
@@ -1612,11 +1660,14 @@ function createProviderRunner(cfg) {
         // responseSelector BEFORE sending lets waitForCompletion prefer the
         // first element that appears BEYOND this count. Fresh pages count 0 →
         // the guard is inert there. Best-effort: failures just disable the guard.
+        // v20 CDP perf: the counts are independent — issue them in parallel
+        // instead of N serial round-trips (Claude's adapter has 5 selectors).
         const baselineCounts = {};
-        for (const sel of C.responseSelectors) {
-            try { baselineCounts[sel] = await page.locator(sel).count(); }
-            catch (_) { /* guard disabled for this selector */ }
-        }
+        await Promise.all(C.responseSelectors.map(sel =>
+            page.locator(sel).count()
+                .then(n => { baselineCounts[sel] = n; })
+                .catch(() => { /* guard disabled for this selector */ })
+        ));
 
         // ── Step 7: Send ── (stage label fixed: was mislabeled WAIT_RESPONSE)
         try {
@@ -1678,7 +1729,8 @@ function createProviderRunner(cfg) {
         // clock, letting one provider consume up to ~2× its budget.
         // Shallow per-run copy: C is shared across invocations of this runner,
         // so per-run state (baselineCounts) must never be written onto it.
-        const responseEl = await waitForCompletion(page, { ...C, baselineCounts }, provStart, timeoutMs);
+        // v19: promptForEcho powers the stale-answer guard (see waitForCompletion)
+        const responseEl = await waitForCompletion(page, { ...C, baselineCounts, promptForEcho: prompt }, provStart, timeoutMs);
         if (!responseEl) {
             // v17: a wall can also mount MID-WAIT (post-send throttle, session
             // expiry during generation). Probe once before classifying, so the
@@ -1741,6 +1793,8 @@ module.exports = {
     // v10 hardening helpers (exported for tests / custom pipelines)
     heuristicFindEditor,
     verifySendEffect,
+    // v19: stale-answer guard regression tests drive waitForCompletion directly
+    __waitForCompletionForTests: waitForCompletion,
     // v12: send-committed context-loss recovery
     isContextLostError,
     salvageCommittedSend,

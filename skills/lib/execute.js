@@ -27,7 +27,7 @@
  */
 
 const { spawn } = require("child_process");
-const { acquireLock, releaseLock } = require("./locks");
+const { releaseLock, acquireProviderSlot, resolveMaxTabsPerProvider } = require("./locks");
 const { log: _log } = require("./terminal");
 const { PROVIDER_CHAIN } = require("./providers/chain");
 
@@ -51,7 +51,7 @@ const MAX_BUFFER = 1024 * 1024;    // 1MB stdout/stderr cap to prevent OOM
 // ALL_EXHAUSTED even when every provider was healthy. Budget-aware: retries stop
 // once remaining budget < minCallBudgetMs.
 const MAX_LOCK_RETRIES = 3;
-const LOCK_BACKOFF_BASE_MS = 5_000; // 5s → 15s → 30s
+const LOCK_BACKOFF_BASE_MS = 5_000; // ×3^k backoff: 5s → 15s → 45s
 
 // OneWeb exit-code contract (see its header comment)
 const EXIT_REASONS = {
@@ -117,7 +117,7 @@ function createExecutor({
      *
      * @returns {Promise<{ok:boolean, text:string, provider:string, terminal?:boolean, reason?:string, error?:string}>}
      */
-    function callProvider(prompt, provider, timeoutMs) {
+    function callProvider(prompt, provider, timeoutMs, callOpts = {}) {
         // BUDGET CONTRACT FIX: OneWeb's normalizeTimeout() reinterprets any
         // --timeout < 10000 as SECONDS (×1000) — a human-typo heuristic that is
         // wrong for programmatic callers. IndependentTasks's buildDAG can legally
@@ -136,14 +136,20 @@ function createExecutor({
             return Promise.resolve({ ok: false, text: "", provider, reason: "empty_prompt" });
         }
         return new Promise((resolve) => {
-            const child = spawn(process.execPath, [
+            const childArgs = [
                 webextPath,
                 `--only=${provider}`,
                 "--single",
                 `--timeout=${timeoutMs}`,
                 `--timeout-per-provider=${timeoutMs}`,
                 "--keep-tabs", // POLICY: never let subprocesses close the user's browser
-            ], { stdio: ["pipe", "pipe", "pipe"] });
+            ];
+            // v19: same-provider concurrency — when >1 tab slot per provider is
+            // configured, EVERY call runs in its own ephemeral tab (never reuse
+            // an existing tab, close it on exit). Reuse under concurrency lets
+            // two subprocesses findProviderPage() onto the SAME tab → 串题.
+            if (callOpts.ephemeralTab) childArgs.push("--ephemeral-tab");
+            const child = spawn(process.execPath, childArgs, { stdio: ["pipe", "pipe", "pipe"] });
 
             // stdin delivery — EPIPE-safe (child may exit before stdin drains)
             child.stdin.on("error", () => { /* EPIPE: child exited early */ });
@@ -169,6 +175,7 @@ function createExecutor({
             }, timeoutMs + 35_000);
 
             child.on("close", (code, signal) => {
+                if (settled) return; // 'error' already resolved this promise
                 settled = true;
                 clearTimeout(sigtermTimer); clearTimeout(sigkillTimer);
                 if (truncated) log(`WARN: ${provider} output exceeded 1MB — truncated`);
@@ -203,6 +210,7 @@ function createExecutor({
             });
 
             child.on("error", (err) => {
+                if (settled) return; // 'close' already resolved this promise
                 settled = true;
                 clearTimeout(sigtermTimer); clearTimeout(sigkillTimer);
                 resolve({ ok: false, text: "", provider, reason: "spawn_error", error: err.message });
@@ -239,30 +247,38 @@ function createExecutor({
             // ALL_EXHAUSTED even when every provider was healthy. Retry with
             // exponential backoff (5s → 15s → 30s), budget-aware so we
             // don't burn the call budget on waiting alone.
-            let lockAcquired = acquireLock(key);
+            //
+            // v19: acquireLock(key) → acquireProviderSlot(key). Default cap is
+            // 1 slot (bare provider-name lock — behavior identical to before);
+            // AGENTCHAT_MAX_TABS_PER_PROVIDER=2..4 opens extra lanes so
+            // round-robin overflow tasks (N tasks > M providers) and fallbacks
+            // run CONCURRENTLY in dedicated ephemeral tabs instead of
+            // serializing on one shared tab.
+            const maxTabs = resolveMaxTabsPerProvider();
+            let slot = acquireProviderSlot(key, { max: maxTabs });
             let lockRetries = 0;
-            while (!lockAcquired && lockRetries < MAX_LOCK_RETRIES) {
+            while (!slot && lockRetries < MAX_LOCK_RETRIES) {
                 const waitMs = Math.min(
                     LOCK_BACKOFF_BASE_MS * Math.pow(3, lockRetries),
                     Math.max(0, budgetMs - (Date.now() - start) - minCallBudgetMs)
                 );
                 if (waitMs <= 1000) break; // budget too tight — don't wait
-                log(`[fallback] ${key} locked — retry in ${Math.round(waitMs / 1000)}s (${lockRetries + 1}/${MAX_LOCK_RETRIES})`);
+                log(`[fallback] ${key} busy (all ${maxTabs} slot(s) taken) — retry in ${Math.round(waitMs / 1000)}s (${lockRetries + 1}/${MAX_LOCK_RETRIES})`);
                 await new Promise(r => setTimeout(r, waitMs));
-                lockAcquired = acquireLock(key);
+                slot = acquireProviderSlot(key, { max: maxTabs });
                 lockRetries++;
             }
-            if (!lockAcquired) {
+            if (!slot) {
                 log(`[fallback] Skipping ${key} (locked after ${lockRetries} retries)`);
                 tried.push({ provider: key, reason: "locked" });
                 continue;
             }
 
-            log(`[fallback] Trying ${key} (${Math.round(perCall / 1000)}s budget)...`);
-            const result = await callProvider(prompt, key, perCall);
+            log(`[fallback] Trying ${key}${slot.slot > 0 ? `#${slot.slot}` : ""} (${Math.round(perCall / 1000)}s budget)...`);
+            const result = await callProvider(prompt, key, perCall, { ephemeralTab: maxTabs > 1 });
 
             if (result.ok) {
-                if (!holdLockOnSuccess) releaseLock(key);
+                if (!holdLockOnSuccess) releaseLock(slot.lockKey);
                 const actualProvider = result.provider || key;
                 const cleaned = cleanResponse(result.text);
                 return {
@@ -282,11 +298,11 @@ function createExecutor({
                     response: cleaned,
                     response_length: cleaned.length,
                     elapsed_ms: Date.now() - start,
-                    ...(holdLockOnSuccess ? { held_lock: key } : {}),
+                    ...(holdLockOnSuccess ? { held_lock: slot.lockKey } : {}),
                 };
             }
 
-            releaseLock(key);
+            releaseLock(slot.lockKey);
             const entry = { provider: key, reason: result.reason || "unknown" };
             if (result.reason === "auth" && RECOVERY_HINTS[key]) {
                 entry.fix = RECOVERY_HINTS[key];

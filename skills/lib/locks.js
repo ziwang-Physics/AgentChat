@@ -160,11 +160,17 @@ function releaseLock(provider) {
 const BROWSER_SLOT_PREFIX = "browser-slot-";
 const DEFAULT_MAX_SLOTS = 3;
 
+// v20: shared env-int reader — resolveMaxSlots and resolveMaxTabsPerProvider
+// were byte-identical except for name/default/cap.
+function clampedEnvInt(env, name, def, max) {
+    const n = parseInt(env[name], 10);
+    if (Number.isFinite(n) && n >= 1) return Math.min(n, max);
+    return def;
+}
+
 /** Resolve the slot cap: AGENTCHAT_MAX_CONCURRENT_PAGES env, clamped 1..16. */
 function resolveMaxSlots(env = process.env) {
-    const n = parseInt(env.AGENTCHAT_MAX_CONCURRENT_PAGES, 10);
-    if (Number.isFinite(n) && n >= 1) return Math.min(n, 16);
-    return DEFAULT_MAX_SLOTS;
+    return clampedEnvInt(env, 'AGENTCHAT_MAX_CONCURRENT_PAGES', DEFAULT_MAX_SLOTS, 16);
 }
 
 /**
@@ -198,15 +204,74 @@ function releaseBrowserSlot(slot) {
     if (Number.isInteger(slot) && slot >= 0) releaseLock(BROWSER_SLOT_PREFIX + slot);
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// v19: PROVIDER TAB SLOTS — bounded SAME-provider concurrency
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// Provider locks above enforce "one automation per provider at a time". With
+// N tasks > M providers (round-robin gives gemini/chatgpt 2+ tasks each, plus
+// fallbacks), that serializes same-provider work and stretches total wall
+// clock. Slots generalize the lock to "at most K concurrent automations per
+// provider", each in its OWN dedicated tab:
+//
+//   slot 0 keeps the bare provider name  → full mutual-exclusion compat with
+//     every existing acquireLock(provider) caller (WebSubAgent, smoke tests);
+//   slots 1..K-1 use "<provider>@<i>"    → extra concurrent lanes.
+//
+// K defaults to 1 (identical behavior to today). Opt in via
+// AGENTCHAT_MAX_TABS_PER_PROVIDER=2..4. When K > 1, callers MUST run every
+// same-provider automation in an ephemeral, never-reused tab (OneWeb's
+// --ephemeral-tab) — otherwise two subprocesses can findProviderPage() onto
+// the SAME tab and cross-contaminate prompts/answers (the 串题 class).
+
+const PROVIDER_SLOT_SEP = "@";
+
+/** Resolve per-provider tab cap: AGENTCHAT_MAX_TABS_PER_PROVIDER, clamped 1..4. */
+function resolveMaxTabsPerProvider(env = process.env) {
+    return clampedEnvInt(env, 'AGENTCHAT_MAX_TABS_PER_PROVIDER', 1, 4);
+}
+
+function providerSlotKey(provider, i) {
+    return i === 0 ? provider : `${provider}${PROVIDER_SLOT_SEP}${i}`;
+}
+
+/**
+ * Acquire one same-provider concurrency slot.
+ *
+ * @param {string} provider
+ * @param {object} [o]
+ * @param {number} [o.max]  slot count (default: resolveMaxTabsPerProvider())
+ * @returns {{slot: number, lockKey: string}|null} null when all slots are taken
+ */
+function acquireProviderSlot(provider, { max } = {}) {
+    const slots = max || resolveMaxTabsPerProvider();
+    for (let i = 0; i < slots; i++) {
+        const key = providerSlotKey(provider, i);
+        if (acquireLock(key)) return { slot: i, lockKey: key };
+    }
+    return null;
+}
+
 function cleanupAllLocks() {
     let entries;
     try { entries = fs.readdirSync(LOCK_DIR); } catch (_) { return; }
     for (const name of entries) {
         // Skip leftover .stale./.release. transfer dirs — best-effort sweep of
         // our own, in case an rmSync was interrupted mid-teardown.
+        // v20 LEAK FIX: OTHER pids' transfer dirs were skipped forever, so a
+        // crashed reclaimer's garbage accumulated in /tmp/ai_locks for the
+        // life of the machine. Transfer dirs exist for MILLISECONDS in normal
+        // operation (rename → rm), so anything older than LOCK_TTL_MS is
+        // provably orphaned by a dead process — sweep it regardless of pid.
         if (name.includes(".stale.") || name.includes(".release.")) {
-            if (name.includes(`.${process.pid}.`)) {
-                try { fs.rmSync(path.join(LOCK_DIR, name), { recursive: true, force: true }); } catch (_) {}
+            const full = path.join(LOCK_DIR, name);
+            let orphaned = name.includes(`.${process.pid}.`);
+            if (!orphaned) {
+                try { orphaned = Date.now() - fs.statSync(full).mtimeMs > LOCK_TTL_MS; }
+                catch (_) { orphaned = false; }
+            }
+            if (orphaned) {
+                try { fs.rmSync(full, { recursive: true, force: true }); } catch (_) {}
             }
             continue;
         }
@@ -218,4 +283,6 @@ module.exports = {
     acquireLock, releaseLock, cleanupAllLocks, LOCK_DIR,
     // v17: browser-level admission control
     acquireBrowserSlot, releaseBrowserSlot, resolveMaxSlots, BROWSER_SLOT_PREFIX,
+    // v19: same-provider tab slots
+    acquireProviderSlot, resolveMaxTabsPerProvider, providerSlotKey, PROVIDER_SLOT_SEP,
 };
