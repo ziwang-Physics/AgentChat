@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const AGENTCHAT_ROOT = require("path").resolve(__dirname, "..", "..", "..");
 /**
  * v18 regression suite — Windows CDP unreachable fixes.
  *
@@ -25,7 +26,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
-const cdp = require('./skills/lib/cdp');
+const cdp = require(AGENTCHAT_ROOT + '/skills/lib/cdp');
 
 let passed = 0;
 let failed = 0;
@@ -37,7 +38,7 @@ function assert(cond, name) {
 // ── 1. CDP_URL wiring ───────────────────────────────────────────────────────
 console.log('[1] CDP_URL single source of truth (CDP_HOST regression)');
 {
-    const src = fs.readFileSync(path.join(__dirname, 'skills', 'AgentChat-OneWeb', 'index.js'), 'utf8');
+    const src = fs.readFileSync(path.join(AGENTCHAT_ROOT, 'skills', 'AgentChat-OneWeb', 'index.js'), 'utf8');
     assert(!/CDP_URL\s*=\s*`http:\/\/127\.0\.0\.1/.test(src),
         'OneWeb no longer builds its own hardcoded 127.0.0.1 CDP_URL');
     assert(/CDP_URL:\s*LIB_CDP_URL/.test(src) && /const CDP_URL = LIB_CDP_URL/.test(src),
@@ -45,7 +46,7 @@ console.log('[1] CDP_URL single source of truth (CDP_HOST regression)');
 
     // Functional: a fresh child process with CDP_HOST/CDP_PORT set must see
     // them reflected in lib CDP_URL (env is read at require time).
-    const libPath = path.join(__dirname, 'skills', 'lib', 'cdp.js');
+    const libPath = path.join(AGENTCHAT_ROOT, 'skills', 'lib', 'cdp.js');
     const r = spawnSync(process.execPath,
         ['-e', `process.stdout.write(require(${JSON.stringify(libPath)}).CDP_URL)`],
         { env: { ...process.env, CDP_HOST: '10.9.8.7', CDP_PORT: '9333' }, encoding: 'utf8', timeout: 15000 });

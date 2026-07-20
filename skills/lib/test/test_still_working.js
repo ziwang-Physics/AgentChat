@@ -1,3 +1,4 @@
+const AGENTCHAT_ROOT = require("path").resolve(__dirname, "..", "..", "..");
 /**
  * Functional assertions for the v11 tool-phase truncation fix, modeling the
  * factory's exact phase-3 semantics against a scripted mock page:
@@ -24,9 +25,9 @@ const path = require('path');
 const fs = require('fs');
 
 const { textLooksBusy, makeStillWorkingCheck } =
-    require('./skills/lib/stillWorking');
+    require(AGENTCHAT_ROOT + '/skills/lib/stillWorking');
 const { waitForCompletion, extractResponse } =
-    require('./skills/lib/providerFactory');
+    require(AGENTCHAT_ROOT + '/skills/lib/providerFactory');
 
 const _q = [];
 function await0(fn) { _q.push(fn); } // sequential async test queue
@@ -200,7 +201,7 @@ await0(async () => {
 // ═════════════════════════════════════════════════════════════════════════════
 console.log('\nT7: adapter wiring + overlay 登录 lookbehind');
 await0(async () => {
-    const kimi = require('./skills/lib/providers/adapters/kimi');
+    const kimi = require(AGENTCHAT_ROOT + '/skills/lib/providers/adapters/kimi');
     assert('kimi check is the shared detector',
         typeof kimi.stillGeneratingCheck === 'function');
     assert('kimi hold cap = 180s', kimi.stillGeneratingMaxHoldMs === 180_000);
@@ -211,23 +212,23 @@ await0(async () => {
         await kimi.stillGeneratingCheck(page, { text: '…\n获取网页 5 个网页' }) === true);
 
     for (const k of ['minimax', 'deepseek', 'qwen', 'mimo']) {
-        const a = require(`./skills/lib/providers/adapters/${k}`);
+        const a = require(AGENTCHAT_ROOT + `/skills/lib/providers/adapters/${k}`);
         assert(`${k}: shared check wired`, typeof a.stillGeneratingCheck === 'function'
             && Number.isFinite(a.stillGeneratingMaxHoldMs));
     }
-    const gemini = require('./skills/lib/providers/adapters/gemini');
+    const gemini = require(AGENTCHAT_ROOT + '/skills/lib/providers/adapters/gemini');
     assert('gemini hold cap raised to 300s (Pro Extended preserved)',
         gemini.stillGeneratingMaxHoldMs === 300_000);
-    const claude = require('./skills/lib/providers/adapters/claude');
+    const claude = require(AGENTCHAT_ROOT + '/skills/lib/providers/adapters/claude');
     assert('claude editor order: specific first',
         claude.editorSelectors[0] === '.ProseMirror'
         && claude.editorSelectors[claude.editorSelectors.length - 1] === '[contenteditable="true"]');
-    const chatgpt = require('./skills/lib/providers/adapters/chatgpt');
+    const chatgpt = require(AGENTCHAT_ROOT + '/skills/lib/providers/adapters/chatgpt');
     assert('chatgpt untouched (stop-button pipeline)', !chatgpt.stillGeneratingCheck);
 
     // Source-level: the overlay login regex must NOT hard-block 退出登录/免登录
     const src = fs.readFileSync(
-        path.join(__dirname, 'skills/lib/providerFactory.js'), 'utf8');
+        path.join(AGENTCHAT_ROOT, 'skills/lib/providerFactory.js'), 'utf8');
     const m = src.match(/if \((\/\(\?:\\blog[^\n]+?\/i)\.test\(text\)\) \{/);
     assert('login regex found in source', !!m);
     if (m) {

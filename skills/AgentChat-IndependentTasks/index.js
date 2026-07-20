@@ -65,7 +65,7 @@ function buildFallbackChain(primaryKey, skipList = []) {
     return [primaryKey, ...rest];
 }
 
-const STAGGER_MS = 1500; // inter-worker launch delay
+const STAGGER_MS = 200; // inter-worker launch delay
 
 // ═══════════════════════════════════════════════════════════════════
 // UTILS
@@ -90,13 +90,20 @@ const log = (msg) => _log('orch', msg);
 // ~32KB command-line limit and leak prompts via `ps`.
 
 const { createExecutor } = require('../lib/execute');
-const { callProvider, runChain, cleanResponse } = createExecutor({
+const { callProvider: _defaultCallProvider, runChain: _defaultRunChain, cleanResponse } = createExecutor({
     webextPath: WEBEXT,
     logPrefix: 'orch',
     minCallBudgetMs: 30_000,
     holdLockOnSuccess: true,
     acceptUsedMarker: true,
 });
+
+// v24 P1: perCallCapMs is parsed from CLI inside main(). The top-level executor
+// uses the 180s default; if --per-call is given, main() replaces these with a
+// re-created executor that carries the user's perCallCapMs. This two-phase init
+// avoids restructuring every function signature that closes over callProvider/runChain.
+let callProvider = _defaultCallProvider;
+let runChain = _defaultRunChain;
 
 /** Fallback executor keyed by intended primary — thin wrapper over runChain. */
 async function executeWithFallback(primaryKey, prompt, budgetMs, skipList = []) {
@@ -128,13 +135,14 @@ function normalizeAI(name) {
 }
 
 const { DAG_DECOMPOSER_PROMPT } = require('../lib/prompts');
+const { expandSharedPlan } = require('../lib/plan');
 
 function tryParsePreDecomposedPlan(userTask) {
   // Detect if input is already a pre-decomposed JSON plan with "subtasks" array
   // (as produced by Claude Code's Step 2). If so, extract nodes directly — no re-decomposition.
   try {
     const json = JSON.parse(userTask);
-    if (json.subtasks && Array.isArray(json.subtasks) && json.subtasks.length >= 2) {
+    if (json.subtasks && Array.isArray(json.subtasks) && json.subtasks.length >= 1) {
       // v21 GUARD: duplicate subtask ids silently overwrite each other in the
       // `results[id]` map — one whole group's answer vanishes without any error
       // (observed: two subtasks both named group_solvent_dielectric). A malformed
@@ -153,8 +161,21 @@ function tryParsePreDecomposedPlan(userTask) {
       // v21: top-level "exclude" — providers the USER forbade (e.g. "除了 Claude").
       // Honored by every fallback chain in dispatchWaves; without this the chain
       // Gemini→ChatGPT→Claude→… routed user content to an excluded provider.
+      //
+      // v24 P1 FIX: normalizeAI coerces unknown keys to FALLBACK_CHAIN[0] (gemini)
+      // — "exclude":["grok"] would silently exclude the chain head. Use a strict
+      // alias-only mapping here: known aliases → canonical key, unknown → WARN +
+      // discard. NEVER coerce an unknown exclude entry to a real provider.
       const exclude = Array.isArray(json.exclude)
-        ? [...new Set(json.exclude.map(normalizeAI).filter(Boolean))]
+        ? [...new Set(json.exclude.map(name => {
+            const n = (name || "").toLowerCase().trim();
+            const aliasMap = { gpt:"chatgpt", chatgpt:"chatgpt", gemini:"gemini", kimi:"kimi",
+              qwen:"qwen", claude:"claude", minimax:"minimax", deepseek:"deepseek", mimo:"mimo" };
+            const known = aliasMap[n];
+            if (known) return known;
+            log(`WARN: unknown provider "${name}" in plan exclude list — discarded (valid: ${FALLBACK_CHAIN.join(", ")})`);
+            return null;
+          }).filter(Boolean))]
         : [];
       const nodes = json.subtasks.map(st => ({
         id: st.id || st.role || `task_${Math.random().toString(36).slice(2,6)}`,
@@ -163,6 +184,7 @@ function tryParsePreDecomposedPlan(userTask) {
         goal: st.id || "task",
         depends_on: st.depends_on || [],
         prompt: st.prompt || "",
+        questions: st.questions || [],   // v24: for in-loop anchor compliance check (qualityGate)
       }));
       // Validate all nodes have non-empty prompts
       if (nodes.every(n => n.prompt && n.prompt.length > 5)) {
@@ -177,7 +199,30 @@ function tryParsePreDecomposedPlan(userTask) {
   return null;
 }
 
-async function buildDAG(userTask, budgetMs) {
+// v24 P1: validate a DAG object (from AI decomposer or pre-decomposed plan).
+// Checks: minimum nodes, non-empty prompts, no duplicate IDs, known ai values.
+// Returns { valid: bool, error: string }. Caller decides abort-vs-retry policy.
+function validateDAGNodes(nodes) {
+  if (!Array.isArray(nodes) || nodes.length < 2)
+    return { valid: false, error: `DAG requires ≥2 nodes, got ${nodes?.length || 0}` };
+  const seen = new Set();
+  for (const n of nodes) {
+    if (!n.prompt || String(n.prompt).length <= 5)
+      return { valid: false, error: `node "${n.id || "?"}" has empty or too-short prompt` };
+    const id = n.id || "";
+    if (seen.has(id))
+      return { valid: false, error: `duplicate node id "${id}" — later entry silently overwrites earlier results` };
+    seen.add(id);
+    // ai field: normalize/validate — unknown will be caught by normalizeAI's
+    // WARN + coerce-to-head at dispatch time, but flag it early here so a
+    // decomposer producing nonsense keys (grok, llama, "") can be retried.
+    const ai = (n.ai || "").toLowerCase().trim();
+    if (!ai) return { valid: false, error: `node "${id}" has empty ai field` };
+  }
+  return { valid: true, error: null };
+}
+
+async function buildDAG(userTask, budgetMs, opts = {}) {
   log("━━━ Module 1: Task DAG Construction ━━━");
 
   // P1: Detect pre-decomposed JSON plan — skip re-decomposition entirely
@@ -186,6 +231,19 @@ async function buildDAG(userTask, budgetMs) {
     log(`  Task: pre-decomposed JSON with ${preDecomposed.nodes.length} subtasks — skipping decomposition`);
     log(`  Nodes: ${preDecomposed.nodes.map(n => `${n.id}→${n.ai}(${n.role})`).join(" | ")}`);
     return preDecomposed;
+  }
+
+  // v24 P1: STRICT PLAN GUARD. When --plan is used the user expects the file
+  // to be a valid pre-decomposed plan. JSON parse failure, missing subtasks,
+  // or any structural defect → exit 64 immediately. Never fall through to the
+  // NL decomposer (which would treat the mangled JSON as a task description)
+  // and DEFINITELY never hit the hardcoded 4-role DAG fallback — both paths
+  // violate SKILL.md rule #1 (no role-based decomposition for independent tasks).
+  if (opts.strictPlan) {
+    log("FATAL: --plan file is not a valid pre-decomposed JSON plan.");
+    log("  Fix: run validate_answers.js --lint to check plan structure, or");
+    log("  provide a JSON with {\"subtasks\":[...]} (see SKILL.md A.5 for the schema).");
+    process.exit(64); // EX_USAGE
   }
 
   log(`  Task: "${userTask.slice(0, 100)}${userTask.length > 100 ? "..." : ""}"`);
@@ -212,7 +270,12 @@ async function buildDAG(userTask, budgetMs) {
 
     try {
       const dag = JSON.parse(m[0]);
-      if (!dag.dag?.nodes || dag.dag.nodes.length < 2) { log("  Decomposer: DAG too small"); continue; }
+      // v24 P1: validate AI decomposer output just like pre-decomposed plans.
+      // Without this, duplicate IDs silently overwrite results; empty prompts
+      // waste subprocess rounds; unknown ai keys flow into normalizeAI's
+      // coerce-to-head (same bug class as the exclude coerce fix).
+      const v = validateDAGNodes(dag.dag?.nodes || []);
+      if (!v.valid) { log(`  Decomposer: ${key} DAG invalid — ${v.error}`); continue; }
       log(`  Decomposer: ✓ ${key} produced ${dag.dag.nodes.length}-node DAG`);
       return dag.dag;
     } catch (e) {
@@ -220,8 +283,24 @@ async function buildDAG(userTask, budgetMs) {
     }
   }
 
-  // Fallback: rule-based 4-way parallel
+  // v24 P1: STRICT PLAN GUARD — the hardcoded 4-role DAG (researcher/reasoner/
+  // builder/reviewer) is a collaborative-role decomposition, NOT an independent-
+  // task decomposition. Using it for this skill violates SKILL.md rule #1. When
+  // --plan is explicit, we already exited above. For the NL path, the decomposer
+  // failing means we genuinely cannot decompose — don't silently substitute a
+  // role-based DAG that produces un-anchored output (Step 2.5 will FAIL every
+  // answer because 4-role prompts don't request [ANSWER] anchors).
+  if (opts.strictPlan) {
+    log("FATAL: all decomposer providers failed — cannot produce a valid independent-task DAG.");
+    process.exit(64);
+  }
+
+  // Fallback: rule-based 4-way parallel (only when NOT in strict-plan mode).
+  // This path is a last resort for ad-hoc NL prompts; it produces role-based
+  // output without [ANSWER] anchors, so Step 2.5 will flag every answer as
+  // MISSING_ANCHOR. Documented degradation, not a silent failure.
   log("  Decomposer: ALL failed, using rule-based 4-way parallel DAG");
+  log("  WARN: 4-role DAG produces un-anchored output — Step 2.5 qualityGate will flag all answers");
   return {
     nodes: [
       { id: "research", ai: "Kimi",   role: "researcher",        goal: "资料收集", depends_on: [], prompt: `请收集关于以下问题的背景资料和关键事实，直接列出信息：\n\n${userTask}` },
@@ -234,10 +313,62 @@ async function buildDAG(userTask, budgetMs) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// v25: SHARED PLAN EXPANSION — compress plan JSON by deduplicating
+// background & format instructions across all subtask prompts.
+//
+// A plan with `shared` + `questionBank` is expanded into the full
+// per-subtask prompt form before entering buildDAG. This saves ~3K
+// context tokens per run (background & format boilerplate appear once,
+// not N times).
+// ═══════════════════════════════════════════════════════════════════
+
+// Requirement templates — matched by question type (same as SKILL.md A.5)
+// ═══════════════════════════════════════════════════════════════════
 // MODULE 2: PARALLEL DISPATCH + QUALITY GATE
 // ═══════════════════════════════════════════════════════════════════
 
-function qualityGate(result) {
+/**
+ * Quality gate with in-loop anchor compliance check (v24).
+ *
+ * Previously this only checked response length — a provider returning a valid-
+ * looking answer that merely omitted the [ANSWER <ID>] anchor (ChatGPT's known
+ * "helpful format stripping" behaviour) sailed through with score=1, and the
+ * orchestrator never triggered fallback. The missing anchor was only caught
+ * post-hoc by validate_answers.js, forcing a manual L1 re-dispatch.
+ *
+ * Now: when expectedQuestions is non-empty, every declared question ID MUST
+ * have its [ANSWER <ID>] anchor present verbatim in the response. Missing
+ * anchors → quality_score = 0.0 → runChain tries the next fallback provider
+ * automatically within the SAME wave, without any L1 intervention.
+ *
+ * The check is deliberately lightweight (regex only, no LLM call) and
+ * intentionally stricter than validate_answers.js (which also checks foreign
+ * anchors and fabrication markers) — its job is to catch the common case
+ * (missing anchor) inside the execution loop, not duplicate the full validator.
+ */
+// ── Lenient anchor matching (Postel's Law for LLM format compliance) ──
+// LLMs rarely delete anchor lines entirely — they "beautify" them:
+// bold (**[ANSWER X]**), headings (### [ANSWER X]), full-width brackets,
+// trailing colons, leading text. Normalize first, then near-strict match.
+function normalizeLine(line) {
+  return line
+    .normalize('NFKC')
+    .replace(/[【〔]/g, '[').replace(/[】〕]/g, ']')
+    .replace(/[*_`~]/g, '')
+    .replace(/^[\s>#\-+.\d]*/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase();
+}
+function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+function idPattern(id) { return escapeRe(id).replace(/(\d)(?=[A-Z])/g, '$1[\\s\\-_]?'); }
+function hasAnchorLenient(text, qid) {
+  const lines = String(text || '').split(/\r?\n/);
+  const re = new RegExp(`\\[\\s*ANSWER\\s*[:：]?\\s*${idPattern(qid)}\\s*\\]`, 'i');
+  return lines.some(l => re.test(normalizeLine(l)));
+}
+
+function qualityGate(result, expectedQuestions = []) {
   const issues = [];
   if (!result.response || result.response.length < 10) {
     issues.push("EMPTY_OR_TOO_SHORT");
@@ -245,7 +376,18 @@ function qualityGate(result) {
   if (result.degradation) {
     issues.push(`DEGRADED: ${result.degradation.reason}`);
   }
-  const passed = issues.length === 0 || (issues.length === 1 && issues[0].startsWith("DEGRADED"));
+  // v25: lenient anchor compliance — normalize before matching to catch
+  // common LLM beautification mutations (bold, heading, full-width brackets,
+  // trailing colons) without triggering unnecessary format-retries.
+  if (expectedQuestions.length > 0 && result.response) {
+    for (const qid of expectedQuestions) {
+      if (!hasAnchorLenient(result.response, qid)) {
+        issues.push(`MISSING_ANCHOR:${qid}`);
+      }
+    }
+  }
+  const hardFail = issues.some(i => !i.startsWith("DEGRADED"));
+  const passed = !hardFail;
   return {
     passed,
     issues,
@@ -253,27 +395,62 @@ function qualityGate(result) {
   };
 }
 
+/**
+ * Run one worker with automatic anchor-format retry (v24).
+ *
+ * Previously a missing [ANSWER <ID>] anchor was only caught post-hoc by
+ * validate_answers.js, forcing a manual L1 re-dispatch. Now: if qualityGate
+ * detects MISSING_ANCHOR, we retry executeWithFallback once with a reinforced
+ * prompt. Because holdLockOnSuccess keeps the first provider locked, the retry
+ * naturally skips to the next provider in the fallback chain — no architectural
+ * changes to runChain needed.
+ *
+ * Budget note: the retry reuses the original budget. In the worst case (P=U
+ * zero-fallback, both attempts hit the same locked primary), this burns ~60s
+ * (two minCallBudget cycles) before returning ALL_EXHAUSTED — acceptable
+ * compared to the previous L1 overhead (full re-dispatch + re-validation).
+ */
 async function runOneWorker(node, budgetMs, skipList = [], prompt = node.prompt) {
   const primaryKey = normalizeAI(node.ai);
+  const questions = node.questions || [];
+  // Only retry when there are questions to validate anchors against.
+  // No questions → old behaviour (single attempt, no anchor check).
+  const maxAttempts = questions.length > 0 ? 2 : 1;
 
-  try {
-    const result = await executeWithFallback(primaryKey, prompt, budgetMs, skipList);
-    const qr = qualityGate(result);
-    const degNote = result.degradation
-      ? ` ⚠ ${result.provider_used} (intended ${primaryKey})`
-      : ` ✓ ${result.provider_used}`;
-    log(`  [${node.id}]${degNote} score=${qr.quality_score}${qr.issues.length ? " issues:" + qr.issues.join(",") : ""}`);
-    return { nodeId: node.id, output: result, quality: qr, node };
-  } catch (e) {
-    log(`  [${node.id}] ✗ exception: ${String(e).slice(0, 60)}`);
-    return {
-      nodeId: node.id,
-      // v20: primary_intended included — every other failure shape carries it,
-      // and assignTrust/receipt consumers shouldn't special-case this branch.
-      output: { provider_used: null, primary_intended: primaryKey, response: null, error: String(e), degradation: { reason: "EXCEPTION", confidence_adjustment: -1.0 } },
-      quality: { passed: false, issues: ["EXCEPTION"], quality_score: 0 },
-      node,
-    };
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const result = await executeWithFallback(primaryKey, prompt, budgetMs, skipList);
+      const qr = qualityGate(result, questions);
+      const anchorIssues = qr.issues.filter(i => i.startsWith("MISSING_ANCHOR:"));
+
+      // Return immediately if: anchor check passed, no questions to check,
+      // or this was the last allowed attempt.
+      if (anchorIssues.length === 0 || attempt >= maxAttempts - 1) {
+        const degNote = result.degradation
+          ? ` ⚠ ${result.provider_used} (intended ${primaryKey})`
+          : ` ✓ ${result.provider_used}`;
+        if (attempt > 0 && anchorIssues.length === 0) {
+          log(`  [${node.id}] retry ✓ (attempt ${attempt + 1}) — anchor(s) recovered via ${result.provider_used}`);
+        }
+        log(`  [${node.id}]${degNote} score=${qr.quality_score}${qr.issues.length ? " issues:" + qr.issues.join(",") : ""}`);
+        return { nodeId: node.id, output: result, quality: qr, node };
+      }
+
+      // Anchor(s) missing — retry once with reinforced format instruction.
+      // The first provider's lock is held (holdLockOnSuccess), so
+      // executeWithFallback will skip it and try the next in the chain.
+      log(`  [${node.id}] anchor(s) missing: ${anchorIssues.join(",")} — retrying with format reinforcement (attempt ${attempt + 1}/${maxAttempts - 1})`);
+      const anchorLines = questions.map(q => `[ANSWER ${q}]`).join("\n");
+      prompt = `CRITICAL FORMAT CORRECTION — Your previous response was rejected because you omitted required anchor lines. You MUST output these exact lines as the VERY FIRST lines of your response (one per line, in order):\n${anchorLines}\n\nAfter the anchor lines, restate each task and provide your answer.\n\n${node.prompt}`;
+    } catch (e) {
+      log(`  [${node.id}] ✗ exception (attempt ${attempt + 1}): ${String(e).slice(0, 60)}`);
+      return {
+        nodeId: node.id,
+        output: { provider_used: null, primary_intended: primaryKey, response: null, error: String(e), degradation: { reason: "EXCEPTION", confidence_adjustment: -1.0 } },
+        quality: { passed: false, issues: ["EXCEPTION"], quality_score: 0 },
+        node,
+      };
+    }
   }
 }
 
@@ -399,6 +576,30 @@ async function dispatchWaves(dag, budgetMs) {
     // the primary over the user's exclusion.
     const planExclude = Array.isArray(dag.exclude) ? dag.exclude : [];
     const primaries = [...new Set(wave.map(n => normalizeAI(n.ai)))];
+
+    // v24: P=U full-deployment zero-fallback guard.
+    // When every available (non-excluded) provider is a primary in the same wave,
+    // skipList filtering removes ALL other primaries from each worker's fallback
+    // chain → each worker has [self] only → one format/transient failure = dead
+    // worker. The old mitigation was "hope the caller reserved a spare" — now we
+    // detect the condition and auto-enable multi-tab concurrency so fallback can
+    // route through the same provider's second ephemeral-tab slot.
+    const available = FALLBACK_CHAIN.filter(k => !planExclude.includes(k));
+    if (primaries.length >= available.length && primaries.length > 1) {
+      const currentMaxTabs = parseInt(process.env.AGENTCHAT_MAX_TABS_PER_PROVIDER || "1", 10);
+      if (currentMaxTabs < 2) {
+        log(`  WARN: all ${primaries.length}/${available.length} available providers are primaries — ` +
+            `each worker has ZERO fallback (skipList covers entire provider set). ` +
+            `Auto-enabling AGENTCHAT_MAX_TABS_PER_PROVIDER=2 (second-slot fallback). ` +
+            `Consider reserving >=1 provider as hot-spare in future plans.`);
+        process.env.AGENTCHAT_MAX_TABS_PER_PROVIDER = "2";
+      } else {
+        log(`  WARN: all ${primaries.length}/${available.length} available providers are primaries — ` +
+            `multi-tab=${currentMaxTabs} mitigates but doesn't eliminate zero-fallback risk. ` +
+            `Reserving >=1 provider as hot-spare is the stronger defence.`);
+      }
+    }
+
     for (const p of primaries) {
       if (planExclude.includes(p)) log(`  WARN: primary "${p}" is in the plan's exclude list — plan is self-contradictory (lint should have caught this); exclude does NOT strip an explicit primary`);
     }
@@ -674,13 +875,25 @@ function printStructuredOutput(dag, results, arb, totalMs) {
 
 async function main() {
   const args = process.argv.slice(2);
-  let timeout = 600_000, prompt = "", smoke = false, doctor = false, planFile = null;
+  let timeout = 600_000, perCallCapMs = null, prompt = "", smoke = false, doctor = false, planFile = null;
+  let summaryOnly = false, rawOutFile = null;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i].startsWith("--timeout=")) {
       timeout = parseInt(args[i].split("=")[1], 10);
     } else if (args[i] === "--timeout" && args[i + 1]) {
       timeout = parseInt(args[i + 1], 10);
+      i++;
+    // v24 P1: --per-call=N sets the ceiling for a SINGLE provider attempt.
+    // Without this, perCallCapMs stays at the executor's 180s hard default
+    // regardless of --timeout — a 900s timeout only buys more fallback
+    // retries, not longer individual calls. Typical deep-thinking prompts on
+    // a single provider need 5+ minutes; the 180s default systematically
+    // kills them mid-response.
+    } else if (args[i].startsWith("--per-call=")) {
+      perCallCapMs = parseInt(args[i].split("=")[1], 10);
+    } else if (args[i] === "--per-call" && args[i + 1]) {
+      perCallCapMs = parseInt(args[i + 1], 10);
       i++;
     } else if (args[i] === "--smoke") smoke = true;
     else if (args[i] === "--doctor") doctor = true;
@@ -696,6 +909,14 @@ async function main() {
     // pre-decomposed JSON plan (see SKILL.md's `--keep-tabs '<DAG_JSON_STRING>'`
     // invocation) and breaking tryParsePreDecomposedPlan()'s JSON.parse.
     else if (args[i] === "--keep-tabs") { /* no-op — always on */ }
+    // v25: --summary-only — terminal output = one-line JSON summary (saves ~5K
+    // context tokens per run by not printing full raw responses to stdout).
+    else if (args[i] === "--summary-only") summaryOnly = true;
+    // v25: --raw-out=FILE — write the full raw responses to a file (replaces
+    // the `| tee raw.txt` pattern). Required when --summary-only is used, but
+    // also works standalone to avoid the tee round-trip.
+    else if (args[i].startsWith("--raw-out=")) rawOutFile = args[i].slice("--raw-out=".length);
+    else if (args[i] === "--raw-out" && args[i + 1]) { rawOutFile = args[i + 1]; i++; }
     else prompt += args[i] + " ";
   }
   prompt = prompt.trim();
@@ -706,6 +927,16 @@ async function main() {
     if (prompt) log(`WARN: both --plan and an argv prompt given — argv prompt (${prompt.length} chars) ignored, using ${planFile}`);
     try {
       prompt = fs.readFileSync(planFile, "utf8").trim();
+      // v25: expand shared plan (no-op if no shared/questionBank fields)
+      try {
+        const planObj = JSON.parse(prompt);
+        const expanded = expandSharedPlan(planObj);
+        prompt = JSON.stringify(expanded);
+      } catch (e) {
+        if (e.message && e.message.includes("question") && e.message.includes("not found in plan.questionBank"))
+          { log(`ERROR: ${e.message}`); process.exit(64); }
+        // Not a shared plan or expansion not applicable — pass through as-is
+      }
       log(`Plan loaded from ${planFile} (${prompt.length} chars)`);
     } catch (e) {
       log(`ERROR: cannot read --plan file "${planFile}": ${e.message}`);
@@ -753,6 +984,29 @@ async function main() {
     timeout *= 1000;
   }
 
+  // v24 P1: --per-call validation and executor re-init.
+  // The top-level createExecutor uses the 180s default. When --per-call is given,
+  // re-create the executor so perCallCapMs flows into callProvider → OneWeb
+  // --timeout-per-provider, raising the ceiling for single attempts.
+  if (perCallCapMs !== null) {
+    if (!Number.isFinite(perCallCapMs) || perCallCapMs <= 0) {
+      log(`WARN: invalid --per-call value — ignoring (using default 180s)`);
+    } else if (perCallCapMs < 10_000) {
+      log(`WARN: --per-call=${perCallCapMs} interpreted as seconds (${perCallCapMs * 1000}ms).`);
+      perCallCapMs *= 1000;
+    }
+    if (Number.isFinite(perCallCapMs) && perCallCapMs > 0) {
+      const exec = createExecutor({
+        webextPath: WEBEXT, logPrefix: 'orch', minCallBudgetMs: 30_000,
+        holdLockOnSuccess: true, acceptUsedMarker: true,
+        perCallCapMs,
+      });
+      callProvider = exec.callProvider;
+      runChain = exec.runChain;
+      log(`perCallCapMs set to ${Math.round(perCallCapMs / 1000)}s (single-attempt ceiling raised from default 180s)`);
+    }
+  }
+
   // Verify OneWeb exists
   if (!fs.existsSync(WEBEXT)) {
     log(`FATAL: AgentChat-OneWeb not found at: ${WEBEXT}`);
@@ -786,7 +1040,10 @@ async function main() {
   }
 
   // M1: Build DAG
-  const dag = await buildDAG(prompt, Math.floor(timeout * 0.3));
+  // v24 P1: strict-plan guard — when the user provides --plan they expect the
+  // file to be a valid pre-decomposed plan. Any structural defect → exit 64
+  // before dispatch, never fall into NL decomposition or the 4-role DAG.
+  const dag = await buildDAG(prompt, Math.floor(timeout * 0.3), { strictPlan: !!planFile });
   // v19: " | " separator — the node ARRAY carries no ordering, and "→" falsely
   // implied a 9-node sequential dependency chain for plans where every
   // depends_on is []. Actual execution order (if any) is shown by the
@@ -804,10 +1061,74 @@ async function main() {
   const arbitration = arbitrateResults(dag, results);
 
   // Output
-  printStructuredOutput(dag, results, arbitration, Date.now() - T0);
-
+  const totalMs = Date.now() - T0;
   const failCount = Object.values(results).filter(r => !r?.output?.response).length;
   const exitCode = failCount === dag.nodes.length ? 2 : 0;
+
+  // v25: --raw-out=FILE — write full detailed output to disk (replaces `| tee`)
+  // Isolated in try/catch: a raw-out write failure must not kill the rest of
+  // M3 output (printStructuredOutput / receipt), but MUST set non-zero exit.
+  let rawOutBytes = 0;
+  if (rawOutFile) {
+    try {
+      const rawLines = [];
+      rawLines.push("═".repeat(60));
+      rawLines.push("SYNTHESIS BRIEF");
+      rawLines.push("═".repeat(60));
+      for (const node of dag.nodes) {
+        const t = arbitration.trust[node.id];
+        const label = { FULL: "✓", DEGRADED: "⚠", MISSING: "✗" }[t.tier] || "?";
+        rawLines.push(`  ${label} ${node.id} [${node.role}]: ${t.tier} → ${t.provider || "NONE"}`);
+      }
+      for (const node of dag.nodes) {
+        const r = results[node.id];
+        if (r?.output?.response) {
+          rawLines.push(`\n══════ ${node.id} (${node.role}) — ${r.output.provider_used} ══════`);
+          rawLines.push(r.output.response);
+        }
+      }
+      // append receipt
+      rawLines.push(`\n[receipt] AGENTCHAT_RUN ${JSON.stringify({
+        run_id: RUN_ID, skill: "AgentChat-IndependentTasks",
+        timestamp: new Date().toISOString(), exit: exitCode,
+        nodes: dag.nodes.length, failed: failCount,
+        providers_used: Object.fromEntries(
+          Object.entries(results).map(([id, r]) => [id, r?.output?.provider_used || null])
+        ), total_ms: totalMs,
+      })}`);
+      const out = rawLines.join("\n") + "\n";
+      fs.writeFileSync(rawOutFile, out, "utf8");
+      rawOutBytes = Buffer.byteLength(out, "utf8");
+      log(`Raw output written to ${rawOutFile} (${rawLines.length} lines, ${rawOutBytes} bytes)`);
+    } catch (e) {
+      console.error(`[raw-out] FAILED: ${e.stack}`);
+      process.exitCode = 1;
+    }
+  }
+
+  if (summaryOnly) {
+    // v25: terminal shows ONLY one-line JSON — saves ~5K context tokens
+    const summary = {
+      exit: exitCode,
+      nodes: dag.nodes.length,
+      failed: failCount,
+      providers_used: Object.fromEntries(
+        Object.entries(results).map(([id, r]) => [id, r?.output?.provider_used || null])
+      ),
+      total_ms: totalMs,
+      run_id: RUN_ID,
+    };
+    console.log(JSON.stringify(summary));
+  } else {
+    // Isolated in try/catch: presentation layer failure must not kill receipt
+    // emission, but MUST be visible in exit code.
+    try {
+      printStructuredOutput(dag, results, arbitration, totalMs);
+    } catch (e) {
+      console.error(`[output] print crashed: ${e.stack}`);
+      process.exitCode = 1;
+    }
+  }
 
   // Execution receipt — appended to STDOUT (this file's stdout is an
   // agent-readable report, not a machine contract). The calling agent must
@@ -827,9 +1148,10 @@ async function main() {
       providers_used: Object.fromEntries(
         Object.entries(results).map(([id, r]) => [id, r?.output?.provider_used || null])
       ),
-      total_ms: Date.now() - T0,
+      total_ms: totalMs,
+      raw_out: rawOutFile ? { path: rawOutFile, bytes: rawOutBytes } : null,
     },
-    stream: 'stdout',
+    stream: summaryOnly ? 'stderr' : 'stdout',
   });
 
   // P0 FLUSH FIX: process.exit() right after console.log() truncates piped
@@ -839,7 +1161,7 @@ async function main() {
   // reaped, executor timers cleared), so setting exitCode and returning lets
   // Node drain stdout completely and exit naturally. The process.on("exit")
   // cleanupAllLocks handler still fires.
-  process.exitCode = exitCode;
+  process.exitCode = process.exitCode || exitCode;
 }
 
 // BUGFIX: previously called main() unconditionally, so simply require()'ing this
@@ -851,4 +1173,4 @@ if (require.main === module) {
     main().catch(e => { log(`CRITICAL: ${e.message}`); process.exit(4); });
 }
 
-module.exports = { FALLBACK_CHAIN, buildFallbackChain, normalizeAI, cleanResponse, topoWaves, injectUpstream, tryParsePreDecomposedPlan };
+module.exports = { FALLBACK_CHAIN, buildFallbackChain, normalizeAI, cleanResponse, topoWaves, injectUpstream, tryParsePreDecomposedPlan, validateDAGNodes };

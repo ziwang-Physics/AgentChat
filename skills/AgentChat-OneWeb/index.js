@@ -75,6 +75,31 @@ const { acquireBrowserSlot, releaseBrowserSlot } = require('../lib/locks');
 // ── Adapt shared modules to OneWeb naming conventions ──
 const PREFIX = 'fallback';
 const log = (msg) => _log(PREFIX, msg);
+
+// v23: STRUCTURED ERROR CHANNEL — one machine-parseable stderr line carrying
+// the per-provider failure map across the process boundary. Without it the
+// parent process (execute.js callProvider) can only read the exit code, so
+// "selector miss at editor_find" and "goto timeout" both surfaced upstream as
+// the exit-9 blanket "all_exhausted" (--single mode ALWAYS exits 9 on failure,
+// making the code carry zero information there). Format mirrors the receipt
+// pattern: `[oneweb] AGENTCHAT_ERR {json}`. Emission is best-effort and capped
+// — a broken emit must never mask the real failure.
+function emitStructuredFailure(reasons) {
+    try {
+        const compact = {};
+        for (const [k, v] of Object.entries(reasons || {})) {
+            if (typeof v === 'string') { compact[k] = { reason: v }; continue; }
+            const d = (v && v.error_details) || {};
+            compact[k] = {
+                reason: (v && v.reason) || 'error',
+                ...(d.stage ? { stage: d.stage } : {}),
+                ...(d.code ? { code: d.code } : {}),
+                ...(d.message ? { message: String(d.message).slice(0, 160) } : {}),
+            };
+        }
+        process.stderr.write(`[oneweb] AGENTCHAT_ERR ${JSON.stringify({ reasons: compact })}\n`);
+    } catch (_) { /* diagnostics must never break the failure path itself */ }
+}
 const startTimer = (label) => _startTimer(PREFIX, label);
 const connectWithRetry = (cdpUrl, retries) => _connectWithRetry(chromium, cdpUrl, retries, log);
 const doctorCheck = () => _doctorCheck(true, log);
@@ -282,6 +307,42 @@ function isBlockedImageHost(url) {
         return false;
     } catch (_) {
         return true; // unparseable URL — never fetch blind
+    }
+}
+
+// ── v20: Provider UI artifact host denylist ──
+// Web AI provider pages include UI chrome images (user avatars, logos, favicons)
+// that get scraped into the response text alongside the AI's actual answer. These
+// are NOT content the AI model produced — downloading them to the user's cwd is
+// pure noise. We block known provider asset CDN hosts here.
+//
+// Set AGENTCHAT_DOWNLOAD_PROVIDER_ASSETS=1 to opt back into downloading everything
+// (useful for debugging CDP response extraction).
+const PROVIDER_ASSET_HOSTS = [
+    // Kimi / Moonshot — user avatars & UI assets
+    'avatar.moonshot.cn',
+    'kimi-assets.moonshot.cn',
+    // Google / Gemini — user profile photos (lh3), static UI (gstatic)
+    'lh3.googleusercontent.com',
+    'www.gstatic.com',
+    // OpenAI / ChatGPT — static UI assets (NOT files.oaiusercontent.com which hosts generated images)
+    'oaistatic.com',        // matches cdn.oaistatic.com
+    // Alibaba / Qwen — Alibaba CDN UI assets
+    'img.alicdn.com',
+    // Tencent — CDN UI assets
+    'qpic.cn',              // matches *.qpic.cn
+];
+
+function isProviderAssetHost(url) {
+    if (process.env.AGENTCHAT_DOWNLOAD_PROVIDER_ASSETS === '1') return false;
+    try {
+        const h = new URL(url).hostname.toLowerCase();
+        for (const pattern of PROVIDER_ASSET_HOSTS) {
+            if (h === pattern || h.endsWith('.' + pattern)) return true;
+        }
+        return false;
+    } catch (_) {
+        return false; // unparseable URL — let isBlockedImageHost catch it
     }
 }
 
@@ -529,6 +590,11 @@ async function downloadAllImages(response, destDir, opts) {
             log(`  ❌ Download refused: ${urls[i].slice(0, 80)} — blocked host`);
             continue;
         }
+
+            if (isProviderAssetHost(urls[i])) {
+                results.push({ url: urls[i], file: filename, status: 'skipped', error: 'provider UI asset (avatar/logo/CDN) — not AI-generated content' });
+                continue;
+            }
 
         try {
             let got = null;
@@ -1193,6 +1259,15 @@ async function main() {
             return;
         }
 
+        // v23: STRUCTURED ERROR CHANNEL. Everything below collapses the rich
+        // per-provider {reason, error_details:{stage,message,code}} map into a
+        // single exit code — which is all the parent (execute.js callProvider)
+        // used to see, so a selector miss, a goto timeout, and an auth wall all
+        // surfaced upstream as the same "all_exhausted". Emit ONE machine line
+        // on stderr carrying the compacted map; stdout stays reserved for the
+        // response text. Parent parses the LAST such line; humans ignore it.
+        emitStructuredFailure(result.reasons);
+
         // Classify failure — reasons are now objects {reason, error_details}
         const reasonValues = Object.values(result.reasons).map(r =>
             typeof r === 'string' ? r : (r.reason || '')
@@ -1240,6 +1315,7 @@ async function main() {
 
     } catch (err) {
         log(`FATAL: ${err.message}`);
+        emitStructuredFailure({ __fatal: { reason: 'internal', error_details: { stage: 'unhandled', message: err.message } } });
         ctx.recordTelemetry(4);
         process.exit(4);
     } finally {

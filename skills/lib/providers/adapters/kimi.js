@@ -291,7 +291,7 @@ const RESPONSE_SELECTORS = [
 
 module.exports = {
     key: 'kimi',
-    url: 'https://kimi.moonshot.cn/',
+    url: 'https://www.kimi.com/',
     navPostDelay: 4000, // React SPA render time
     authDomains: ['kimi.moonshot.cn/login', 'kimi.com/login', 'moonshot.cn/login'],
     quotaPatterns: [

@@ -98,22 +98,25 @@ module.exports = {
         }
     },
 
-    // ── ChatGPT-specific: clipboard-first with React Send-button verification ──
+    // ── ChatGPT-specific: simulated-paste-first with React Send-button verification ──
     // React contenteditable requires onPaste to be triggered for state update.
-    // Strategy: clipboard paste (now with polling) → simulated paste → keyboard chunks.
+    // v22 CONCURRENCY FIX: system clipboard is a single OS-wide resource — concurrent
+    // workers race on it. Reordered so simulated paste (in-page DataTransfer, no OS
+    // clipboard) is Tier 1, keyboard is Tier 2, system clipboard is LAST resort.
     input: async (page, editor, prompt) => {
-        // Tier 1: clipboard paste with adaptive polling
-        let ok = await inputViaClipboard(page, editor, prompt);
+        // Tier 1: simulated ClipboardEvent — in-page DataTransfer, no OS race
+        let ok = await inputViaSimulatedPaste(page, editor, prompt);
 
-        // Tier 2: simulated ClipboardEvent (bypasses clipboard API permission issues)
-        if (!ok) {
-            ok = await inputViaSimulatedPaste(page, editor, prompt);
-        }
-
-        // Tier 3: keyboard.insertText chunked (nuclear option, always works)
+        // Tier 2: keyboard.insertText chunked (CDP target-scoped, no OS race)
         if (!ok) {
             await inputViaKeyboard(page, editor, prompt, { chunkSize: 150, yieldMs: 40 });
             ok = true;
+        }
+
+        // Tier 3 (LAST RESORT): system clipboard paste. Racy under concurrency;
+        // the composer readback check catches cross-talk when it occurs.
+        if (!ok) {
+            ok = await inputViaClipboard(page, editor, prompt);
         }
 
         // Verify Send button — React batches state updates asynchronously

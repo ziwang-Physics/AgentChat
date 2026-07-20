@@ -407,6 +407,11 @@ module.exports = {
     },
 
     // ── Input: Angular-specific (fill() for clear, dispatchEvent for CD) ──
+    // v22 CONCURRENCY FIX: system clipboard is a single OS-wide resource — concurrent
+    // workers race on it. Keyboard insertText (CDP Input.insertText, target-scoped)
+    // is the primary path; system clipboard is the LAST resort, used only when
+    // keyboard fails. Gemini's Quill/Angular editor doesn't reliably consume
+    // synthetic ClipboardEvents, so we skip the simulated-paste tier.
     input: async (page, editor, prompt) => {
         // Clear — try fill() first for Angular/Quill compatibility
         try { await editor.fill(''); } catch {
@@ -417,39 +422,33 @@ module.exports = {
 
         // Input text
         if (prompt.length > INSERT_TEXT_LIMIT) {
-            // Only Ctrl+V if OUR clipboard write succeeded — otherwise we'd paste
-            // the user's private clipboard contents into the Gemini page.
-            let clipOk = true;
-            let landed = false;
-            try {
-                await page.evaluate(t => navigator.clipboard.writeText(t), prompt);
-            } catch (_) { clipOk = false; /* clipboard may fail in headless */ }
-            if (clipOk) {
-                await page.keyboard.press('ControlOrMeta+v');
-                await page.waitForTimeout(500);
-                // BUGFIX: verify the paste actually landed. Previously a paste
-                // that Quill swallowed (permission granted but paste event eaten)
-                // fell straight to the final length check and FAILED the whole
-                // provider at the INPUT stage — although the chunked-keyboard
-                // path below would have succeeded. Recoverable ≠ fatal.
-                landed = await editor.evaluate(el =>
-                    (el.innerText || el.textContent || '').length
-                ).catch(() => 0) > prompt.length * 0.8;
+            // Tier 1: chunked keyboard — CDP Input.insertText, target-scoped, safe.
+            for (let i = 0; i < prompt.length; i += 150) {
+                await page.keyboard.insertText(prompt.substring(i, i + 150));
+                await page.waitForTimeout(40);
             }
+            let landed = await editor.evaluate(el =>
+                (el.innerText || el.textContent || '').length
+            ).catch(() => 0) > prompt.length * 0.8;
+
+            // Tier 2 (LAST RESORT): system clipboard. Racy under concurrency;
+            // the composer readback check catches cross-talk when it occurs.
             if (!landed) {
+                let clipOk = true;
+                try { await page.evaluate(t => navigator.clipboard.writeText(t), prompt); }
+                catch (_) { clipOk = false; }
                 if (clipOk) {
-                    // A PARTIAL paste may sit in the editor — clear it first or
-                    // the fallback below would append and duplicate content.
+                    // Clear failed keyboard content first
                     try { await editor.fill(''); } catch {
                         await page.keyboard.press('ControlOrMeta+a');
                         await page.keyboard.press('Backspace');
                     }
                     await page.waitForTimeout(100);
-                }
-                // Fallback: chunked insertText (O(n) but reliable, no clipboard)
-                for (let i = 0; i < prompt.length; i += 150) {
-                    await page.keyboard.insertText(prompt.substring(i, i + 150));
-                    await page.waitForTimeout(40);
+                    await page.keyboard.press('ControlOrMeta+v');
+                    await page.waitForTimeout(500);
+                    landed = await editor.evaluate(el =>
+                        (el.innerText || el.textContent || '').length
+                    ).catch(() => 0) > prompt.length * 0.8;
                 }
             }
         } else {

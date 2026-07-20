@@ -19,6 +19,7 @@
 const { ProviderError, classifyError, STAGES } = require('./errors');
 const { detectChallenge, CHALLENGE_REASON } = require('./pageHealth');
 const { appendWithRotation } = require('./telemetry');
+const path = require('path'); // v23: selector_drift.jsonl location
 // v10: stderr logger for factory-level diagnostics (stdout is a machine
 // contract — see lib/receipt.js stream policy; terminal.log writes stderr).
 const { log: _tlog } = require('./terminal');
@@ -428,16 +429,30 @@ async function inputViaKeyboard(page, editor, prompt, { chunkSize = 150, yieldMs
 }
 
 /**
- * Default input strategy — clipboard paste for large payloads, keyboard for small.
- * Used by providers that don't need custom input logic (Claude, Kimi, MiniMax, etc.).
+ * Default input strategy — simulated paste first (avoids system clipboard race
+ * under concurrency), keyboard for small payloads, system clipboard as LAST resort.
+ *
+ * v22 CONCURRENCY FIX: system clipboard (navigator.clipboard.writeText + Ctrl+V)
+ * is a single OS-wide resource — concurrent subprocess workers race on it,
+ * producing cross-talk where worker A pastes worker B's prompt. Reordered so
+ * simulated ClipboardEvent (in-page DataTransfer, never touches OS clipboard)
+ * is the primary path for large payloads. Keyboard (CDP Input.insertText,
+ * target-scoped) is the small-payload path and the first fallback. System
+ * clipboard is now the LAST resort, guarded by the composer readback check.
  */
 async function defaultInput(page, editor, prompt, { insertTextLimit = INSERT_TEXT_LIMIT } = {}) {
     if (prompt.length > insertTextLimit) {
-        // PRIVACY FIX: only press Ctrl+V if OUR write to the clipboard succeeded.
-        // Previously, a failed writeText (permission denied) was swallowed and
-        // Ctrl+V pasted whatever the USER had on their clipboard into a
-        // third-party AI page — and could even send it if it passed the 0.8
-        // length check. On clipboard failure, fall back to non-clipboard paths.
+        // Tier 1: simulated ClipboardEvent — in-page DataTransfer, NO system clipboard.
+        // React editors' onPaste reads event.clipboardData; works without OS race.
+        if (await inputViaSimulatedPaste(page, editor, prompt)) return true;
+
+        // Tier 2: chunked keyboard — CDP Input.insertText is target-scoped, safe.
+        if (await inputViaKeyboard(page, editor, prompt)) return true;
+
+        // Tier 3 (LAST RESORT): system clipboard. Single OS-wide resource — racy
+        // under concurrency. The composer readback check (Step 6.1) catches
+        // cross-talk when it occurs, so this path degrades to a retry rather than
+        // a silent wrong answer.
         let clipOk = true;
         try { await page.evaluate(t => navigator.clipboard.writeText(t), prompt); }
         catch (_) { clipOk = false; }
@@ -447,10 +462,7 @@ async function defaultInput(page, editor, prompt, { insertTextLimit = INSERT_TEX
             const len = await editor.evaluate(el => (el.innerText || el.textContent || '').length);
             if (len > prompt.length * 0.8) return true;
         }
-        // Clipboard unavailable or paste didn't land → simulated ClipboardEvent,
-        // then chunked keyboard as the last resort.
-        if (await inputViaSimulatedPaste(page, editor, prompt)) return true;
-        return inputViaKeyboard(page, editor, prompt);
+        return false;
     } else {
         await page.keyboard.insertText(prompt);
         await page.waitForTimeout(300);
@@ -1637,6 +1649,51 @@ function createProviderRunner(cfg) {
                 {}, ctx.telemetry.editor_tier, { [C.key]: editor._fsTier || 'css' }
             );
         }
+        // v23: DURABLE drift signal — the in-run telemetry above vanishes with
+        // the subprocess; rescues (aria/heuristic tier) are exactly the "front
+        // end changed, adapter will fully break on the NEXT redesign" early
+        // warning, so persist them where a maintainer (or Claude) can grep:
+        //   grep editor data/selector_drift.jsonl | tail
+        // css-tier hits are NOT logged (healthy = silence). Best-effort.
+        if (editor._fsTier && editor._fsTier !== 'css') {
+            try {
+                appendWithRotation(
+                    path.join(__dirname, '..', 'AgentChat-OneWeb', 'data', 'selector_drift.jsonl'),
+                    JSON.stringify({
+                        ts: new Date().toISOString(), provider: C.key, role: 'editor',
+                        tier: editor._fsTier, dead_selectors: C.editorSelectors,
+                    }) + '\n'
+                );
+            } catch (_) { /* diagnostics never break the pipeline */ }
+        }
+
+        // ── Step 5.8 (v22): Tab URL verification — forced fresh read before input ──
+        // page.url() is a synchronous cached accessor that can return stale data
+        // after a CDP routing error. page.evaluate(() => location.href) forces a
+        // CDP round-trip and returns the REAL current URL. Under high concurrency,
+        // CDP target routing can misbind a page handle to the wrong tab; this
+        // catches that before we type the user's prompt into a stranger's page.
+        // Fail-fast on mismatch — re-navigating a misrouted tab could clobber a
+        // sibling worker's session (see 2026-07-20 Gemini + Claude review).
+        try {
+            const _actualUrl = await page.evaluate(() => window.location.href);
+            const _expectedHosts = C.tabHosts || [new URL(C.url).hostname];
+            const _onCorrectSite = _expectedHosts.some(h => {
+                try {
+                    const host = new URL(_actualUrl).hostname;
+                    return host === h || host.endsWith('.' + h);
+                } catch { return false; }
+            });
+            if (!_onCorrectSite) {
+                return classifyError(
+                    new Error(`Tab URL mismatch before input: expected ${_expectedHosts.join(' or ')}, got ${_actualUrl}`),
+                    STAGES.INPUT, C.key, 'error'
+                );
+            }
+        } catch (e) {
+            // page.evaluate failure means the page is gone — no point continuing
+            return classifyError(e, STAGES.INPUT, C.key);
+        }
 
         // ── Step 6: Clear + input text ──
         // Stage label fixed: input failures were previously mislabeled EDITOR_FIND,
@@ -1651,6 +1708,40 @@ function createProviderRunner(cfg) {
                 );
             }
         } catch (e) {
+            return classifyError(e, STAGES.INPUT, C.key);
+        }
+
+        // ── Step 6.1 (v22): Composer readback verification ──
+        // The LAST safe moment before sending: read back what's actually in the
+        // editor and verify it matches our intended prompt. This catches ALL
+        // content-level cross-talk regardless of root cause — system clipboard
+        // races, CDP routing errors, IME composition issues, truncation, or
+        // React re-render glitches. Normalize both strings (collapse whitespace,
+        // first 80 chars) and require the prompt prefix to be present in the
+        // editor content. Fail-fast on mismatch — the prompt has NOT been sent.
+        try {
+            const _editorText = await editor.evaluate(el => {
+                // Prefer value for TEXTAREA/INPUT, innerText for contenteditable
+                const raw = (el.value !== undefined && el.tagName === 'TEXTAREA')
+                    ? el.value : (el.innerText || el.textContent || '');
+                return raw.replace(/\s+/g, ' ').trim();
+            });
+            const _normPrompt = String(prompt || '').replace(/\s+/g, ' ').trim();
+            // Check: the first 80 non-whitespace chars of the prompt must appear
+            // somewhere in the editor text. Using prefix rather than full text
+            // because React editors may truncate/collapse long payloads at render.
+            const _needle = _normPrompt.slice(0, 80);
+            if (_needle.length >= 20 && !_editorText.includes(_needle)) {
+                flog(C.key,
+                    `COMPOSER MISMATCH: expected prefix "${_needle.slice(0, 60)}..." not found in editor ` +
+                    `(editor has ${_editorText.length} chars, starts with "${_editorText.slice(0, 60)}...")`);
+                return classifyError(
+                    new Error(`Composer content mismatch: prompt prefix not found in editor — likely CDP routing or clipboard race`),
+                    STAGES.INPUT, C.key, 'error'
+                );
+            }
+        } catch (e) {
+            // Readback failure means the page/editor is gone — fail, don't send blind
             return classifyError(e, STAGES.INPUT, C.key);
         }
 

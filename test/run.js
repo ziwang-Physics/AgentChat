@@ -21,6 +21,8 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
+// Suites now live under skills/lib/test/ (moved from repo root; see CHANGELOG).
+const SUITE_DIR = path.join(ROOT, 'skills', 'lib', 'test');
 
 // Suites that perform real network I/O (they spin up a localhost HTTP server and
 // attempt actual downloads). Their pass/fail depends on the sandbox's network
@@ -34,7 +36,7 @@ const RUN_NETWORK = process.env.AGENTCHAT_TEST_NETWORK === '1';
 // Discover suites: every top-level test_*.js. New suites are picked up
 // automatically — no registry to keep in sync.
 const suites = fs
-    .readdirSync(ROOT)
+    .readdirSync(SUITE_DIR)
     .filter((f) => /^test_.*\.js$/.test(f))
     .sort();
 
@@ -49,7 +51,7 @@ const OPTIONAL_DEPS = ['jsdom', 'playwright-core'];
 function missingDepsFor(file) {
     let src;
     try {
-        src = fs.readFileSync(path.join(ROOT, file), 'utf8');
+        src = fs.readFileSync(path.join(SUITE_DIR, file), 'utf8');
     } catch (_) {
         return [];
     }
@@ -73,7 +75,7 @@ let skipped = 0;
 let ran = 0;
 
 if (suites.length === 0) {
-    console.log('No test_*.js suites found at repo root.');
+    console.log('No test_*.js suites found in skills/lib/test/.');
     process.exit(0);
 }
 
@@ -92,7 +94,7 @@ for (const file of suites) {
         continue;
     }
     process.stdout.write(`RUN   ${file}\n`);
-    const res = spawnSync('node', [path.join(ROOT, file)], {
+    const res = spawnSync('node', [path.join(SUITE_DIR, file)], {
         cwd: ROOT,
         stdio: 'inherit',
     });

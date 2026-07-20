@@ -1,3 +1,4 @@
+const AGENTCHAT_ROOT = require("path").resolve(__dirname, "..", "..", "..");
 /**
  * Functional assertions for the patched Gemini adapter, modeling the factory's
  * exact semantics:
@@ -13,8 +14,7 @@
 const { JSDOM } = require('jsdom');
 const fs = require('fs'), path = require('path');
 
-const src = fs.readFileSync(path.join(__dirname,
-    'skills/lib/providers/adapters/gemini.js'), 'utf8');
+const src = fs.readFileSync(path.join(AGENTCHAT_ROOT, 'skills/lib/providers/adapters/gemini.js'), 'utf8');
 const SEL   = src.match(/const RESPONSE_SELECTOR = '([^']+)';/)[1];
 const PANEL = src.match(/const DUAL_PANEL_SELECTOR = '([^']+)';/)[1];
 console.log('RESPONSE_SELECTOR  =', JSON.stringify(SEL));

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const AGENTCHAT_ROOT = require("path").resolve(__dirname, "..", "..", "..");
 /**
  * v19 regression suite — IndependentTasks dispatch fixes.
  *
@@ -24,7 +25,7 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
-const ROOT = __dirname;
+const ROOT = path.resolve(__dirname, "..", "..", "..");
 let passed = 0;
 const results = [];
 function test(name, fn) { results.push([name, fn]); }
@@ -34,7 +35,7 @@ function test(name, fn) { results.push([name, fn]); }
 // ─────────────────────────────────────────────────────────────────────────────
 
 test('P3a: acquireProviderSlot caps at max and hands out distinct lock keys', () => {
-    const locks = require('./skills/lib/locks');
+    const locks = require(AGENTCHAT_ROOT + '/skills/lib/locks');
     const prov = `v19test_${process.pid}_${Date.now()}`;
     const s0 = locks.acquireProviderSlot(prov, { max: 2 });
     assert.ok(s0, 'slot 0 must acquire');
@@ -54,7 +55,7 @@ test('P3a: acquireProviderSlot caps at max and hands out distinct lock keys', ()
 });
 
 test('P3a: resolveMaxTabsPerProvider defaults to 1 and clamps env to 1..4', () => {
-    const { resolveMaxTabsPerProvider } = require('./skills/lib/locks');
+    const { resolveMaxTabsPerProvider } = require(AGENTCHAT_ROOT + '/skills/lib/locks');
     assert.strictEqual(resolveMaxTabsPerProvider({}), 1);
     assert.strictEqual(resolveMaxTabsPerProvider({ AGENTCHAT_MAX_TABS_PER_PROVIDER: '3' }), 3);
     assert.strictEqual(resolveMaxTabsPerProvider({ AGENTCHAT_MAX_TABS_PER_PROVIDER: '99' }), 4);
@@ -81,7 +82,7 @@ function makeFakeOneWeb() {
 }
 
 test('P3b: callProvider passes --ephemeral-tab only when requested', async () => {
-    const { createExecutor } = require('./skills/lib/execute');
+    const { createExecutor } = require(AGENTCHAT_ROOT + '/skills/lib/execute');
     const fake = makeFakeOneWeb();
     try {
         const { callProvider } = createExecutor({ webextPath: fake, logPrefix: 'v19test' });
@@ -153,7 +154,7 @@ async function runWaitForCompletion(page, prompt) {
     // if exported, else through a tiny eval-free re-entry: the function IS
     // reachable because the module exposes createProviderRunner which closes
     // over it. Simplest robust route: temporarily export check.
-    const pf = require('./skills/lib/providerFactory');
+    const pf = require(AGENTCHAT_ROOT + '/skills/lib/providerFactory');
     // If not exported (older builds), skip with a loud failure.
     assert.ok(typeof pf.__waitForCompletionForTests === 'function' || typeof pf.createProviderRunner === 'function');
     if (typeof pf.__waitForCompletionForTests === 'function') {
@@ -182,7 +183,7 @@ function promptConfig(prompt) {
 const CROSSTALK_PROMPT = '请解释 As, Sb, Bi 量子点的非单调发射能随尺寸变化的物理机制，并给出文献支持。';
 
 test('P1: echo ABSENT on reused tab → stale .last() is refused (returns null)', async () => {
-    const pf = require('./skills/lib/providerFactory');
+    const pf = require(AGENTCHAT_ROOT + '/skills/lib/providerFactory');
     if (typeof pf.__waitForCompletionForTests !== 'function') {
         // guard exists but isn't test-exported — enforce source pin instead
         const src = fs.readFileSync(path.join(ROOT, 'skills/lib/providerFactory.js'), 'utf8');
@@ -198,7 +199,7 @@ test('P1: echo ABSENT on reused tab → stale .last() is refused (returns null)'
 });
 
 test('P1: echo PRESENT on reused tab → legacy .last() fallback still works', async () => {
-    const pf = require('./skills/lib/providerFactory');
+    const pf = require(AGENTCHAT_ROOT + '/skills/lib/providerFactory');
     if (typeof pf.__waitForCompletionForTests !== 'function') return;
     const page = makeMockPage({
         bodyText: '用户: ' + CROSSTALK_PROMPT + '\nAI: 生成中……',
@@ -209,7 +210,7 @@ test('P1: echo PRESENT on reused tab → legacy .last() fallback still works', a
 });
 
 test('P1: fresh page (baseline 0) is untouched by the guard', async () => {
-    const pf = require('./skills/lib/providerFactory');
+    const pf = require(AGENTCHAT_ROOT + '/skills/lib/providerFactory');
     if (typeof pf.__waitForCompletionForTests !== 'function') return;
     const page = makeMockPage({ bodyText: '', staleText: '全新页面的回答' });
     const cfg = promptConfig(CROSSTALK_PROMPT);
@@ -223,7 +224,7 @@ test('P1: fresh page (baseline 0) is untouched by the guard', async () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 test('P2: kimi adapter exposes deep-think-off, honors opt-out, survives dead page', async () => {
-    const kimi = require('./skills/lib/providers/adapters/kimi');
+    const kimi = require(AGENTCHAT_ROOT + '/skills/lib/providers/adapters/kimi');
     const fn = kimi._ensureKimiDeepThinkOff;
     assert.strictEqual(typeof fn, 'function', 'ensureKimiDeepThinkOff missing');
 
@@ -286,7 +287,7 @@ test('P5: --plan file content is loaded as the prompt (via parse-fail path)', ()
 // ─────────────────────────────────────────────────────────────────────────────
 
 test('v20: locks — clampedEnvInt dedup keeps both resolvers behaviorally intact', () => {
-    const { resolveMaxSlots, resolveMaxTabsPerProvider } = require('./skills/lib/locks');
+    const { resolveMaxSlots, resolveMaxTabsPerProvider } = require(AGENTCHAT_ROOT + '/skills/lib/locks');
     assert.strictEqual(resolveMaxSlots({}), 3);
     assert.strictEqual(resolveMaxSlots({ AGENTCHAT_MAX_CONCURRENT_PAGES: '20' }), 16);
     assert.strictEqual(resolveMaxTabsPerProvider({}), 1);
@@ -294,7 +295,7 @@ test('v20: locks — clampedEnvInt dedup keeps both resolvers behaviorally intac
 });
 
 test('v20: locks — orphaned transfer dirs older than TTL are swept', () => {
-    const locks = require('./skills/lib/locks');
+    const locks = require(AGENTCHAT_ROOT + '/skills/lib/locks');
     // A fake OTHER-pid transfer dir, backdated past the 30min TTL.
     const fakePid = 999999;
     const dir = path.join(locks.LOCK_DIR, `v20sweep.stale.${fakePid}.${Date.now()}`);
@@ -325,7 +326,7 @@ test('v20: providerFactory — echo probe returns in-page boolean (no body-text 
     // Behavioral: the P1 tests above already exercise the guard end-to-end via
     // the boolean-contract mock. Here pin the contract itself: evaluate is
     // called WITH the needle argument.
-    const pf = require('./skills/lib/providerFactory');
+    const pf = require(AGENTCHAT_ROOT + '/skills/lib/providerFactory');
     if (typeof pf.__waitForCompletionForTests !== 'function') return;
     let seenNeedle = null;
     const page = {

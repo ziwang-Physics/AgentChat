@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const AGENTCHAT_ROOT = require("path").resolve(__dirname, "..", "..", "..");
 /**
  * v17 resilience regression — CAPTCHA/login/throttle wall detection,
  * browser admission slots, and wiring assertions.
@@ -19,9 +20,9 @@ function ok(cond, name) {
 }
 
 const { detectChallenge, CHALLENGE_REASON, TEXT_EVIDENCE_MAX_BODY } =
-    require('./skills/lib/pageHealth');
+    require(AGENTCHAT_ROOT + '/skills/lib/pageHealth');
 const { acquireBrowserSlot, releaseBrowserSlot, resolveMaxSlots, BROWSER_SLOT_PREFIX, LOCK_DIR } =
-    require('./skills/lib/locks');
+    require(AGENTCHAT_ROOT + '/skills/lib/locks');
 
 // ── Fake Playwright page over jsdom ─────────────────────────────────────────
 // detectChallenge does exactly one page.evaluate(fn, arg); run fn against a
@@ -146,7 +147,7 @@ function fakePage(html) {
 
     console.log('── wiring assertions ──');
 
-    const pf = fs.readFileSync(path.join(__dirname, 'skills/lib/providerFactory.js'), 'utf8');
+    const pf = fs.readFileSync(path.join(AGENTCHAT_ROOT, 'skills/lib/providerFactory.js'), 'utf8');
     ok((pf.match(/detectChallenge\(page\)/g) || []).length >= 3,
         'providerFactory probes challenges at ≥3 sites (nav / editor-fail / wait-timeout)');
     ok(pf.includes("CHALLENGE_REASON[ch.kind]"), 'providerFactory maps kind → fallback reason');
@@ -155,14 +156,14 @@ function fakePage(html) {
         'all three editor tiers are tagged for telemetry');
     ok(pf.includes('editor_tier'), 'editor tier lands in ctx.telemetry');
 
-    const ow = fs.readFileSync(path.join(__dirname, 'skills/AgentChat-OneWeb/index.js'), 'utf8');
+    const ow = fs.readFileSync(path.join(AGENTCHAT_ROOT, 'skills/AgentChat-OneWeb/index.js'), 'utf8');
     ok(ow.includes('acquireBrowserSlot(') && ow.includes('releaseBrowserSlot(browserSlot)'),
         'OneWeb acquires and releases an admission slot around the chain');
     ok(/finally\s*\{\s*releaseBrowserSlot\(browserSlot\);/.test(ow),
         'slot release is in a finally block (crash-path safe)');
     ok(ow.includes('手动完成登录/人机验证'), 'generic auth recovery hint present');
 
-    const er = fs.readFileSync(path.join(__dirname, 'skills/lib/errors.js'), 'utf8');
+    const er = fs.readFileSync(path.join(AGENTCHAT_ROOT, 'skills/lib/errors.js'), 'utf8');
     ok(er.includes("CHALLENGE_CHECK:'challenge_check'") || er.includes("CHALLENGE_CHECK: 'challenge_check'")
         || /CHALLENGE_CHECK:\s*'challenge_check'/.test(er), 'STAGES.CHALLENGE_CHECK registered');
 

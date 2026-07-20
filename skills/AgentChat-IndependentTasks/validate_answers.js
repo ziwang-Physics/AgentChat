@@ -36,6 +36,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { isCompressedPlan, expandSharedPlan, lintCompressedInvariants } = require("../lib/plan");
 
 // ── args ──────────────────────────────────────────────────────────
 function usage(msg) {
@@ -85,6 +86,39 @@ if (lintMode) {
   const KNOWN = ["gemini", "chatgpt", "claude", "qwen", "kimi", "minimax", "mimo", "deepseek"];
   const errs = [], warns = [];
 
+  // ── Layer 0: compressed-format invariant checks ──────────────────
+  let effectivePlan = plan;
+  let compressedFailed = false;
+  if (isCompressedPlan(plan)) {
+    const invIssues = lintCompressedInvariants(plan);
+    for (const issue of invIssues) {
+      if (issue.severity === "error") errs.push(issue.message);
+      else warns.push(issue.message);
+    }
+    // Only attempt expansion if no blocking errors from invariants
+    if (errs.length === 0) {
+      try {
+        effectivePlan = expandSharedPlan(JSON.parse(JSON.stringify(plan)));
+      } catch (e) {
+        errs.push(`expandSharedPlan threw: ${e.message}`);
+      }
+    } else {
+      compressedFailed = true;
+    }
+  }
+
+  // ── Layer 1: post-expansion traditional checks ───────────────────
+  // When compressed format had blocking invariant errors, expansion was
+  // skipped and traditional checks would produce noise (prompt field is
+  // still undefined). Skip and let the invariant errors stand alone.
+  const subtasks = effectivePlan.subtasks;
+  if (compressedFailed) {
+    for (const w of warns) process.stderr.write(`[lint] WARN  ${w}\n`);
+    for (const e of errs) process.stderr.write(`[lint] ERROR ${e}\n`);
+    process.stderr.write(`[lint] ${errs.length} error(s), ${warns.length} warning(s) — compressed invariant checks failed, expansion skipped${plan.exclude ? `, exclude=[${plan.exclude}]` : ""}\n`);
+    process.exit(errs.length ? 2 : 0);
+  }
+
   // duplicate subtask ids → results[id] silently overwritten (observed incident)
   const idSeen = new Set();
   for (const st of subtasks) {
@@ -122,9 +156,17 @@ if (lintMode) {
     if (st.primary && exclude.includes(String(st.primary).toLowerCase()))
       errs.push(`subtask "${st.id}": primary "${st.primary}" is in the exclude list — self-contradictory plan`);
 
+  // v24: P=U full-deployment zero-fallback warning.
+  const primaries = [...new Set(subtasks.map(st => String(st.primary || "").toLowerCase()).filter(Boolean))];
+  const available = KNOWN.filter(k => !exclude.includes(k));
+  if (primaries.length >= available.length && primaries.length > 1) {
+    warns.push(`all ${primaries.length}/${available.length} available (non-excluded) providers are primaries — each worker has ZERO fallback. Reserve >=1 provider as hot-spare, or the orchestrator will auto-enable AGENTCHAT_MAX_TABS_PER_PROVIDER=2 as a partial mitigation.`);
+  }
+
+  const fmtLabel = isCompressedPlan(plan) ? "compressed" : "traditional";
   for (const w of warns) process.stderr.write(`[lint] WARN  ${w}\n`);
   for (const e of errs) process.stderr.write(`[lint] ERROR ${e}\n`);
-  process.stderr.write(`[lint] ${errs.length} error(s), ${warns.length} warning(s) — ${subtasks.length} subtasks, ${Object.keys(qOwner).length} unique questions${exclude.length ? `, exclude=[${exclude.join(",")}]` : ""}\n`);
+  process.stderr.write(`[lint] ${errs.length} error(s), ${warns.length} warning(s) — ${subtasks.length} subtasks, ${Object.keys(qOwner).length} unique questions, ${fmtLabel}${exclude.length ? `, exclude=[${exclude.join(",")}]` : ""}\n`);
   process.exit(errs.length ? 2 : 0);
 }
 
@@ -216,6 +258,26 @@ function scanFabrication(text) {
 const ANCHOR_RE = /\[ANSWER\s+([^\]\s]+)\s*\]/g;
 function escRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 
+// v26: lenient anchor matching (Postel's Law for LLM format compliance).
+// LLMs rarely delete anchors — they beautify them (bold, heading, CJK brackets,
+// trailing colons). Normalize the line first, then near-strict match.
+function normalizeLine(line) {
+  return String(line || '')
+    .normalize('NFKC')
+    .replace(/[【〔]/g, '[').replace(/[】〕]/g, ']')
+    .replace(/[*_`~]/g, '')
+    .replace(/^[\s>#\-+.\d]*/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase();
+}
+function hasAnchorLenient(text, qid) {
+  const lines = String(text || '').split(/\r?\n/);
+  const pat = escRe(qid).replace(/(\d)(?=[A-Z])/g, '$1[\\s\\-_]?');
+  const re = new RegExp(`\\[\\s*ANSWER\\s*[:：]?\\s*${pat}\\s*\\]`, 'i');
+  return lines.some(l => re.test(normalizeLine(l)));
+}
+
 const allIds = new Set(subtasks.flatMap(st => st.questions));
 const report = { generated: new Date().toISOString(), plan: path.resolve(planPath), subtasks: [] };
 let anyFail = false;
@@ -254,18 +316,21 @@ for (const st of subtasks) {
 
   const expected = new Set(st.questions);
   for (const qid of st.questions) {
-    const re = new RegExp(`\\[ANSWER\\s+${escRe(qid)}\\s*\\]`);
+    const strictRe = new RegExp(`\\[ANSWER\\s+${escRe(qid)}\\s*\\]`);
+    const strictFound = strictRe.test(text);
+    const lenientFound = !strictFound && hasAnchorLenient(text, qid);
+    const anchorFound = strictFound || lenientFound;
+    const matchType = strictFound ? "strict" : lenientFound ? "lenient" : "none";
     const seg = text.match(new RegExp(
       `\\[ANSWER\\s+${escRe(qid)}\\s*\\]([\\s\\S]*?)(?=\\[ANSWER\\s|$)`));
     const bodyLen = seg ? seg[1].trim().length : 0;
-    // 抽出锚行后的第一句"复述"，供 semantic_check.json 强制抽查（Issue: 语义抽查被跳过）
     let restatement = null;
     if (seg) {
       const firstLine = seg[1].trim().split(/\n/)[0] || "";
       restatement = (firstLine.split(/(?<=[。.!?？！])\s*/)[0] || firstLine).slice(0, 200);
     }
-    entry.questions[qid] = { anchorFound: re.test(text), bodyLength: bodyLen, restatement };
-    if (!re.test(text)) { entry.status = "FAIL"; anyFail = true; }
+    entry.questions[qid] = { anchorFound, bodyLength: bodyLen, restatement, matchType };
+    if (!anchorFound) { entry.status = "FAIL"; anyFail = true; }
     else if (bodyLen < 30) {
       entry.questions[qid].warn = "body under 30 chars";
       entry.status = "FAIL"; anyFail = true;
@@ -292,6 +357,21 @@ for (const st of subtasks) {
 fs.writeFileSync(path.join(outDir, "validation_report.json"),
   JSON.stringify(report, null, 2) + "\n", "utf8");
 
+// ── all_clean.txt：合成阶段只需一次 Read（省 ~2K token/次）─────────
+// 按 subtasks 声明的顺序拼接 clean 文件；缺失的用占位标注。
+// 标头 "=== <subtask_id> ===" 方便 Claude Code 按组定位。
+const allCleanParts = [];
+for (const st of subtasks) {
+  const cf = path.join(outDir, "clean", `${st.id}.txt`);
+  if (fs.existsSync(cf)) {
+    allCleanParts.push(`=== ${st.id} ===\n${fs.readFileSync(cf, "utf8").trim()}`);
+  } else {
+    allCleanParts.push(`=== ${st.id} ===\n⚠ Answer for "${st.id}" is missing.`);
+  }
+}
+fs.writeFileSync(path.join(outDir, "clean", "all_clean.txt"),
+  allCleanParts.join("\n\n") + "\n", "utf8");
+
 // ── semantic_check.json：把"语义抽查"从口头步骤变成机器门 ─────────
 // 锚校验挡编号漂移；"锚对了但内容跑偏"只能靠 Claude Code 逐条对照复述句与题目。
 // 历史上这一步被直接跳过——因此现在它产出一个必须填写的 artifact：
@@ -314,7 +394,10 @@ fs.writeFileSync(path.join(outDir, "semantic_check.json"),
 // ── console summary ───────────────────────────────────────────────
 for (const e of report.subtasks) {
   const qs = Object.entries(e.questions)
-    .map(([q, v]) => `${q}:${v.anchorFound ? "✓" : "✗"}`).join(" ");
+    .map(([q, v]) => {
+      const mark = v.matchType === "strict" ? "✓" : v.matchType === "lenient" ? "~" : "✗";
+      return `${q}:${mark}`;
+    }).join(" ");
   const extra = [
     e.foreignAnchors?.length ? `foreign=[${e.foreignAnchors.join(",")}]` : "",
     e.fabricationMarkers?.length ? `FABRICATED(${e.fabricationMarkers.length})` : "",

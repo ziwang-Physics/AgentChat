@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const AGENTCHAT_ROOT = require("path").resolve(__dirname, "..", "..", "..");
 /**
  * test_v13_image_capture.js — functional assertions for the v13 patch
  * (ChatGPT generated images silently dropped by innerText extraction):
@@ -30,10 +31,10 @@ const http = require('http');
 // harness's fixtures legitimately live on 127.0.0.1, so opt in. The dedicated
 // v14 test below temporarily clears the variable to assert the block itself.
 process.env.AGENTCHAT_ALLOW_PRIVATE_IMAGE_HOSTS = '1';
-const { extractResponse } = require('./skills/lib/providerFactory');
+const { extractResponse } = require(AGENTCHAT_ROOT + '/skills/lib/providerFactory');
 const {
     extractImageUrls, downloadAllImages, sniffImageExt,
-} = require('./skills/AgentChat-OneWeb/index.js');
+} = require(AGENTCHAT_ROOT + '/skills/AgentChat-OneWeb/index.js');
 
 let passed = 0, total = 0;
 function ok(name, fn) {
@@ -286,10 +287,10 @@ server.close();
 
 // Wiring ─ source-level
 await ok('wiring: tryAllProviders returns page; main() forwards it to downloadAllImages', () => {
-    const src = fs.readFileSync(path.join(__dirname, 'skills/AgentChat-OneWeb/index.js'), 'utf8');
+    const src = fs.readFileSync(path.join(AGENTCHAT_ROOT, 'skills/AgentChat-OneWeb/index.js'), 'utf8');
     assert(/provider:\s*provider\.name,\s*page\s*}/.test(src), 'success result carries page');
     assert(/downloadAllImages\(result\.response,\s*process\.cwd\(\),\s*\{\s*page:\s*result\.page\s*\}\)/.test(src), 'main passes result.page');
-    const cg = fs.readFileSync(path.join(__dirname, 'skills/lib/providers/adapters/chatgpt.js'), 'utf8');
+    const cg = fs.readFileSync(path.join(AGENTCHAT_ROOT, 'skills/lib/providers/adapters/chatgpt.js'), 'utf8');
     assert(/imageScopeSelector:\s*'\[data-message-author-role="assistant"\]'/.test(cg), 'chatgpt adapter widens image scope');
 });
 

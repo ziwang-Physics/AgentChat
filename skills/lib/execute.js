@@ -79,8 +79,47 @@ const UI_CHROME_PATTERNS = [
     /^我随时待命[！!。.]?\s*/gim,
 ];
 
-function cleanResponse(text) {
+// ── Per-provider noise patterns (stripped before UI chrome) ────────────────
+// Each provider's web UI injects artifacts that shouldn't reach qualityGate.
+// Qwen: leading timestamp sometimes glued to first word ("19:39:11[ANSWER …")
+// MiMo: trailing logo image URLs (Xiaomi MiMo Studio branding)
+// Kimi: trailing avatar image URLs (moonshot.cn CDN)
+// MiniMax: trailing generated-image URLs (hailuoai.com CDN)
+// DeepSeek: "已深度思考（用时 X.X 秒）" prefix (DeepSeek-R1 thinking banner)
+const PER_PROVIDER_CLEANERS = {
+    qwen: [
+        // Leading timestamp: "19:39:11" or "19:39:11 " prefixed before answer
+        /^\s*\d{1,2}:\d{2}(?::\d{2})?\s*/,
+    ],
+    mimo: [
+        // Trailing MiMo branding images
+        /\n!\[Xiaomi MiMo Studio[^\]]*\]\(https:\/\/aistudio\.xiaomimimo\.com\/[^\s)]+\)\s*$/g,
+    ],
+    kimi: [
+        // Trailing avatar/profile images from moonshot.cn CDN
+        /\n!\[[^\]]*\]\(https:\/\/avatar\.moonshot\.cn\/[^\s)]+\)\s*$/g,
+    ],
+    minimax: [
+        // Trailing generated images from hailuoai.com CDN
+        /\n!\[generated-image[^\]]*\]\(https:\/\/cdn\.hailuoai\.com\/[^\s)]+\)\s*$/g,
+    ],
+    deepseek: [
+        // DeepSeek-R1 thinking banner: "已深度思考（用时 X.X 秒）"
+        /^已深度思考（用时\s*\d+(?:\.\d+)?\s*秒）\s*/,
+    ],
+};
+
+function cleanResponse(text, provider) {
     let cleaned = text || "";
+    // 1. Per-provider noise (stripped first so UI chrome patterns see clean text)
+    if (provider) {
+        const pkey = String(provider).toLowerCase();
+        const cleaners = PER_PROVIDER_CLEANERS[pkey];
+        if (cleaners) {
+            for (const pat of cleaners) cleaned = cleaned.replace(pat, "");
+        }
+    }
+    // 2. Generic UI chrome (provider name speech prefixes, thought banners, etc.)
     for (const pat of UI_CHROME_PATTERNS) cleaned = cleaned.replace(pat, "");
     return cleaned.trim();
 }
@@ -185,6 +224,34 @@ function createExecutor({
                 const providerUsed = used ? used[1].toLowerCase() : provider;
                 const usedWithChars = stderr.match(/✓\s*\w+:\s*USED\s*\(\d+\s*chars/);
 
+                // v23: STRUCTURED ERROR CHANNEL — OneWeb emits its per-provider
+                // failure map as `[oneweb] AGENTCHAT_ERR {json}` on stderr before
+                // any failure exit. Exit codes stay as the coarse fallback, but
+                // they lose all detail (--single always exits 9, so "all_exhausted"
+                // carried zero information about WHAT failed: selector miss, goto
+                // timeout, and auth wall were indistinguishable upstream). Parse
+                // the LAST such line; malformed JSON degrades to the exit code.
+                let detail = null;
+                {
+                    const lines = stderr.match(/\[oneweb\] AGENTCHAT_ERR (\{.*\})/g);
+                    if (lines) {
+                        const payload = lines[lines.length - 1].slice("[oneweb] AGENTCHAT_ERR ".length);
+                        try { detail = JSON.parse(payload); } catch (_) { /* fall back to exit code */ }
+                    }
+                }
+                // Compact "reason@stage" for the provider this call intended (or
+                // the sole entry, which is the --single case): e.g.
+                // "error@editor_find", "timeout@wait_response", "auth@auth_check".
+                const detailReason = (() => {
+                    const rs = detail && detail.reasons;
+                    if (!rs) return null;
+                    const keys = Object.keys(rs);
+                    const k = keys.includes(provider) ? provider : (keys.length === 1 ? keys[0] : null);
+                    if (!k) return null;
+                    const r = rs[k];
+                    return r && r.reason ? (r.stage ? `${r.reason}@${r.stage}` : r.reason) : null;
+                })();
+
                 if (code === 0 && text.length >= 5) {
                     resolve({ ok: true, text, provider: providerUsed });
                 } else if (code === 0 && acceptUsedMarker && usedWithChars && text.length < 5) {
@@ -198,13 +265,18 @@ function createExecutor({
                     // code === null ⇒ killed by signal (our SIGTERM/SIGKILL after
                     // budget overrun, or external kill). Was labelled "exit_null",
                     // which read like a OneWeb contract violation in logs.
-                    const reason = code === null
+                    const coarse = code === null
                         ? `killed_${signal || "signal"}`
                         : (EXIT_REASONS[code] || `exit_${code}`);
+                    // v23: prefer the structured detail — "error@editor_find"
+                    // beats "all_exhausted". Signal kills keep the coarse label
+                    // (the child died mid-flight; any emitted detail is stale).
+                    const reason = (code !== null && detailReason) ? detailReason : coarse;
                     resolve({
                         ok: false, text: "", provider: providerUsed,
                         terminal: code === 1, // no_cdp — fatal for the whole chain
                         reason,
+                        ...(detail ? { detail: detail.reasons } : {}),
                     });
                 }
             });
@@ -280,7 +352,7 @@ function createExecutor({
             if (result.ok) {
                 if (!holdLockOnSuccess) releaseLock(slot.lockKey);
                 const actualProvider = result.provider || key;
-                const cleaned = cleanResponse(result.text);
+                const cleaned = cleanResponse(result.text, actualProvider);
                 return {
                     success: true,
                     provider_used: actualProvider,
@@ -304,10 +376,12 @@ function createExecutor({
 
             releaseLock(slot.lockKey);
             const entry = { provider: key, reason: result.reason || "unknown" };
-            if (result.reason === "auth" && RECOVERY_HINTS[key]) {
+            // v23: reason may now be "auth@auth_check" — prefix match, not equality
+            if (String(entry.reason).startsWith("auth") && RECOVERY_HINTS[key]) {
                 entry.fix = RECOVERY_HINTS[key];
                 log(`[fallback] ${key}: auth — fix: ${entry.fix}`);
             }
+            if (result.detail) entry.detail = result.detail; // full per-provider failure map from the child
             tried.push(entry);
 
             // no_cdp (exit 1) is fatal for the whole chain — every provider
