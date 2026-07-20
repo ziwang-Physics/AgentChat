@@ -135,6 +135,27 @@ function tryParsePreDecomposedPlan(userTask) {
   try {
     const json = JSON.parse(userTask);
     if (json.subtasks && Array.isArray(json.subtasks) && json.subtasks.length >= 2) {
+      // v21 GUARD: duplicate subtask ids silently overwrite each other in the
+      // `results[id]` map — one whole group's answer vanishes without any error
+      // (observed: two subtasks both named group_solvent_dielectric). A malformed
+      // plan must ABORT, not fall through to the NL decomposer (which would treat
+      // the JSON string as a task description).
+      const seen = new Set();
+      for (const st of json.subtasks) {
+        const id = st.id || "";
+        if (seen.has(id)) {
+          const err = new Error(`plan invalid: duplicate subtask id "${id}" — later entries overwrite earlier results silently. Fix the plan (run validate_answers.js --lint).`);
+          err.agentchatPlanError = true;
+          throw err;
+        }
+        seen.add(id);
+      }
+      // v21: top-level "exclude" — providers the USER forbade (e.g. "除了 Claude").
+      // Honored by every fallback chain in dispatchWaves; without this the chain
+      // Gemini→ChatGPT→Claude→… routed user content to an excluded provider.
+      const exclude = Array.isArray(json.exclude)
+        ? [...new Set(json.exclude.map(normalizeAI).filter(Boolean))]
+        : [];
       const nodes = json.subtasks.map(st => ({
         id: st.id || st.role || `task_${Math.random().toString(36).slice(2,6)}`,
         ai: st.primary || "gemini",
@@ -145,10 +166,14 @@ function tryParsePreDecomposedPlan(userTask) {
       }));
       // Validate all nodes have non-empty prompts
       if (nodes.every(n => n.prompt && n.prompt.length > 5)) {
-        return { nodes, pre_decomposed: true };
+        if (exclude.length) log(`  Plan exclude list: [${exclude.join(", ")}] — these providers will never be dispatched to (primary or fallback)`);
+        return { nodes, exclude, pre_decomposed: true };
       }
     }
-  } catch (_) { /* not JSON, proceed to decomposition */ }
+  } catch (e) {
+    if (e && e.agentchatPlanError) throw e; // structural plan errors abort the run — never fall through to the decomposer
+    /* not JSON, proceed to decomposition */
+  }
   return null;
 }
 
@@ -367,13 +392,22 @@ async function dispatchWaves(dag, budgetMs) {
     const waveBudget = Math.min(remaining, Math.max(60_000, Math.floor(remaining / wavesLeft)));
     // Provider contention only exists WITHIN a wave — skip lists no longer span
     // the whole DAG, so fallback chains are less constrained than before.
+    // v21: plan-level `exclude` (user's "except X" constraint) is merged into
+    // EVERY worker's skip list so no fallback chain can route to a forbidden
+    // provider. The lint gate rejects primary∈exclude before dispatch; if a
+    // plan slips through anyway we warn loudly rather than silently obeying
+    // the primary over the user's exclusion.
+    const planExclude = Array.isArray(dag.exclude) ? dag.exclude : [];
     const primaries = [...new Set(wave.map(n => normalizeAI(n.ai)))];
+    for (const p of primaries) {
+      if (planExclude.includes(p)) log(`  WARN: primary "${p}" is in the plan's exclude list — plan is self-contradictory (lint should have caught this); exclude does NOT strip an explicit primary`);
+    }
     log(`  Wave ${w + 1}/${waves.length}: ${wave.length} worker(s), budget ${Math.round(waveBudget / 1000)}s`);
 
     const tasks = wave.map((node, i) => {
       const delay = i * STAGGER_MS;
       const myPrimary = normalizeAI(node.ai);
-      const skipList = primaries.filter(p => p !== myPrimary);
+      const skipList = [...primaries.filter(p => p !== myPrimary), ...planExclude];
       const prompt = injectUpstream(node, results); // upstream outputs from prior waves
       const workerBudget = Math.max(30_000, waveBudget - delay);
       return new Promise(resolve => setTimeout(async () => {
@@ -817,4 +851,4 @@ if (require.main === module) {
     main().catch(e => { log(`CRITICAL: ${e.message}`); process.exit(4); });
 }
 
-module.exports = { FALLBACK_CHAIN, buildFallbackChain, normalizeAI, cleanResponse, topoWaves, injectUpstream };
+module.exports = { FALLBACK_CHAIN, buildFallbackChain, normalizeAI, cleanResponse, topoWaves, injectUpstream, tryParsePreDecomposedPlan };

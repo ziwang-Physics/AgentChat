@@ -21,6 +21,27 @@ md="${1:?usage: md2pdf.sh <input.md> <output.pdf> [header-title]}"
 pdf="${2:?usage: md2pdf.sh <input.md> <output.pdf> [header-title]}"
 header_title="${3:-Solutions}"
 
+# ── 语义抽查门（Issue: SKILL.md 的语义抽查步骤曾被直接跳过）──────────
+# 当 AGENTCHAT_VALIDATED_DIR 指向 validate_answers.js 的 --out 目录时（本 skill
+# 工作流强制设置），要求 semantic_check.json 存在且所有 verdict 均为 MATCH。
+# PENDING = 抽查没做；MISMATCH = 锚对了但内容答偏 → 都不许出 PDF。
+if [[ -n "${AGENTCHAT_VALIDATED_DIR:-}" ]]; then
+  sc="$AGENTCHAT_VALIDATED_DIR/semantic_check.json"
+  if [[ ! -f "$sc" ]]; then
+    echo "[md2pdf] BLOCKED: $sc 不存在 — 先运行 validate_answers.js 生成语义抽查清单" >&2
+    exit 5
+  fi
+  if grep -q '"PENDING"' "$sc"; then
+    echo "[md2pdf] BLOCKED: semantic_check.json 仍有 PENDING 条目 — 逐条对照复述句与题目，改为 MATCH/MISMATCH 后再编译" >&2
+    exit 5
+  fi
+  if grep -q '"MISMATCH"' "$sc"; then
+    echo "[md2pdf] BLOCKED: semantic_check.json 存在 MISMATCH — 按强制执行规则 #4 走 L1 补发，禁止把答偏的内容合成进 PDF" >&2
+    exit 5
+  fi
+  echo "[md2pdf] semantic check: all MATCH ✓" >&2
+fi
+
 PANDOC_BIN="${PANDOC_BIN:-pandoc}"
 if [[ -n "${TYPST_BIN:-}" ]]; then
   :
