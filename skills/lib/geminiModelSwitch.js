@@ -437,8 +437,15 @@ async function openModelMenu(page, log, opts = {}) {
         const { sel, tier, durable } = queue.shift();
         const loc = page.locator(sel).first();
 
+        // L1/L2 are reliable structural selectors — give them enough time for
+        // Angular hydration + shadow DOM rendering on a fresh page. Pre-v24
+        // budget (400/800ms) was tuned for cached/warm pages and caused
+        // "Model selector button not found" on every cold start.
+        const visTimeout = tier === 'L0-cache' ? 800
+            : tier === 'L1-locale' ? 4000
+            : 2500; // L2-structural, L3-heuristic
         const visible = await loc
-            .isVisible({ timeout: tier === 'L0-cache' ? 800 : 400 })
+            .isVisible({ timeout: visTimeout })
             .catch(() => false);
         if (!visible) {
             if (tier === 'L0-cache') {

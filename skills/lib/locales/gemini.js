@@ -22,7 +22,7 @@ const PROFILES = {
         // 模型选择器按钮 aria-label 子串
         modelAria:       '打开模式选择器',
         // 按钮文本校验 — Pro Extended 已激活的标志
-        modelVerify:     'Pro扩展',
+        modelVerify:     /Pro\s*扩展/,
         // Pro 菜单项描述文本（区别于 Flash）
         proDesc:         '高等数学',
         // 思考等级/程度 菜单项文本（v9 扁平菜单中不再使用，保留兼容旧 UI）

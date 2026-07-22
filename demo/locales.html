@@ -1,0 +1,36 @@
+<!DOCTYPE html><html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>多语言 — AgentChat</title><link rel="stylesheet" href="shared.css"></head>
+<body>
+<nav class="topbar"><a href="index.html" class="brand">AgentChat</a><a href="architecture.html">架构</a><a href="webextended.html">降级链</a><a href="freesubagent.html">并行编排</a><a href="workflow.html">串行管道</a><a href="mcp.html">MCP Server</a><a href="python.html">Python SDK</a><a href="locales.html" class="active">多语言</a></nav>
+<div class="container">
+<div class="hero" style="padding:40px 0 20px"><h1>🌐 <span>多语言选择器</span></h1><p class="sub">zh_CN / zh_TW / en / ja 四语言 profile · 自动检测 · fuzzy 回退</p></div>
+<div class="section"><h2>设计理念</h2><p>Gemini UI 根据 Google 账号语言显示不同文本。原代码硬编码繁体中文+英文，简体中文用户直接报错。新方案将所有语言文本集中到 <code>skills/lib/locales/gemini.js</code>，核心逻辑不再硬编码任何语言字符串。</p></div>
+<div class="section"><h2>4 语言 Profile 对照表</h2>
+<div class="table-wrap"><table><thead><tr><th>字段</th><th>zh_CN</th><th>zh_TW</th><th>en</th><th>ja</th></tr></thead>
+<tbody>
+<tr><td>模型选择器</td><td>打开模式选择器</td><td>開啟模式挑選器</td><td>Model selector</td><td>モデルセレクターを開く</td></tr>
+<tr><td>Pro Extended</td><td><span class="tag green">Pro扩展</span></td><td>Pro延長</td><td>Pro Extended</td><td>Pro 拡張</td></tr>
+<tr><td>Pro 描述</td><td><span class="tag red">高等数学</span></td><td>進階</td><td>Advanced</td><td>高度な数学</td></tr>
+<tr><td>思考等级</td><td><span class="tag orange">思考等级</span></td><td>思考程度</td><td>Thinking</td><td>思考レベル</td></tr>
+<tr><td>Extended</td><td><span class="tag purple">扩展</span></td><td>延長</td><td>Extended</td><td>拡張</td></tr>
+<tr><td>发送</td><td>发送</td><td>傳送</td><td>Send</td><td>送信</td></tr>
+</tbody></table></div>
+<p style="margin-top:12px;color:var(--muted);font-size:13px">🔴 标记的 3 处是之前遗漏导致 ER_MODEL_DEGRADED 的根因</p></div>
+<div class="section"><h2>自动检测 + 手动覆盖</h2>
+<div class="two-col"><div class="card" style="cursor:default"><h3>🔍 自动检测</h3><p>优先级：<code>navigator.language</code> → <code>&lt;html lang&gt;</code> → 按钮文本反向推断 → null (回退 fuzzy)</p></div><div class="card" style="cursor:default"><h3>🎛️ 手动覆盖</h3><pre>$ node index.js --locale=zh_CN "prompt"</pre><p>未知 locale 自动使用 FUZZY 正则匹配全部已知文本</p></div></div></div>
+<div class="section"><h2>验证</h2><pre>$ node -e "const L=require('./skills/lib/locales/gemini'); L.setLocale('zh_CN');
+console.log(L.verifyText('modelVerify'));"  → "Pro扩展"
+
+$ node -e "L.setLocale('en'); console.log(L.verifyText('modelVerify'));"  → "Pro Extended"
+
+$ node -e "L.setLocale(null); console.log(L.txt('extended'));"  → /扩展|延長|Extended|拡張/i</pre></div>
+<div class="section"><h2>技术细节：page.evaluate 中 RegExp 传递</h2>
+<p>L 模块是 Node.js 作用域，返回的 RegExp 对象不能通过结构化克隆传到浏览器端（Playwright 只支持 JSON 可序列化类型）。解决方案：在 Node.js 侧提取 <code>source</code> + <code>flags</code> 字符串，浏览器侧 <code>new RegExp(src, flags)</code> 重建。</p>
+<pre>const _extRe = L.txt('extended');
+const idx = await page.evaluate(({extSrc, extFlags}) => {
+    const re = new RegExp(extSrc, extFlags);
+    ...匹配DOM...
+}, {extSrc: _extRe.source, extFlags: _extRe.flags});</pre></div>
+</div>
+<footer>AgentChat · Locales Module · 4-Language Profile System</footer></body></html>

@@ -1,0 +1,49 @@
+<!DOCTYPE html><html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>MCP Server — AgentChat</title><link rel="stylesheet" href="shared.css">
+<style>.status-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;text-align:center}.status-card .dot{width:16px;height:16px;border-radius:50%;display:inline-block;margin-right:8px}.dot.on{background:var(--green)}.dot.off{background:var(--red)}.tool-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin:12px 0}.tool-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px}.tool-card h4{margin-bottom:4px;font-size:14px}.tool-card p{color:var(--muted);font-size:12px;line-height:1.5}.tool-card code{font-size:11px}</style></head>
+<body>
+<nav class="topbar"><a href="index.html" class="brand">AgentChat</a><a href="architecture.html">架构</a><a href="webextended.html">降级链</a><a href="freesubagent.html">并行编排</a><a href="workflow.html">串行管道</a><a href="mcp.html" class="active">MCP Server</a><a href="python.html">Python SDK</a><a href="locales.html">多语言</a></nav>
+<div class="container">
+<div class="hero" style="padding:40px 0 20px"><h1>🔌 <span>MCP Server</span></h1><p class="sub">4 个 MCP 工具 · 让 Claude Desktop / Cursor / Continue.dev 直接调用 8 个 AI Provider</p></div>
+
+<div class="section"><h2>服务状态</h2>
+<div class="status-card"><h2><span class="dot" id="mcpDot"></span> <span id="mcpStatus">检测中...</span></h2><p style="color:var(--muted);margin-top:8px" id="mcpDetail">MCP Server 运行在 stdio 模式，需要通过 Claude Desktop 等客户端连接</p></div></div>
+
+<div class="section"><h2>4 个 MCP 工具</h2>
+<div class="tool-grid">
+<div class="tool-card"><h4>🔍 gemini_think</h4><p>Gemini Pro Extended Thinking 深度推理</p><p style="margin-top:6px"><code>prompt</code> z.string<br><code>timeout_ms</code> z.number optional</p></div>
+<div class="tool-card"><h4>💬 gemini_chat</h4><p>多轮对话，复用已有 session tab</p><p style="margin-top:6px"><code>prompt</code> z.string</p></div>
+<div class="tool-card"><h4>🌐 web_ask</h4><p>指定 8 个 Provider 中任意一个提问，自动降级</p><p style="margin-top:6px"><code>prompt</code> z.string<br><code>provider</code> z.enum(8值)</p></div>
+<div class="tool-card"><h4>🩺 web_smoke</h4><p>检查所有 8 个 Provider 的可达性</p><p style="margin-top:6px">无参数</p></div>
+</div></div>
+
+<div class="section"><h2>MCP 握手流程</h2>
+<div class="flow" style="margin:20px 0">
+<div class="step"><div class="num">1</div><div class="label">initialize</div><div class="role">协议版本声明</div></div><div class="arrow">→</div>
+<div class="step"><div class="num">2</div><div class="label">initialized</div><div class="role">确认就绪</div></div><div class="arrow">→</div>
+<div class="step"><div class="num">3</div><div class="label">tools/list</div><div class="role">查询 4 工具</div></div><div class="arrow">→</div>
+<div class="step"><div class="num">4</div><div class="label">tools/call</div><div class="role">调用工具</div></div>
+</div></div>
+
+<div class="section"><h2>Claude Desktop 配置</h2>
+<pre>{
+  "mcpServers": {
+    "agentchat": {
+      "command": "node",
+      "args": ["path/to/skills/mcp-server/index.mjs"]
+    }
+  }
+}</pre>
+<p style="color:var(--muted);font-size:12px;margin-top:8px">注意：MCP Server 使用 <code>StdioServerTransport</code>（stdio 模式），Claude Desktop 通过 stdin/stdout 与它通信。不需要额外启动 HTTP 服务器。</p></div>
+
+<div class="section"><h2>验证（终端运行）</h2><pre>$ cd AgentChat && node scripts/v5_test.mjs
+=== MCP Server 测试 ===
+PASS: 收到 4 个工具
+PASS: 包含 gemini_think / gemini_chat / web_ask / web_smoke
+ALL 7 TESTS PASSED</pre></div>
+</div>
+<script>
+(async()=>{try{const r=await fetch('/api/health');const d=await r.json();const dot=document.getElementById('mcpDot');const st=document.getElementById('mcpStatus');if(d.cdp==='online'){dot.className='dot on';st.textContent='Demo Server 运行中 · CDP 在线'}else{dot.className='dot off';st.textContent='Demo Server 运行中 · CDP 离线'}document.getElementById('mcpDetail').textContent=`端口 ${d.port} · 8 Providers · MCP Server 独立 stdio 运行`}catch(e){document.getElementById('mcpStatus').textContent='无法连接 Demo Server'}})();
+</script>
+<footer>AgentChat · MCP Server · 4 Tools · Zod Schema</footer></body></html>

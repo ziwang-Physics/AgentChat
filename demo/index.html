@@ -1,0 +1,33 @@
+<!DOCTYPE html><html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>AgentChat — Multi-AI Platform</title>
+<link rel="stylesheet" href="shared.css">
+<style>.logo{font-size:56px;margin-bottom:8px}.hero .btns{margin-top:24px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap}.hero .btns a{padding:10px 24px;border-radius:10px;font-size:14px;font-weight:600;transition:.15s}.btn-p{background:var(--accent);color:#fff}.btn-p:hover{opacity:.85;text-decoration:none}.btn-s{background:var(--card);border:1px solid var(--border);color:var(--text)}.btn-s:hover{background:var(--border);text-decoration:none}</style></head>
+<body>
+<nav class="topbar"><div class="brand">AgentChat <span>Demo Hub</span></div><a href="architecture.html">架构</a><a href="webextended.html">降级链</a><a href="freesubagent.html">并行编排</a><a href="workflow.html">串行管道</a><a href="mcp.html">MCP Server</a><a href="python.html">Python SDK</a><a href="locales.html">多语言</a></nav>
+<div class="hero">
+  <div class="logo">🤖</div>
+  <h1>AgentChat <span>Demo Hub</span></h1>
+  <p class="sub">基于 Chrome CDP 构建的多 AI Provider 自动化平台。<br>8 个 AI 服务 · 零边际成本推理 · Windows/Linux/macOS 全支持。</p>
+  <div class="stats">
+    <div class="stat"><div class="num" style="color:var(--accent)">8</div><div class="lbl">AI Providers</div></div>
+    <div class="stat"><div class="num" style="color:var(--green)">6</div><div class="lbl">Skills</div></div>
+    <div class="stat"><div class="num" style="color:var(--purple)">4</div><div class="lbl">Languages</div></div>
+    <div class="stat"><div class="num" style="color:var(--orange)">2</div><div class="lbl">PRs Merged</div></div>
+  </div>
+  <div class="btns">
+    <a href="webextended.html" class="btn-p">🎯 开始演示</a>
+    <a href="architecture.html" class="btn-s">📐 架构全景</a>
+  </div>
+</div>
+
+<div class="cards">
+  <a href="webextended.html" class="card"><div class="icon">🔗</div><h3>AgentChat-WebExtended</h3><p>8 Provider 智能降级链。Gemini Pro Extended → ChatGPT → Claude → ... → DeepSeek，首个可用即命中。</p><div class="capsules"><span class="tag green">交互式演示</span><span class="tag">降级链</span></div></a>
+  <a href="freesubagent.html" class="card"><div class="icon">⚡</div><h3>AgentChat-FreeSubAgent</h3><p>4 角色并行编排器。Kimi 搜索 + Gemini 推理 + Qwen 核查 + ChatGPT 综合，并发执行。</p><div class="capsules"><span class="tag purple">并行编排</span><span class="tag">4 Worker</span></div></a>
+  <a href="workflow.html" class="card"><div class="icon">🔄</div><h3>Web-SubAgent-Workflow</h3><p>6 步串行管道。Claude 规划 → Kimi 搜索 → Gemini 推理 → Claude 合成 → ChatGPT 审查 → Claude 修复。</p><div class="capsules"><span class="tag orange">串行管道</span><span class="tag">条件分支</span></div></a>
+  <a href="mcp.html" class="card"><div class="icon">🔌</div><h3>MCP Server</h3><p>4 个 MCP 工具，让 Claude Desktop / Cursor / Continue.dev 直接调用 8 AI Provider。</p><div class="capsules"><span class="tag cyan">MCP Protocol</span><span class="tag">Stdio</span></div></a>
+  <a href="python.html" class="card"><div class="icon">🐍</div><h3>Python SDK</h3><p>agentchat 包 — GeminiSession 异步管理器 + 结构化输出 + 多模态输入。</p><div class="capsules"><span class="tag pink">Python</span><span class="tag">async/await</span></div></a>
+  <a href="locales.html" class="card"><div class="icon">🌐</div><h3>多语言选择器</h3><p>zh_CN / zh_TW / en / ja 四语言 profile + 自动检测 + fuzzy 回退。</p><div class="capsules"><span class="tag green">4 语言</span><span class="tag">auto-detect</span></div></a>
+</div>
+<footer>AgentChat · ziwang-Physics/AgentChat · MIT License · PR #2 & #4 by Lzheng</footer>
+</body></html>
