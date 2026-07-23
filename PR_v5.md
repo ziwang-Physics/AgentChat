@@ -119,3 +119,24 @@ curl -X POST http://localhost:3456/api/ask -H "Content-Type: application/json" \
 | **PR #5** | **可视化演示平台** | 本次提交 |
 
 本 PR 独立于 #2 和 #4，可单独合并，无依赖冲突。
+
+---
+
+## 🛠️ 开发中踩过的坑（12 个）
+
+> 详见 [DEMO_PITFALLS.md](DEMO_PITFALLS.md)，下方为摘要。
+
+| # | 问题 | 根因 | 修复 |
+|---|------|------|------|
+| 1 | 中文响应变乱码 | HTTP `Content-Type` 缺 `charset=utf-8` → 客户端用 Latin-1 解码 | 全局添加 `charset=utf-8` |
+| 2 | 中文 prompt 变问号 | `stdin` 管道经 Windows cmd 层被 GBK 干扰 | 改为 CLI 参数传 prompt |
+| 3 | Gemini 总被跳过 | smoke check 残留 8 个 AI tab → 后续请求全 `tab_already_open` | 每次请求前 `closeOldProviderTabs()` |
+| 4 | 冷启动找不到模型按钮 | `isVisible({ timeout:400 })` < Angular Shadow DOM 2-3s 渲染 | 升到 4000ms(L1)/2500ms(L2) |
+| 5 | Pro Extended 验证失败 | `modelVerify: 'Pro扩展'` 不匹配实际 `"Pro 扩展"` (有空格) | 改为 `/Pro\s*扩展/` |
+| 6 | Pro 模式发送按钮无效 | Angular 重渲染后 zone.js 事件绑定有异步窗口期，6 种点击方案全失效 | `AGENTCHAT_SKIP_MODEL_SWITCH=1` 跳过模型切换 |
+| 7 | Chrome 拒绝 CDP | 不能在系统 `User Data` 目录启用远程调试 | 回退 `.chrome-debug-profile` |
+| 8 | Chrome 启动后秒退 | Windows 关闭最后一个 tab → 进程退出，而 macOS 不会 | 保留 `about:blank` 暖 tab |
+| 9 | 标签页来回重启 | 页面每 30s `setInterval` 调 `/api/smoke` (开 8 个 tab) | 去掉轮询，只在加载时检查 |
+| 10 | API 500 但页面显示成功 | 只检查 HTTP 200，没读 `d.success` 字段 | 加 `d.success !== false` 判断 |
+| 11 | EADDRINUSE 端口占用 | 上次 node 进程未正确终止 | `server.on('error')` 自动 netstat→kill→重试 |
+| 12 | 模板 prompt 被截断 | `replace(/[^。]*。$/,'')` 正则删除中文句末逻辑错误 | 改为追加而非替换 |
