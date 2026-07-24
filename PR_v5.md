@@ -23,18 +23,20 @@ node scripts/demo_server.js
 新增:
   demo/index.html                     # 导航首页 · 6 技能卡片 + 统计数据
   demo/architecture.html              # 4 层架构全景图 + 数据流 + 贡献时间线
-  demo/webextended.html               # 🔗 降级链交互 · 选 Provider → 实时回复
+  demo/webextended.html               # 🔗 降级链交互 · 会话模式自动传递上下文
   demo/freesubagent.html              # ⚡ 并行编排交互 · 4 Worker 并发分析
   demo/workflow.html                  # 🔄 串行管道交互 · 搜索→推理→审查
   demo/mcp.html                       # 🔌 MCP Server 文档 + CDP 实时状态
   demo/python.html                    # 🐍 Python SDK API 文档 + 代码示例
   demo/locales.html                   # 🌐 4 语言对照表 + 技术细节
   demo/shared.css                     # 统一深色主题 (73 行)
-  scripts/demo_server.js              # HTTP 服务器 · 零外部依赖 · CDP 自动启动 (570 行)
+  scripts/demo_server.js              # HTTP 服务器 · 零外部依赖 · CDP 自动启动
+  scripts/lib/session_context.js      # 🆕 会话上下文管理器 · 降级时传递对话历史
   DEMO.md                             # 30 秒启动指南 + 演示要点
+  DEMO_PITFALLS.md                    # 12 个踩坑与解决方案
 ```
 
-11 个新文件，约 2,200 行净增。零新依赖（仅 Node.js 内置 http/fs/path/child_process）。向后兼容。
+13 个新文件。
 
 ---
 
