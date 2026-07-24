@@ -1,0 +1,86 @@
+<!DOCTYPE html><html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>并行编排 — AgentChat</title><link rel="stylesheet" href="shared.css">
+<style>
+.pane{display:grid;grid-template-columns:1fr 1fr;gap:16px}.pane textarea,.pane .output{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;color:var(--text);font-family:inherit;font-size:13px;line-height:1.6;min-height:120px;resize:vertical;outline:none}.pane textarea:focus{border-color:var(--accent)}.pane .output{white-space:pre-wrap;overflow-y:auto;max-height:400px}.roles{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin:12px 0}.role-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;cursor:pointer;transition:.15s}.role-card:hover{border-color:var(--accent)}.role-card.sel{border-color:var(--accent);background:#1a2332}.role-card h4{margin-bottom:4px;font-size:14px}.role-card p{color:var(--muted);font-size:11px;line-height:1.4}.btn-row{display:flex;gap:8px;margin:12px 0}.btn{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:10px 20px;font-size:14px;font-weight:600;cursor:pointer}.btn:hover{opacity:.85}.btn:disabled{opacity:.4}.btn.sm{background:var(--card);border:1px solid var(--border);color:var(--text);font-size:12px;padding:6px 14px}.result-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:12px}.result-card h5{margin-bottom:6px;font-size:13px}.result-card .meta{font-size:11px;color:var(--muted);margin-bottom:6px}.result-card .text{font-size:13px;line-height:1.5;white-space:pre-wrap;max-height:200px;overflow-y:auto}
+@media(max-width:700px){.pane{grid-template-columns:1fr}}
+</style></head>
+<body>
+<nav class="topbar"><a href="index.html" class="brand">AgentChat</a><a href="architecture.html">架构</a><a href="webextended.html">降级链</a><a href="freesubagent.html" class="active">并行编排</a><a href="workflow.html">串行管道</a><a href="mcp.html">MCP Server</a><a href="python.html">Python SDK</a><a href="locales.html">多语言</a></nav>
+<div class="container">
+<div class="hero" style="padding:40px 0 20px"><h1>⚡ AgentChat-<span>FreeSubAgent</span></h1><p class="sub">4 角色并行编排器 · 每个角色用不同的 AI 做不同维度分析</p></div>
+
+<div class="section">
+  <h2>🎛️ 交互式演示</h2>
+  <p style="color:var(--muted);margin-bottom:12px">选择一个预设模板或自定义角色分工，点击发送进行 4 维度并行分析</p>
+  <div class="roles" id="roles"></div>
+  <label style="font-size:13px;color:var(--muted);margin-top:8px;display:block">或者自定义一个总主题（系统自动分配 4 个 AI 角色）：</label>
+  <div style="display:flex;gap:8px;margin:8px 0">
+    <input id="customTopic" placeholder="比如：2026年AI行业发展趋势分析" style="flex:1;background:var(--card);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:10px 14px;font-size:13px;outline:none">
+    <button class="btn" id="runBtn" onclick="execute()">🚀 并行执行</button>
+  </div>
+</div>
+
+<div class="section"><h2>📊 执行结果</h2><div id="results"><p style="color:var(--muted)">点击上方按钮执行并行分析</p></div></div>
+
+<div class="section"><h2>架构说明</h2>
+<pre>Claude Code 拆任务 + 写 prompt → Node.js 并发派发 → 质量门 + 证据仲裁
+    │
+    │  child_process.spawn('node', ['../AgentChat-WebExtended/index.js', '--from=X', prompt])
+    ▼
+AgentChat-WebExtended (8 Providers 唯一实现)</pre>
+<div class="two-col"><div class="card" style="cursor:default"><h3>🔒 角色互补</h3><p>4 个角色做 4 个<strong>不同角度</strong>。同一个问题绝不发给两个 AI——资源的完全利用而非冗余。</p></div><div class="card" style="cursor:default"><h3>📋 质量门</h3><p>≥ 2 个有效响应才输出结果。单 worker 失败不影响其他 worker 的结果收集。</p></div></div>
+</div></div>
+
+<script>
+const TEMPLATES = [
+  {name:'AI行业分析',tasks:[{id:'research',role:'Researcher',desc:'收集数据和事实',provider:'kimi',prompt:'请用联网搜索收集关于2026年AI行业发展趋势的关键数据和事实。用要点列出。不要运行任何代码。'},{id:'reasoning',role:'Deep Reasoner',desc:'深度推理分析',provider:'gemini',prompt:'基于以下信息进行深度推理分析AI行业发展趋势。直接给出完整分析。'},{id:'verify',role:'Fact Checker',desc:'事实核查验证',provider:'qwen',prompt:'请对AI行业发展趋势的相关事实进行核查。每个结论标注信息来源。'},{id:'synthesis',role:'Synthesizer',desc:'综合报告输出',provider:'chatgpt',prompt:'基于以上分析，直接输出一份AI行业发展趋势的综合评估报告。不要解释方法论。'}]},
+  {name:'代码审查',tasks:[{id:'review',role:'Reviewer',desc:'代码逻辑审查',provider:'gemini',prompt:'请审查以下代码的逻辑正确性和潜在缺陷。直接给出完整分析。'},{id:'verify',role:'Verifier',desc:'安全/边界检查',provider:'chatgpt',prompt:'检查代码中的安全检查、边界处理和潜在注入风险。直接输出完整报告。'},{id:'docs',role:'Documenter',desc:'文档补充',provider:'kimi',prompt:'为这段代码补充中文注释和使用文档。用要点列出关键说明。'},{id:'quality',role:'QA',desc:'综合质量评估',provider:'qwen',prompt:'给出这段代码的综合质量评分和改进建议。每个结论标注依据。'}]},
+];
+let selectedTpl=0;
+
+function init(){
+  const r=document.getElementById('roles');
+  TEMPLATES.forEach((t,i)=>{
+    const c=document.createElement('div');
+    c.className='role-card'+(i===selectedTpl?' sel':'');
+    c.innerHTML=`<h4>${t.name}</h4><p>${t.tasks.map(r=>`${r.role}: ${r.provider.toUpperCase()}`).join(' · ')}</p>`;
+    c.onclick=()=>{document.querySelectorAll('.role-card').forEach(e=>e.classList.remove('sel'));c.classList.add('sel');selectedTpl=i;};
+    r.appendChild(c);
+  });
+}init();
+
+async function execute(){
+  const topic=document.getElementById('customTopic').value.trim();
+  const tpl=TEMPLATES[selectedTpl];
+  const btn=document.getElementById('runBtn');btn.disabled=true;btn.textContent='执行中...';
+
+  // Build tasks — if user typed a custom topic, inject it into the template prompts
+  const tasks=topic ? tpl.tasks.map(t=>({...t,prompt:t.prompt.replace(/[^。]*。$/,'')+'\n\n主题：'+topic})) : tpl.tasks;
+
+  const resDiv=document.getElementById('results');
+  resDiv.innerHTML=`<p style="color:var(--muted)">⏳ 正在并行调用 ${tasks.length} 个 AI Worker...</p>`;
+
+  const start=Date.now();
+  const results=[];
+  for(const task of tasks){
+    resDiv.innerHTML+=`<p style="color:var(--muted);font-size:12px">   ↳ ${task.role} (${task.provider}) 分析中...</p>`;
+    try{
+      const r=await fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:task.prompt,provider:task.provider})});
+      const d=await r.json();
+      results.push({...task,success:d.success!==false,response:d.response,provider:d.provider||task.provider,timeMs:d.timeMs||0,chain:d.chain||[]});
+    }catch(e){results.push({...task,success:false,response:'调用失败: '+e.message,provider:task.provider,timeMs:0,chain:[]});}
+  }
+
+  const ms=Date.now()-start;
+  const ok=results.filter(r=>r.success).length;
+  resDiv.innerHTML=`<h4 style="margin-bottom:12px">${ok}/${tasks.length} 成功 · ${(ms/1000).toFixed(0)}s</h4>`;
+  results.forEach(r=>{
+    const s=(r.timeMs||0)/1000;
+    resDiv.innerHTML+=`<div class="result-card"><h5>${r.success?'✅':'❌'} ${r.role} (${r.provider}) <span style="color:var(--muted);font-size:11px">${s.toFixed(0)}s</span>${r.chain&&r.chain.length>1?` <span class="tag orange">降级: ${r.chain.join('→')}</span>`:''}</h5><div class="text">${h(r.response||'').substring(0,800)}</div></div>`;
+  });
+  btn.disabled=false;btn.textContent='🚀 并行执行';
+}
+function h(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
+</script>
+<footer>AgentChat · FreeSubAgent · 4-Role Parallel Orchestrator</footer></body></html>

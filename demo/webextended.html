@@ -1,0 +1,59 @@
+<!DOCTYPE html><html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>降级链 — AgentChat</title><link rel="stylesheet" href="shared.css">
+<style>
+.providers{display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:10px;margin:16px 0}
+.prov-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px 10px;text-align:center;cursor:pointer;transition:all .15s}
+.prov-card:hover{border-color:var(--accent)}.prov-card.sel{border-color:var(--accent);background:#1a2332}
+.prov-card .icon{font-size:22px;margin-bottom:4px}.prov-card .name{font-size:11px;color:var(--muted)}
+.chat{flex:1;overflow-y:auto;margin-bottom:16px;min-height:300px;max-height:55vh}
+.msg{margin-bottom:14px;animation:fadeIn .3s}@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.msg.user .bub{background:var(--accent);color:#fff;margin-left:auto;max-width:80%;border-radius:16px 16px 4px 16px;padding:12px 16px;font-size:14px;line-height:1.5}
+.msg.ai .bub{background:var(--card);border:1px solid var(--border);margin-right:auto;max-width:85%;border-radius:16px 16px 16px 4px;padding:16px;font-size:14px;line-height:1.6;white-space:pre-wrap}
+.msg.ai .meta{display:flex;gap:8px;margin-top:6px;flex-wrap:wrap;font-size:11px;color:var(--muted)}
+.spinner{width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;display:inline-block}@keyframes spin{to{transform:rotate(360deg)}}
+.input-row{display:flex;gap:8px;position:sticky;bottom:0;background:var(--bg);padding-top:12px}
+.input-row textarea{flex:1;background:var(--card);border:1px solid var(--border);border-radius:12px;color:var(--text);padding:12px 16px;font-size:14px;font-family:inherit;resize:none;min-height:48px;max-height:120px;outline:none;line-height:1.5}
+.input-row textarea:focus{border-color:var(--accent)}
+.input-row button{background:var(--accent);color:#fff;border:none;border-radius:12px;padding:0 24px;font-size:14px;font-weight:600;cursor:pointer;white-space:nowrap}.input-row button:hover{opacity:.85}.input-row button:disabled{opacity:.4}
+.empty{text-align:center;padding:60px 20px;color:var(--muted)}.empty .big{font-size:48px;margin-bottom:8px}
+.status{display:flex;gap:16px;justify-content:center;padding:8px;font-size:11px;color:var(--muted)}
+.status .dot{width:6px;height:6px;border-radius:50%;display:inline-block}.dot.on{background:var(--green)}.dot.off{background:var(--red)}
+.sess-badge{display:inline-flex;align-items:center;gap:6px;font-size:11px;padding:3px 10px;border-radius:12px;background:var(--card);border:1px solid var(--border)}.sess-badge.on{border-color:var(--cyan);color:var(--cyan)}.sess-badge button{background:none;border:none;color:var(--orange);font-size:11px;cursor:pointer;padding:0;margin-left:4px}.sess-badge button:hover{text-decoration:underline}
+</style></head>
+<body>
+<nav class="topbar"><a href="index.html" class="brand">AgentChat</a><a href="architecture.html">架构</a><a href="webextended.html" class="active">降级链</a><a href="freesubagent.html">并行编排</a><a href="workflow.html">串行管道</a><a href="mcp.html">MCP Server</a><a href="python.html">Python SDK</a><a href="locales.html">多语言</a></nav>
+<div class="container">
+<div class="section"><h2>🔗 AgentChat-OneWeb — 多 Provider 降级链 <span class="tag cyan" id="sessBadge" style="display:none;cursor:default">🔗 会话模式 · 0 轮</span></h2><p>8 个 AI 服务按能力排优先级。Gemini Pro Extended 首选（深度推理），不可用则自动降级到下一个。<strong>开启会话模式后，降级时自动将对话历史传递给 fallback 模型续答。</strong></p>
+<div class="flow" style="margin:16px 0">
+<div class="step"><div class="num">P1</div><div class="label">🧠 Gemini</div><div class="role">深度推理</div></div><div class="arrow">→</div>
+<div class="step"><div class="num">P2</div><div class="label">💬 ChatGPT</div><div class="role">综合能力</div></div><div class="arrow">→</div>
+<div class="step"><div class="num">P3</div><div class="label">📝 Claude</div><div class="role">代码生成</div></div><div class="arrow">→</div>
+<div class="step"><div class="num">P4</div><div class="label">🔍 Qwen</div><div class="role">联网检索</div></div><div class="arrow">→</div>
+<div class="step"><div class="num">P5-8</div><div class="label">📚 Kimi → ...</div><div class="role">增量覆盖</div></div>
+</div>
+<div class="two-col"><div class="card" style="cursor:default"><h3>🎯 三重降级</h3><p>Gemini Provider 内部还有三层：<br><code>Pro Extended</code>（需要订阅）→ <code>Flash</code>（免费版）→ 完全失败后跳到 ChatGPT</p></div><div class="card" style="cursor:default"><h3>⏱️ 超时保护</h3><p>单 Provider 3 分钟超时，总预算 10 分钟。剩余时间 < 15 秒停止尝试——防止一个慢 Provider 吃掉所有时间。</p></div></div>
+</div>
+<div class="section"><h2>💬 实时演示</h2><p style="color:var(--muted);margin-bottom:12px">选择 Provider + 输入问题 → 发送 → 查看结果与降级链</p>
+<div class="providers" id="providers"></div>
+<div class="chat" id="chat"><div class="empty"><div class="big">🤖</div><p>选择一个 AI Provider，输入问题</p><p style="color:var(--green);margin-top:8px">Gemini Pro Extended 已就绪</p></div></div>
+<div class="input-row"><textarea id="prompt" rows="1" placeholder="输入问题...（会话模式下降级自动续上文）" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea><button id="sendBtn" onclick="send()">发送</button></div>
+<div class="status"><span><span class="dot on" id="cdpDot"></span> CDP :9222</span><span id="provCount">检测中...</span><span class="sess-badge on" id="sessToggle"><span id="sessLabel">🔗 会话模式</span><button id="sessNew" style="display:none">新建</button></span></div>
+</div></div>
+<script>
+const PS=[{k:'gemini',n:'Gemini Pro',i:'🧠',d:'Extended Thinking',c:'#58a6ff'},{k:'chatgpt',n:'ChatGPT',i:'💬',d:'综合最强',c:'#3fb950'},{k:'claude',n:'Claude',i:'📝',d:'代码精准',c:'#d2991d'},{k:'qwen',n:'通义千问',i:'🔍',d:'联网检索',c:'#a371f7'},{k:'kimi',n:'Kimi',i:'📚',d:'长文分析',c:'#f778ba'},{k:'minimax',n:'MiniMax',i:'💡',d:'中文对话',c:'#39d2c0'},{k:'mimo',n:'MiMo',i:'✨',d:'创意生成',c:'#ff7b72'},{k:'deepseek',n:'DeepSeek',i:'🔮',d:'低成本',c:'#79c0ff'}];
+let sel='gemini';let busy=false;let sessionId=null;let turnCount=0;
+
+// 会话管理
+function ensureSession(){if(!sessionId){sessionId='sess_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);updateSessUI()}return sessionId}
+function newSession(){if(sessionId){fetch('/api/sessions/'+sessionId,{method:'DELETE'}).catch(()=>{})}sessionId=null;turnCount=0;updateSessUI();document.getElementById('chat').innerHTML='<div class="empty"><div class="big">🤖</div><p>新会话已创建</p><p style="color:var(--green);margin-top:8px">从此轮开始，降级时会自动传递对话历史</p></div>'}
+function updateSessUI(){const b=document.getElementById('sessBadge');const l=document.getElementById('sessLabel');const n=document.getElementById('sessNew');if(sessionId){b.style.display='inline';l.textContent='🔗 会话 · '+turnCount+' 轮';n.style.display='inline'}else{b.style.display='none';l.textContent='🔗 会话模式';n.style.display='none'}}
+
+function init(){const c=document.getElementById('providers');PS.forEach(p=>{const d=document.createElement('div');d.className='prov-card'+(p.k===sel?' sel':'');d.innerHTML=`<div class="icon">${p.i}</div><div class="name">${p.n}</div>`;d.title=p.d;d.onclick=()=>{document.querySelectorAll('.prov-card').forEach(e=>e.classList.remove('sel'));d.classList.add('sel');sel=p.k;};c.appendChild(d)});checkCDP();checkSmoke();document.getElementById('sessNew').onclick=newSession;updateSessUI()}init();
+async function checkCDP(){try{const r=await fetch('/api/health');const d=await r.json();const dot=document.getElementById('cdpDot');dot.className=d.cdp==='online'?'dot on':'dot off'}catch{}}
+async function checkSmoke(){try{const r=await fetch('/api/smoke');const d=await r.json();const h=d.filter(p=>p.status.includes('✅')||p.status.includes('REACHABLE'));document.getElementById('provCount').textContent=`${h.length}/${d.length} 可用`}catch{}};
+async function send(){if(busy)return;const p=document.getElementById('prompt').value.trim();if(!p||p.length<2)return;busy=true;const b=document.getElementById('sendBtn');b.disabled=true;const c=document.getElementById('chat');const e=c.querySelector('.empty');if(e)e.remove();const pr=PS.find(x=>x.k===sel);const sid=ensureSession();c.innerHTML+=`<div class="msg user"><div class="bub">${h(p)}</div></div><div class="msg ai" id="load"><div class="bub"><div class="spinner"></div> ${pr.n} 思考中...</div></div>`;c.scrollTop=c.scrollHeight;document.getElementById('prompt').value='';
+try{const body={prompt:p,provider:sel,sessionId:sid};const r=await fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();document.getElementById('load')?.remove();if(d.success===false){const errMsg=d.response||'未知错误';c.innerHTML+=`<div class="msg ai"><div class="bub" style="color:var(--red)">❌ ${h(errMsg.substring(0,500))}</div></div>`}else{const s=(d.timeMs/1000).toFixed(0);const mb=d.model?`<span class="tag purple">${d.model}</span>`:'';const fb=d.chain&&d.chain.length>1?`<span class="tag orange">${d.chain.join(' → ')}</span>`:'';const needFallback=fb||(d.chain&&d.chain.length>1);const fallbackNote=needFallback?`<p style="font-size:11px;color:var(--cyan);margin-top:6px">💡 降级时已自动传递 ${turnCount} 轮对话历史给 ${d.provider||'AI'}</p>`:'';c.innerHTML+=`<div class="msg ai"><div class="bub">${h(d.response)}</div><div class="meta"><span class="tag green">${d.provider||'AI'}</span>${mb}<span>${s}s</span>${fb}</div>${fallbackNote}</div>`;c.scrollTop=c.scrollHeight;if(d.session&&d.session.hasContext){needFallback||''}turnCount++;updateSessUI()}catch(e){document.getElementById('load')?.remove();c.innerHTML+=`<div class="msg ai"><div class="bub" style="color:var(--red)">失败: ${h(e.message)}</div></div>`}finally{busy=false;b.disabled=false}}
+function h(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
+</script>
+<footer>AgentChat · WebExtended · 8 Provider Fallback Chain</footer></body></html>

@@ -1,0 +1,83 @@
+<!DOCTYPE html><html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>串行管道 — AgentChat</title><link rel="stylesheet" href="shared.css">
+<style>
+.pipeline{display:flex;flex-direction:column;gap:8px;margin:12px 0}
+.step{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;transition:.15s}
+.step.running{border-color:var(--accent);background:#1a2332}
+.step.done{border-color:var(--green);opacity:.8}
+.step.fail{border-color:var(--red);opacity:.6}
+.step .idx{font-size:22px;font-weight:700;min-width:36px;text-align:center}
+.step .info{flex:1}.step .info h4{font-size:13px;margin-bottom:2px}.step .info .role{font-size:11px;color:var(--muted)}
+.step .status{font-size:11px;min-width:70px;text-align:right}
+.output-pane{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;max-height:250px;overflow-y:auto;white-space:pre-wrap;font-size:13px;line-height:1.6;margin-top:8px}
+.btn{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:10px 20px;font-size:14px;font-weight:600;cursor:pointer}.btn:hover{opacity:.85}.btn:disabled{opacity:.4}
+input{flex:1;background:var(--card);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:10px 14px;font-size:13px;outline:none}
+input:focus{border-color:var(--accent)}
+@media(max-width:700px){.pipeline{}}.hidden{display:none}
+</style></head>
+<body>
+<nav class="topbar"><a href="index.html" class="brand">AgentChat</a><a href="architecture.html">架构</a><a href="webextended.html">降级链</a><a href="freesubagent.html">并行编排</a><a href="workflow.html" class="active">串行管道</a><a href="mcp.html">MCP Server</a><a href="python.html">Python SDK</a><a href="locales.html">多语言</a></nav>
+<div class="container">
+<div class="hero" style="padding:40px 0 20px"><h1>🔄 <span>串行管道</span></h1><p class="sub">Kimi 搜索 → Gemini 推理 → ChatGPT 审查 → 结果呈现</p></div>
+
+<div class="section"><h2>🎛️ 运行工作流</h2>
+<div style="display:flex;gap:8px;margin:12px 0"><input id="topic" placeholder="输入你的研究主题，比如：量子计算的商业应用前景" onkeydown="if(event.key==='Enter')run()"><button class="btn" id="runBtn" onclick="run()">▶ 开始</button></div>
+<div class="pipeline" id="pipeline"></div>
+<div class="output-pane hidden" id="output"></div>
+<h3 id="summary" style="margin-top:12px;font-size:13px;color:var(--muted)"></h3></div>
+
+<div class="section"><h2>处理流程说明</h2>
+<div class="flow" style="margin:16px 0">
+<div class="step" style="cursor:default"><div class="idx">1</div><div class="info"><h4>Kimi 联网搜索</h4><div class="role">用要点列出关键事实</div></div></div><div class="arrow">→</div>
+<div class="step" style="cursor:default"><div class="idx">2</div><div class="info"><h4>Gemini 深度推理</h4><div class="role">基于搜索结果做深度分析</div></div></div><div class="arrow">→</div>
+<div class="step" style="cursor:default"><div class="idx">3</div><div class="info"><h4>ChatGPT 交叉审查</h4><div class="role">列出所有问题点和修改建议</div></div></div>
+</div></div>
+</div>
+
+<script>
+const STEPS=[{id:'search',label:'Kimi 联网搜索',provider:'kimi',role:'Researcher'},{id:'reason',label:'Gemini 深度推理',provider:'gemini',role:'Deep Reasoner'},{id:'review',label:'ChatGPT 交叉审查',provider:'chatgpt',role:'Reviewer'}];
+const PROMPTS=[p=>`请进行联网搜索，用要点列出关键事实和数据。不要运行任何代码。\n\n搜索主题：${p}`,(p,ctx)=>`基于以下搜索材料进行深度分析。直接给出完整分析，不需要搜索新资料。\n\n搜索材料：\n${ctx}\n\n分析主题：${p}`,p=>`请逐一审查以下分析内容，列出所有问题点并给出具体修改建议。不要重写整个方案。\n\n${p}`];
+
+function init(){
+  const pl=document.getElementById('pipeline');
+  pl.innerHTML=STEPS.map((s,i)=>`<div class="step" id="step${i}"><div class="idx">${i+1}</div><div class="info"><h4>${s.label}</h4><div class="role">${s.provider.toUpperCase()} · ${s.role}</div></div><div class="status" id="status${i}">等待中</div></div>`).join('');
+}init();
+
+async function run(){
+  const topic=document.getElementById('topic').value.trim();
+  if(!topic){alert('请输入主题');return}
+  const btn=document.getElementById('runBtn');btn.disabled=true;btn.textContent='执行中...';
+  const start=Date.now();
+  let context='';
+
+  for(let i=0;i<STEPS.length;i++){
+    const s=STEPS[i];
+    document.getElementById(`step${i}`).classList.add('running');
+    document.getElementById(`status${i}`).textContent='⏳ 运行中...';
+
+    const prompt=i===0?PROMPTS[0](topic):i===1?PROMPTS[1](topic,context):PROMPTS[2](context);
+    try{
+      const r=await fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,provider:s.provider})});
+      const d=await r.json();
+      if(d.success){
+        context=d.response;
+        document.getElementById(`step${i}`).classList.remove('running');document.getElementById(`step${i}`).classList.add('done');
+        document.getElementById(`status${i}`).textContent=`✅ ${(d.timeMs/1000).toFixed(0)}s · ${d.provider}`;
+      }else{
+        throw new Error(d.response||'unknown');
+      }
+    }catch(e){
+      document.getElementById(`step${i}`).classList.remove('running');document.getElementById(`step${i}`).classList.add('fail');
+      document.getElementById(`status${i}`).textContent='❌ 失败';
+      context+='\n[此步骤失败: '+e.message+']';
+    }
+  }
+
+  const ms=Date.now()-start;
+  document.getElementById('summary').textContent=`总耗时 ${(ms/1000).toFixed(0)}s · 3 步串行完成`;
+  const op=document.getElementById('output');op.classList.remove('hidden');op.textContent=context;
+  btn.disabled=false;btn.textContent='▶ 开始';
+}
+</script>
+<footer>AgentChat · Workflow Demo · Search → Reason → Review</footer></body></html>
