@@ -93,6 +93,68 @@ node scripts/demo_server.js
 
 ---
 
+## 🆕 多轮对话上下文传递
+
+### 解决的痛点
+
+```
+用户第1轮 → Gemini ✅ "帮我分析A股"
+用户第2轮 → Gemini ❌ (配额/错误) → ChatGPT
+           ChatGPT 只看到"这些板块哪些最值得关注？"
+           没有第1轮的上下文 → 答非所问
+```
+
+**修复后**：降级时自动将历史对话注入 fallback 的 prompt 开头，AI 能基于完整上下文续答。
+
+### 架构
+
+```
+┌─ scripts/lib/session_context.js (180行) ──────────────────┐
+│                                                             │
+│  短对话 (<4轮): 完整 Q&A 注入 fallback prompt               │
+│  长对话 (≥4轮): Kimi 生成摘要 → 存 .json → fallback 注入    │
+│                 "摘要 + 最近 2 轮"                          │
+│                                                             │
+│  存储: ~/.agentchat/sessions/{sessionId}.json               │
+│  缓存: 内存 Map + 文件双持久化                               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 使用方式
+
+**前端**（降级链页面自动开启）：
+
+页面加载时自动生成 `sessionId`，每轮请求携带。降级成功时 UI 显示「已传递 N 轮对话历史」。点击「新建」按钮重置会话。
+
+**API**：
+
+```json
+POST /api/ask
+{
+  "prompt": "哪些板块最值得关注？",
+  "provider": "gemini",
+  "sessionId": "sess_abc123"   // ← 新增可选字段
+}
+```
+
+**新增端点**：
+
+| 方法 | 路径 | 功能 |
+|------|------|------|
+| `GET` | `/api/sessions` | 列出所有会话（ID / 轮数 / 是否有摘要） |
+| `DELETE` | `/api/sessions/:id` | 清除指定会话 |
+
+### 工具函数 (`scripts/lib/session_context.js`)
+
+```js
+getContext(sessionId)        // → "[背景: 第1轮 Q&A]\n\n当前问题: ..."
+addTurn(sessionId, Q, A)     // 保存一轮对话
+generateSummary(sessionId)   // 异步生成摘要（调用 Kimi）
+clearSession(sessionId)      // 清除会话
+```
+
+---
+
 ## 验证方式
 
 ```powershell
