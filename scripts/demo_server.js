@@ -17,6 +17,9 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 
+// 会话上下文管理器 — 多轮对话降级时自动传递历史给 fallback Provider
+const { getContext, addTurn, generateSummary, clearSession, getSessionData } = require('./lib/session_context');
+
 const PORT = 3456;
 const PROJECT_DIR = path.resolve(__dirname, '..');
 const WEBEXT_INDEX = path.join(PROJECT_DIR, 'skills', 'AgentChat-OneWeb', 'index.js');
@@ -326,18 +329,51 @@ const server = http.createServer(async (req, res) => {
     }
 
     // API: POST /api/ask
+    // 支持可选 sessionId — 多轮对话降级时自动注入历史上下文到 fallback
     if (req.method === 'POST' && url.pathname === '/api/ask') {
         const body = await readBody(req);
         try {
-            const { prompt, provider } = JSON.parse(body);
+            const { prompt, provider, sessionId } = JSON.parse(body);
                 if (!prompt || prompt.trim().length < 2) {
                     throw new Error('Prompt too short');
                 }
-                const result = await callWebext(prompt.trim(), {
+
+                // 会话模式：将之前的对话上下文注入 prompt（降级时 fallback 可见）
+                let fullPrompt = prompt.trim();
+                let ctxInfo = null;
+                if (sessionId) {
+                    const ctx = getContext(sessionId);
+                    if (ctx) {
+                        fullPrompt = ctx + '当前问题: ' + fullPrompt;
+                        ctxInfo = { sessionId, hasContext: true };
+                    }
+                }
+
+                const result = await callWebext(fullPrompt, {
                     from: provider || 'gemini',
                     timeout: 600000,
                     provTimeout: 180000,
                 });
+
+                // 会话模式：成功响应后保存对话记录
+                if (sessionId && result.success && result.response) {
+                    addTurn(sessionId, prompt.trim(), result.response);
+
+                    // 异步生成摘要（长对话 ≥4 轮时）
+                    const data = getSessionData(sessionId);
+                    if (data && data._summaryPending && data.turns.length >= 4) {
+                        // 不阻塞响应，fire-and-forget
+                        generateSummary(sessionId, (sp) => {
+                            return callWebext(sp, {
+                                from: 'kimi',
+                                timeout: 60000,
+                                provTimeout: 30000,
+                            }).then(r => r.response).catch(() => null);
+                        }).catch(() => {});
+                    }
+                }
+
+                if (ctxInfo) result.session = ctxInfo;
                 res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
                 res.end(JSON.stringify(result));
         } catch (e) {
@@ -509,6 +545,42 @@ const server = http.createServer(async (req, res) => {
             languages: 4,
             uptime: process.uptime(),
         }));
+        return;
+    }
+
+    // API: GET /api/sessions — 列出所有会话
+    if (req.method === 'GET' && url.pathname === '/api/sessions') {
+        try {
+            const sessionsDir = path.join(require('os').homedir(), '.agentchat', 'sessions');
+            const files = require('fs').existsSync(sessionsDir)
+                ? require('fs').readdirSync(sessionsDir).filter(f => f.endsWith('.json'))
+                : [];
+            const sessions = files.map(f => {
+                const id = f.replace('.json', '');
+                const data = getSessionData(id);
+                return {
+                    id,
+                    turns: data.turns.length,
+                    hasSummary: !!data.summary,
+                    createdAt: data.createdAt,
+                    updatedAt: data.updatedAt,
+                };
+            }).sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify(sessions));
+        } catch (_) {
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify([]));
+        }
+        return;
+    }
+
+    // API: DELETE /api/sessions/{id} — 清除指定会话
+    if (req.method === 'DELETE' && url.pathname.startsWith('/api/sessions/')) {
+        const sessionId = url.pathname.split('/api/sessions/')[1];
+        clearSession(sessionId);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ cleared: true, sessionId }));
         return;
     }
 
