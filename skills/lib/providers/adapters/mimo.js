@@ -16,7 +16,7 @@ const RESPONSE_SELECTORS = ['.markdown-prose', '.Markdown_markdown__', '[class*=
 
 module.exports = {
     key: 'mimo',
-    url: 'https://aistudio.xiaomimimo.com/',
+    url: 'https://aistudio.xiaomimimo.com/#/c',  // v26: site redesigned — chat moved to #/c
     navPostDelay: 4000, // React/Tailwind SPA render
     authDomains: ['aistudio.xiaomimimo.com/login', 'auth0.com'],
     quotaPatterns: [
