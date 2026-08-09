@@ -5,7 +5,7 @@
 <nav class="topbar"><a href="index.html" class="brand">AgentChat</a><a href="architecture.html">架构</a><a href="webextended.html">降级链</a><a href="freesubagent.html">并行编排</a><a href="workflow.html">串行管道</a><a href="mcp.html">MCP Server</a><a href="python.html">Python SDK</a><a href="locales.html" class="active">多语言</a></nav>
 <div class="container">
 <div class="hero" style="padding:40px 0 20px"><h1>🌐 <span>多语言选择器</span></h1><p class="sub">zh_CN / zh_TW / en / ja 四语言 profile · 自动检测 · fuzzy 回退</p></div>
-<div class="section"><h2>设计理念</h2><p>Gemini UI 根据 Google 账号语言显示不同文本。原代码硬编码繁体中文+英文，简体中文用户直接报错。新方案将所有语言文本集中到 <code>skills/lib/locales/gemini.js</code>，核心逻辑不再硬编码任何语言字符串。</p></div>
+<div class="section"><h2>设计理念</h2><p>DeepSeek UI 根据 Google 账号语言显示不同文本。原代码硬编码繁体中文+英文，简体中文用户直接报错。新方案将所有语言文本集中到 <code>skills/lib/locales/deepseek.js</code>，核心逻辑不再硬编码任何语言字符串。</p></div>
 <div class="section"><h2>4 语言 Profile 对照表</h2>
 <div class="table-wrap"><table><thead><tr><th>字段</th><th>zh_CN</th><th>zh_TW</th><th>en</th><th>ja</th></tr></thead>
 <tbody>
@@ -19,7 +19,7 @@
 <p style="margin-top:12px;color:var(--muted);font-size:13px">🔴 标记的 3 处是之前遗漏导致 ER_MODEL_DEGRADED 的根因</p></div>
 <div class="section"><h2>自动检测 + 手动覆盖</h2>
 <div class="two-col"><div class="card" style="cursor:default"><h3>🔍 自动检测</h3><p>优先级：<code>navigator.language</code> → <code>&lt;html lang&gt;</code> → 按钮文本反向推断 → null (回退 fuzzy)</p></div><div class="card" style="cursor:default"><h3>🎛️ 手动覆盖</h3><pre>$ node index.js --locale=zh_CN "prompt"</pre><p>未知 locale 自动使用 FUZZY 正则匹配全部已知文本</p></div></div></div>
-<div class="section"><h2>验证</h2><pre>$ node -e "const L=require('./skills/lib/locales/gemini'); L.setLocale('zh_CN');
+<div class="section"><h2>验证</h2><pre>$ node -e "const L=require('./skills/lib/locales/deepseek'); L.setLocale('zh_CN');
 console.log(L.verifyText('modelVerify'));"  → "Pro扩展"
 
 $ node -e "L.setLocale('en'); console.log(L.verifyText('modelVerify'));"  → "Pro Extended"

@@ -16,7 +16,7 @@
         win_rate: float = Field(ge=0, le=100)
         risk_warning: str | None = None
 
-    async with GeminiSession() as gs:
+    async with AgentSession() as gs:
         result = await gs.ask_structured(
             "分析 momentum_20d 因子的表现",
             schema=FactorAnalysis,
@@ -32,7 +32,7 @@ T = TypeVar("T")
 
 
 async def ask_structured(
-    session: "GeminiSession",
+    session: "AgentSession",
     prompt: str,
     schema: Type[T],
     max_retries: int = 3,
@@ -40,7 +40,7 @@ async def ask_structured(
     """发送 prompt，返回 Pydantic 验证的结构化对象。
 
     Args:
-        session: GeminiSession 实例
+        session: AgentSession 实例
         prompt: 问题文本
         schema: Pydantic BaseModel 子类
         max_retries: JSON 格式不正确时的最大重试次数

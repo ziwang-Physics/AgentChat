@@ -56,10 +56,10 @@ function callWebext(prompt, opts = {}) {
         ];
         if (opts.from) args.push(`--from=${opts.from}`);
         // --single: try ONLY the named provider — no internal cascade. Without
-        // it, gemini_think could exhaust Gemini's quota, silently fall through
-        // to ChatGPT/Qwen/…, and return THAT text labeled as "Gemini 推理" —
-        // the silent-wrong-provider class OneWeb's --single exists to
-        // prevent. Provider-named tools must fail loudly, not impersonate.
+        // it, a provider-named call could exhaust the head provider's quota,
+        // silently fall through to another provider, and return THAT text under
+        // the wrong label — the silent-wrong-provider class OneWeb's --single
+        // exists to prevent. Provider-named tools must fail loudly, not impersonate.
         if (opts.single) args.push("--single");
         if (opts.keepTabs) args.push("--keep-tabs");
 
@@ -133,89 +133,24 @@ const server = new McpServer({
     version: "1.0.0",
 });
 
-// ── 工具 1: gemini_think — Pro Extended 深度推理 ─────────────────────────
-
-server.tool(
-    "gemini_think",
-    "通过 Gemini Pro Extended Thinking 做深度推理。适合多步逻辑、数学分析、复杂推演。需要 Gemini Pro 订阅。",
-    {
-        prompt: z.string().describe("推理问题（中文/英文均可）"),
-        timeout_ms: z.number().optional().describe("超时时间（毫秒），默认 600000（10 分钟）"),
-    },
-    async ({ prompt, timeout_ms }) => {
-        const t = Number(timeout_ms) || DEFAULT_TIMEOUT;
-        const pt = Math.min(t, Math.floor(t / 2));
-        try {
-            const result = await callWebext(prompt, {
-                from: "gemini",
-                single: true, // Gemini-named tool must never return another provider's output
-                timeout: t,
-                provTimeout: pt,
-            });
-            return {
-                content: [{ type: "text", text: result }],
-            };
-        } catch (e) {
-            return {
-                content: [{ type: "text", text: `Gemini 推理失败: ${e.message}` }],
-                isError: true,
-            };
-        }
-    }
-);
-
-// ── 工具 2: gemini_chat — 多轮对话 ───────────────────────────────────────
-
-server.tool(
-    "gemini_chat",
-    // DESCRIPTION FIX: previously claimed "保留对话上下文" — false. OneWeb
-    // reuses the Gemini tab but page.goto()'s the app URL, which STARTS A NEW
-    // CHAT every invocation (see findProviderPage's comment in its index.js).
-    // Cross-call context was never retained; the tool description must not
-    // promise it. Callers needing context must embed prior turns in `prompt`.
-    "向 Gemini 发送单轮消息（复用已有 tab，但每次调用开启新对话，不保留跨调用上下文；如需上下文请把之前的问答拼进 prompt）。",
-    {
-        prompt: z.string().describe("对话内容"),
-    },
-    async ({ prompt }) => {
-        try {
-            const result = await callWebext(prompt, {
-                from: "gemini",
-                single: true, // Gemini-named tool must never return another provider's output
-                keepTabs: true,
-                timeout: DEFAULT_TIMEOUT,
-                provTimeout: DEFAULT_PROV_TIMEOUT,
-            });
-            return {
-                content: [{ type: "text", text: result }],
-            };
-        } catch (e) {
-            return {
-                content: [{ type: "text", text: `Gemini 对话失败: ${e.message}` }],
-                isError: true,
-            };
-        }
-    }
-);
-
-// ── 工具 3: web_ask — 指定 Provider 提问 ──────────────────────────────────
+// ── 工具 1: web_ask — 指定 Provider 提问 ──────────────────────────────────
 
 const PROVIDER_NAMES = [
-    "gemini", "chatgpt", "claude", "qwen",
-    "kimi", "minimax", "mimo", "deepseek"
+    "deepseek", "doubao", "glm", "qwen",
+    "kimi", "minimax", "mimo"
 ];
 
 server.tool(
     "web_ask",
-    "通过 8 个 AI Provider 降级链提问。Gemini → ChatGPT → Claude → Qwen → Kimi → MiniMax → MiMo → DeepSeek。默认 Gemini 开始，不可用自动降级。",
+    "通过 7 个国内 AI Provider 降级链提问。DeepSeek → Doubao → GLM → Qwen → Kimi → MiniMax → MiMo。默认 DeepSeek 开始，不可用自动降级。",
     {
         prompt: z.string().describe("问题文本"),
-        provider: z.enum(["gemini","chatgpt","claude","qwen","kimi","minimax","mimo","deepseek"]).optional().describe("从哪个 Provider 开始，默认 gemini"),
+        provider: z.enum(["deepseek","doubao","glm","qwen","kimi","minimax","mimo"]).optional().describe("从哪个 Provider 开始，默认 deepseek"),
         timeout_ms: z.number().optional().describe("超时（毫秒），默认 600000"),
     },
     async ({ prompt, provider, timeout_ms }) => {
         const t = Number(timeout_ms) || DEFAULT_TIMEOUT;
-        const from = PROVIDER_NAMES.includes(provider) ? provider : "gemini";
+        const from = PROVIDER_NAMES.includes(provider) ? provider : "deepseek";
         try {
             const result = await callWebext(prompt, {
                 from,
@@ -263,7 +198,7 @@ async function main() {
     // StdioServerTransport 通过 stderr 写日志，stdout 走 MCP 协议
     console.error("[agentchat-mcp] MCP Server started. Waiting for client...");
     console.error("[agentchat-mcp] CDP port: 9222");
-    console.error("[agentchat-mcp] Tools: gemini_think, gemini_chat, web_ask, web_smoke");
+    console.error("[agentchat-mcp] Tools: web_ask, web_smoke");
 }
 
 main().catch((e) => {

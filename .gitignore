@@ -6,3 +6,4 @@ node_modules/
 *.jsonl
 __pycache__/
 /*.patch
+ai-image-*.png

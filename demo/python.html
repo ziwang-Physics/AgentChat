@@ -5,11 +5,11 @@
 <nav class="topbar"><a href="index.html" class="brand">AgentChat</a><a href="architecture.html">架构</a><a href="webextended.html">降级链</a><a href="freesubagent.html">并行编排</a><a href="workflow.html">串行管道</a><a href="mcp.html">MCP Server</a><a href="python.html" class="active">Python SDK</a><a href="locales.html">多语言</a></nav>
 <div class="container">
 <div class="hero" style="padding:40px 0 20px"><h1>🐍 <span>Python SDK</span></h1><p class="sub">agentchat 包 — 异步会话管理 · 结构化输出 · 多模态输入</p></div>
-<div class="section"><h2>快速开始</h2><pre>from agentchat import GeminiSession
+<div class="section"><h2>快速开始</h2><pre>from agentchat import DeepSeekSession
 
-async with GeminiSession() as gs:
+async with DeepSeekSession() as gs:
     result = await gs.ask("帮我分析近期的科技股走势")
-    print(result.provider_used)  # 'Gemini'
+    print(result.provider_used)  # 'DeepSeek'
     print(result.model_used)     # 'Pro Extended'
     print(result.time_seconds)   # 156.0</pre></div>
 <div class="section"><h2>API 一览</h2>
@@ -17,7 +17,7 @@ async with GeminiSession() as gs:
 <tbody><tr><td><code>gs.ask(prompt)</code></td><td>发送 prompt，走完整降级链</td><td>AskResult (含 provider/model/time/chain)</td></tr>
 <tr><td><code>gs.chat(prompt)</code></td><td>多轮对话，复用已有 tab</td><td>同上</td></tr>
 <tr><td><code>gs.ask_structured(prompt, schema)</code></td><td>Pydantic 结构化输出 + 3 次重试</td><td>Pydantic 实例</td></tr>
-<tr><td><code>gs.ask_with_image(prompt, path)</code></td><td>图片通过系统剪贴板粘贴到 Gemini</td><td>AskResult</td></tr>
+<tr><td><code>gs.ask_with_image(prompt, path)</code></td><td>图片通过系统剪贴板粘贴到 DeepSeek</td><td>AskResult</td></tr>
 <tr><td><code>gs.batch(prompts)</code></td><td>并行批量推理，N 个 tab 并发</td><td>list[AskResult]</td></tr>
 </tbody></table></div></div>
 <div class="section"><h2>结构化输出</h2>
@@ -28,18 +28,18 @@ class WeatherReport(BaseModel):
     temp: float = Field(ge=-50, le=55)
     humidity: int = Field(ge=0, le=100)
 
-async with GeminiSession() as gs:
+async with DeepSeekSession() as gs:
     report = await gs.ask_structured("查询北京天气", schema=WeatherReport)
     print(report.temp)  # 25.0 (float, 已验证)</pre></div>
 <div class="section"><h2>多模态输入</h2>
-<pre>async with GeminiSession() as gs:
+<pre>async with DeepSeekSession() as gs:
     result = await gs.ask_with_image(
         "分析这张柱状图", image_path="chart.png"
     )</pre></div>
 <div class="two-col"><div class="card" style="cursor:default"><h3>📦 AskResult</h3><pre>@dataclass
 class AskResult:
     response: str          # AI 回复
-    provider_used: str     # 'Gemini'
+    provider_used: str     # 'DeepSeek'
     model_used: str        # 'Pro Extended'
     fallback_chain: list   # 降级路径
     total_time_ms: int     # 耗时

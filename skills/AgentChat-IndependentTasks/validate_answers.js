@@ -83,7 +83,7 @@ for (const st of subtasks) {
 // ── --lint: pre-dispatch plan structure checks ────────────────────
 // 每一条都对应一次真实事故；派发前 30ms 的检查换后面 10 分钟浏览器时间。
 if (lintMode) {
-  const KNOWN = ["gemini", "chatgpt", "claude", "qwen", "kimi", "minimax", "mimo", "deepseek"];
+  const KNOWN = ["deepseek", "doubao", "glm", "qwen", "kimi", "minimax", "mimo"];
   const errs = [], warns = [];
 
   // ── Layer 0: compressed-format invariant checks ──────────────────

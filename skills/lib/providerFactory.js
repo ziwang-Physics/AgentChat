@@ -1074,9 +1074,14 @@ async function collectResponseImages(responseEl, config) {
         }
 
         // Shadow-piercing root collection — same TreeWalker pattern as
-        // heuristicFindEditor (line ~200). Light DOM is document; every
-        // shadowRoot discovered during the walk extends the search space.
-        const roots = [document];
+        // heuristicFindEditor (line ~200). Light DOM root is the SCOPE itself
+        // (response element, or its imageScopeSelector ancestor) — NOT the
+        // whole document. 2026-08-10 BUGFIX: the previous code always scanned
+        // document.querySelectorAll('img') (whole page), contradicting the
+        // schema comment "Default: the response element itself" — providers
+        // with chat sidebars (Doubao's 63 avatar thumbnails) captured UI noise.
+        // Scope's subtree still feeds shadowRoot discovery.
+        const roots = [scope];
         try {
             const w = document.createTreeWalker(
                 scope, NodeFilter.SHOW_ELEMENT

@@ -86,13 +86,13 @@ test('P3b: callProvider passes --ephemeral-tab only when requested', async () =>
     const fake = makeFakeOneWeb();
     try {
         const { callProvider } = createExecutor({ webextPath: fake, logPrefix: 'v19test' });
-        const withFlag = await callProvider('hello world prompt', 'gemini', 15_000, { ephemeralTab: true });
+        const withFlag = await callProvider('hello world prompt', 'deepseek', 15_000, { ephemeralTab: true });
         assert.ok(withFlag.ok, `fake child must succeed, got ${JSON.stringify(withFlag)}`);
         assert.ok(withFlag.text.includes('"--ephemeral-tab"'), 'flag missing from child argv');
-        const withoutFlag = await callProvider('hello world prompt', 'gemini', 15_000);
+        const withoutFlag = await callProvider('hello world prompt', 'deepseek', 15_000);
         assert.ok(withoutFlag.ok);
         assert.ok(!withoutFlag.text.includes('--ephemeral-tab'), 'flag must be absent by default');
-        assert.ok(withoutFlag.text.includes('"--only=gemini"'), 'existing args must be preserved');
+        assert.ok(withoutFlag.text.includes('"--only=deepseek"'), 'existing args must be preserved');
     } finally {
         try { fs.unlinkSync(fake); } catch (_) {}
     }
@@ -268,8 +268,8 @@ test('P5: --plan file content is loaded as the prompt (via parse-fail path)', ()
     // parsing + plan load.
     const tmp = path.join(os.tmpdir(), `v19_plan_${process.pid}.json`);
     fs.writeFileSync(tmp, JSON.stringify({ subtasks: [
-        { id: 'g1', primary: 'gemini', depends_on: [], prompt: 'x'.repeat(40) },
-        { id: 'g2', primary: 'chatgpt', depends_on: [], prompt: 'y'.repeat(40) },
+        { id: 'g1', primary: 'deepseek', depends_on: [], prompt: 'x'.repeat(40) },
+        { id: 'g2', primary: 'doubao', depends_on: [], prompt: 'y'.repeat(40) },
     ] }));
     try {
         const r = spawnSync(process.execPath, [

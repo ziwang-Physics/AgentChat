@@ -130,8 +130,8 @@ check "Chrome CDP 端口 ${CDP_PORT}" \
     "curl -s http://127.0.0.1:${CDP_PORT}/json/version > /dev/null" \
     "bash scripts/start-chrome-debug.sh"
 
-check "Gemini 可达 (通过代理)" \
-    "curl -s --connect-timeout 5 --proxy '$PROXY' https://gemini.google.com -o /dev/null -w '%{http_code}' | grep -q 200"
+check "DeepSeek 可达 (通过代理)" \
+    "curl -s --connect-timeout 5 --proxy '$PROXY' https://chat.deepseek.com -o /dev/null -w '%{http_code}' | grep -q 200"
 
 echo ""
 
@@ -154,7 +154,9 @@ fi
 echo ""
 echo "✅ 环境就绪! 运行以下命令启动:"
 echo "   bash scripts/start-chrome-debug.sh"
-echo "   bash scripts/connect-gemini.sh"
+echo ""
+echo "   # 首次使用请先在 Chrome 中登录链头 provider (DeepSeek):"
+echo "   powershell -ExecutionPolicy Bypass -File scripts/start-chrome.ps1 -FirstLogin   # Windows"
 echo ""
 echo "   # 或直接使用 AI skills:"
 echo "   node skills/AgentChat-OneWeb/index.js '你的问题'"

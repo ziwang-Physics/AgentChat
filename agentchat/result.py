@@ -1,4 +1,4 @@
-"""AskResult — GeminiSession 返回的统一结果类型"""
+"""AskResult — AgentSession 返回的统一结果类型"""
 from dataclasses import dataclass, field
 
 
@@ -10,7 +10,7 @@ class AskResult:
     """AI 返回的文本内容"""
 
     provider_used: str = ""
-    """实际使用的 Provider（如 'Gemini', 'ChatGPT', 'Qwen'）"""
+    """实际使用的 Provider（如 'DeepSeek', 'Doubao', 'Qwen'）"""
 
     model_used: str = ""
     """模型模式（如 'Pro Extended', 'Flash', '3.5 Flash'）"""
@@ -22,7 +22,7 @@ class AskResult:
     """总耗时（毫秒）"""
 
     fallback_chain: list = field(default_factory=list)
-    """降级链经过的 Provider 列表（如 ['gemini', 'chatgpt', 'qwen']）"""
+    """降级链经过的 Provider 列表（如 ['deepseek', 'doubao', 'glm']）"""
 
     exit_code: int = 0
     """CLI 退出码：0=成功，1=CDP不可达，2=无可用Provider，3=安全过滤..."""
