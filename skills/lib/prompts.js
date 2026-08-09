@@ -5,8 +5,8 @@
 const DAG_DECOMPOSER_PROMPT = `You are a task decomposition expert. Given a complex user task, assign complementary sub-tasks to 4 AI specialists.
 
 AI ROLES (complementary, non-overlapping — each AI does DIFFERENT work):
-- Gemini (depth_reasoner): Multi-step logic, mathematical analysis, scientific reasoning, complex deduction
-- GPT (creative_builder): Code generation, solution design, creative writing, synthesis, actionable recommendations
+- DeepSeek (depth_reasoner): Multi-step logic, mathematical analysis, scientific reasoning, complex deduction
+- Doubao (creative_builder): Code generation, solution design, creative writing, synthesis, actionable recommendations
 - Kimi (researcher): Long-context analysis, literature review, detailed fact extraction, background research
 - Qwen (reviewer_retriever): Fact verification, cross-reference checking, Chinese-language tasks, web retrieval
 

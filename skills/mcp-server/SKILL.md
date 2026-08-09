@@ -6,7 +6,7 @@ description: AgentChat MCP Server — expose 8 AI providers as MCP tools for any
 # AgentChat MCP Server
 
 > **最后更新**: 2026-07-06
-> **核心原则**: 将 AgentChat 的 8 个 AI Provider 暴露为 MCP 工具，任何 MCP 兼容客户端可直接调用
+> **核心原则**: 将 AgentChat 的 7 个国内 AI Provider 暴露为 MCP 工具，任何 MCP 兼容客户端可直接调用
 > **Provider 层**: `AgentChat-OneWeb`（单源真相）
 > **安全策略**: 永不关闭用户 Chrome
 
@@ -25,21 +25,21 @@ AgentChat MCP Server (本 skill, ~200 行)
     │
     │  child_process.spawn('node', ['AgentChat-OneWeb/index.js', ...])
     ▼
-AgentChat-OneWeb (8 个 Provider)
+AgentChat-OneWeb (7 个 Provider)
     │
     │  playwright-core → Chrome CDP port 9222
     ▼
-Chrome → Gemini / ChatGPT / Claude / Qwen / Kimi / MiniMax / MiMo / DeepSeek
+Chrome → DeepSeek / Doubao / GLM / Qwen / Kimi / MiniMax / MiMo
 ```
 
 ## 提供的工具
 
 | 工具 | 功能 | 参数 |
 |------|------|------|
-| `gemini_think` | Pro Extended Thinking 深度推理 | `prompt` (必需), `timeout_ms` (可选) |
-| `gemini_chat` | 多轮对话（复用 tab，保留上下文） | `prompt` (必需) |
+
+
 | `web_ask` | 通过降级链调用任意 Provider | `prompt` (必需), `provider` (可选), `timeout_ms` (可选) |
-| `web_smoke` | 检查 8 个 Provider 可达性 | 无参数 |
+| `web_smoke` | 检查 7 个 Provider 可达性 | 无参数 |
 
 ## 配置方式
 

@@ -5,15 +5,15 @@
 <body>
 <nav class="topbar"><a href="index.html" class="brand">AgentChat</a><a href="architecture.html">架构</a><a href="webextended.html">降级链</a><a href="freesubagent.html">并行编排</a><a href="workflow.html">串行管道</a><a href="mcp.html" class="active">MCP Server</a><a href="python.html">Python SDK</a><a href="locales.html">多语言</a></nav>
 <div class="container">
-<div class="hero" style="padding:40px 0 20px"><h1>🔌 <span>MCP Server</span></h1><p class="sub">4 个 MCP 工具 · 让 Claude Desktop / Cursor / Continue.dev 直接调用 8 个 AI Provider</p></div>
+<div class="hero" style="padding:40px 0 20px"><h1>🔌 <span>MCP Server</span></h1><p class="sub">4 个 MCP 工具 · 让 Claude Desktop / Cursor / Continue.dev 直接调用 7 个国内 AI Provider</p></div>
 
 <div class="section"><h2>服务状态</h2>
 <div class="status-card"><h2><span class="dot" id="mcpDot"></span> <span id="mcpStatus">检测中...</span></h2><p style="color:var(--muted);margin-top:8px" id="mcpDetail">MCP Server 运行在 stdio 模式，需要通过 Claude Desktop 等客户端连接</p></div></div>
 
 <div class="section"><h2>4 个 MCP 工具</h2>
 <div class="tool-grid">
-<div class="tool-card"><h4>🔍 gemini_think</h4><p>Gemini Pro Extended Thinking 深度推理</p><p style="margin-top:6px"><code>prompt</code> z.string<br><code>timeout_ms</code> z.number optional</p></div>
-<div class="tool-card"><h4>💬 gemini_chat</h4><p>多轮对话，复用已有 session tab</p><p style="margin-top:6px"><code>prompt</code> z.string</p></div>
+<div class="tool-card"><h4>🔍 web_ask</h4><p>DeepSeek 深度推理 深度推理</p><p style="margin-top:6px"><code>prompt</code> z.string<br><code>timeout_ms</code> z.number optional</p></div>
+<div class="tool-card"><h4>💬 web_ask</h4><p>多轮对话，复用已有 session tab</p><p style="margin-top:6px"><code>prompt</code> z.string</p></div>
 <div class="tool-card"><h4>🌐 web_ask</h4><p>指定 8 个 Provider 中任意一个提问，自动降级</p><p style="margin-top:6px"><code>prompt</code> z.string<br><code>provider</code> z.enum(8值)</p></div>
 <div class="tool-card"><h4>🩺 web_smoke</h4><p>检查所有 8 个 Provider 的可达性</p><p style="margin-top:6px">无参数</p></div>
 </div></div>
@@ -40,10 +40,10 @@
 <div class="section"><h2>验证（终端运行）</h2><pre>$ cd AgentChat && node scripts/v5_test.mjs
 === MCP Server 测试 ===
 PASS: 收到 4 个工具
-PASS: 包含 gemini_think / gemini_chat / web_ask / web_smoke
+PASS: 包含 web_ask / web_ask / web_ask / web_smoke
 ALL 7 TESTS PASSED</pre></div>
 </div>
 <script>
-(async()=>{try{const r=await fetch('/api/health');const d=await r.json();const dot=document.getElementById('mcpDot');const st=document.getElementById('mcpStatus');if(d.cdp==='online'){dot.className='dot on';st.textContent='Demo Server 运行中 · CDP 在线'}else{dot.className='dot off';st.textContent='Demo Server 运行中 · CDP 离线'}document.getElementById('mcpDetail').textContent=`端口 ${d.port} · 8 Providers · MCP Server 独立 stdio 运行`}catch(e){document.getElementById('mcpStatus').textContent='无法连接 Demo Server'}})();
+(async()=>{try{const r=await fetch('/api/health');const d=await r.json();const dot=document.getElementById('mcpDot');const st=document.getElementById('mcpStatus');if(d.cdp==='online'){dot.className='dot on';st.textContent='Demo Server 运行中 · CDP 在线'}else{dot.className='dot off';st.textContent='Demo Server 运行中 · CDP 离线'}document.getElementById('mcpDetail').textContent=`端口 ${d.port} · 7 Providers · MCP Server 独立 stdio 运行`}catch(e){document.getElementById('mcpStatus').textContent='无法连接 Demo Server'}})();
 </script>
 <footer>AgentChat · MCP Server · 4 Tools · Zod Schema</footer></body></html>

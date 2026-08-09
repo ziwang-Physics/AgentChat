@@ -67,7 +67,7 @@ const EXIT_REASONS = {
 // "Gemini 是 Google 的模型" → "是 Google 的模型"). A bare provider name is now
 // only stripped when followed by a speech verb or an explicit colon.
 
-const PROVIDER_NAMES = "(?:Gemini|Claude|ChatGPT|Kimi|Qwen)";
+const PROVIDER_NAMES = "(?:DeepSeek|Doubao|GLM|Kimi|Qwen)";
 const UI_CHROME_PATTERNS = [
     new RegExp(`^${PROVIDER_NAMES}\\s*(?:[说說]了?|said|responded)[：:\\s]*`, "gim"),
     new RegExp(`^${PROVIDER_NAMES}\\s*[：:]\\s*`, "gim"),

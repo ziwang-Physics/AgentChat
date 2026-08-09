@@ -2,7 +2,7 @@
 /**
  * AI Fallback Chain — Multi-Provider CDP Bridge
  *
- * Priority chain: Gemini (Pro Extended) → ChatGPT → Claude → Qwen → Kimi → MiniMax → MiMo → DeepSeek
+ * Priority chain: DeepSeek → Doubao → GLM → Qwen → Kimi → MiniMax → MiMo (纯国内)
  * Falls to next provider on quota exhaustion or service unavailability.
  * Only ONE provider is used per invocation — first available wins.
  *
@@ -12,8 +12,8 @@
  *   echo "Prompt from stdin" | node index.js
  *   node index.js --smoke          # verify at least one provider reachable
  *   node index.js --doctor         # check CDP connectivity only
- *   node index.js --from=ChatGPT   # start from a specific provider
- *   node index.js --from=Claude --single "..."  # try ONLY Claude, no cascade
+ *   node index.js --from=DeepSeek  # start from a specific provider
+ *   node index.js --from=Qwen --single "..."  # try ONLY Qwen, no cascade
  *                                   # (used by AgentChat-IndependentTasks, which owns
  *                                   # its own cross-provider fallback + locking)
  *   node index.js --no-download-images "..."  # skip image download post-processing
@@ -184,20 +184,18 @@ const { PROVIDER_CHAIN } = require('../lib/providers/chain');
 // ══════════════════════════════════════════════════════════════════════════════
 // PROVIDER RUNNERS — factory-built from adapter configs in lib/providers/adapters/
 // ══════════════════════════════════════════════════════════════════════════════
-//   Gemini:  Pro Extended activation, bursty-output detection, 120s stop extension
-//   ChatGPT: 3-tier input (clipboard → simulated paste → chunked keyboard)
-//   Claude:  ProseMirror editor, Thinking placeholder filter
-//   Qwen:    React SPA 3s delay, stop-btn detached (not hidden), model-name strip
-//   Kimi:    New-session hook per call, .send-button-container disabled detection
-//   MiniMax: TipTap/ProseMirror async mount 4s delay
-//   MiMo:    DOM-traversal send button, React SPA 4s delay
 //   DeepSeek: Standard pipeline, ds-markdown response
+//   Doubao:   React SPA 3s delay, generic markdown selectors (selector_drift 精修中)
+//   GLM:      React SPA 3s delay, generic markdown selectors (selector_drift 精修中)
+//   Qwen:     React SPA 3s delay, stop-btn detached (not hidden), model-name strip
+//   Kimi:     New-session hook per call, .send-button-container disabled detection
+//   MiniMax:  TipTap/ProseMirror async mount 4s delay
+//   MiMo:     DOM-traversal send button, React SPA 4s delay
 
-const PROVIDER_KEYS = ['gemini','chatgpt','claude','qwen','kimi','minimax','mimo','deepseek'];
+const PROVIDER_KEYS = ['deepseek','doubao','glm','qwen','kimi','minimax','mimo'];
 const RUNNERS = Object.fromEntries(PROVIDER_KEYS.map(k => {
   const cfg = require(`../lib/providers/adapters/${k}`);
-  // Gemini uses its own spinner-free runner; all others share the progress spinner
-  return [k, createProviderRunner(k === 'gemini' ? cfg : { ...cfg, onProgress: spinner })];
+  return [k, createProviderRunner({ ...cfg, onProgress: spinner })];
 }));
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -322,11 +320,6 @@ const PROVIDER_ASSET_HOSTS = [
     // Kimi / Moonshot — user avatars & UI assets
     'avatar.moonshot.cn',
     'kimi-assets.moonshot.cn',
-    // Google / Gemini — user profile photos (lh3), static UI (gstatic)
-    'lh3.googleusercontent.com',
-    'www.gstatic.com',
-    // OpenAI / ChatGPT — static UI assets (NOT files.oaiusercontent.com which hosts generated images)
-    'oaistatic.com',        // matches cdn.oaistatic.com
     // Alibaba / Qwen — Alibaba CDN UI assets
     'img.alicdn.com',
     // Tencent — CDN UI assets
@@ -1069,25 +1062,11 @@ async function main() {
             // v14: an EMPTY value must fail loudly here — `''` used to slip
             // through to the substring matcher and silently run Gemini.
             startFrom = (a.split('=')[1] || '').trim();
-            if (!startFrom) usageExit('--only= requires a provider name (e.g. --only=chatgpt)');
+            if (!startFrom) usageExit('--only= requires a provider name (e.g. --only=qwen)');
             singleAttempt = true;
         } else if (a.startsWith('--from=')) {
             startFrom = (a.split('=')[1] || '').trim();
-            if (!startFrom) usageExit('--from= requires a provider name (e.g. --from=ChatGPT)');
-        } else if (a.startsWith('--locale=')) {
-            // FEATURE GAP FIX: --locale was documented (lib/locales/gemini.js
-            // header: "CLI 传 --locale=xx_XX") and passed by the Python SDK
-            // (session.py appends --locale=<key> whenever locale= is given),
-            // but this parser had no branch for it — unknown --flags are
-            // silently dropped, so the Python `locale` parameter has been a
-            // no-op since it shipped. Wire it to the Gemini locale profiles.
-            const locKey = a.split('=')[1];
-            const applied = require('../lib/locales/gemini').setLocale(locKey);
-            if (applied === 'fuzzy' && locKey) {
-                log(`WARN: unknown --locale "${locKey}" — falling back to auto-detect/fuzzy matching`);
-            } else {
-                log(`Gemini UI locale forced to ${applied}`);
-            }
+            if (!startFrom) usageExit('--from= requires a provider name (e.g. --from=DeepSeek)');
         } else if (a === '--no-download-images') {
             // Image download opt-out — skip the automatic image download post-processing.
             // Images in the web AI response will be preserved as remote URLs only.

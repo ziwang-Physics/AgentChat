@@ -116,7 +116,7 @@ async function executeWithFallback(primaryKey, prompt, budgetMs, skipList = []) 
 
 function normalizeAI(name) {
   const n = (name || "").toLowerCase().trim();
-  const map = { gpt: "chatgpt", chatgpt: "chatgpt", gemini: "gemini", kimi: "kimi", qwen: "qwen", claude: "claude", minimax: "minimax", deepseek: "deepseek", mimo: "mimo" };
+  const map = { kimi: "kimi", qwen: "qwen", doubao: "doubao", glm: "glm", minimax: "minimax", deepseek: "deepseek", mimo: "mimo" };
   const key = map[n] || n;
   // ROBUSTNESS: a decomposer DAG (produced by an external AI) can name an AI
   // that isn't in our provider set — e.g. "grok", "llama", a typo, or "".
@@ -169,8 +169,8 @@ function tryParsePreDecomposedPlan(userTask) {
       const exclude = Array.isArray(json.exclude)
         ? [...new Set(json.exclude.map(name => {
             const n = (name || "").toLowerCase().trim();
-            const aliasMap = { gpt:"chatgpt", chatgpt:"chatgpt", gemini:"gemini", kimi:"kimi",
-              qwen:"qwen", claude:"claude", minimax:"minimax", deepseek:"deepseek", mimo:"mimo" };
+            const aliasMap = { kimi:"kimi", qwen:"qwen", doubao:"doubao", glm:"glm",
+              minimax:"minimax", deepseek:"deepseek", mimo:"mimo" };
             const known = aliasMap[n];
             if (known) return known;
             log(`WARN: unknown provider "${name}" in plan exclude list — discarded (valid: ${FALLBACK_CHAIN.join(", ")})`);
@@ -179,7 +179,7 @@ function tryParsePreDecomposedPlan(userTask) {
         : [];
       const nodes = json.subtasks.map(st => ({
         id: st.id || st.role || `task_${Math.random().toString(36).slice(2,6)}`,
-        ai: st.primary || "gemini",
+        ai: st.primary || "deepseek",
         role: st.role || "worker",
         goal: st.id || "task",
         depends_on: st.depends_on || [],
@@ -303,10 +303,10 @@ async function buildDAG(userTask, budgetMs, opts = {}) {
   log("  WARN: 4-role DAG produces un-anchored output — Step 2.5 qualityGate will flag all answers");
   return {
     nodes: [
-      { id: "research", ai: "Kimi",   role: "researcher",        goal: "资料收集", depends_on: [], prompt: `请收集关于以下问题的背景资料和关键事实，直接列出信息：\n\n${userTask}` },
-      { id: "analyze",  ai: "Gemini", role: "depth_reasoner",    goal: "深度分析", depends_on: [], prompt: `请从理论/机制层面深入分析以下问题，给出严谨的推理和结论：\n\n${userTask}` },
-      { id: "create",   ai: "GPT",    role: "creative_builder",  goal: "方案与建议", depends_on: [], prompt: `请从应用和实践角度分析以下问题，给出可操作的建议和方案：\n\n${userTask}` },
-      { id: "verify",   ai: "Qwen",   role: "reviewer_retriever", goal: "事实核查", depends_on: [], prompt: `请独立审查和验证以下问题涉及的关键事实，用中文指出潜在的不确定之处：\n\n${userTask}` },
+      { id: "research", ai: "Kimi",    role: "researcher",        goal: "资料收集", depends_on: [], prompt: `请收集关于以下问题的背景资料和关键事实，直接列出信息：\n\n${userTask}` },
+      { id: "analyze",  ai: "DeepSeek", role: "depth_reasoner",    goal: "深度分析", depends_on: [], prompt: `请从理论/机制层面深入分析以下问题，给出严谨的推理和结论：\n\n${userTask}` },
+      { id: "create",   ai: "Doubao",  role: "creative_builder",  goal: "方案与建议", depends_on: [], prompt: `请从应用和实践角度分析以下问题，给出可操作的建议和方案：\n\n${userTask}` },
+      { id: "verify",   ai: "Qwen",    role: "reviewer_retriever", goal: "事实核查", depends_on: [], prompt: `请独立审查和验证以下问题涉及的关键事实，用中文指出潜在的不确定之处：\n\n${userTask}` },
     ],
     fallback: true,
   };

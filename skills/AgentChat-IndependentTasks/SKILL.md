@@ -11,7 +11,7 @@ description: 并行分发 N 道独立任务给多个浏览器 AI，回收后由 
 
 ## 核心模型
 
-N 道独立任务，M 个能力等同的 AI（最多 7：gemini/chatgpt/qwen/kimi/minimax/mimo/deepseek），纯分发、零协作。
+N 道独立任务，M 个能力等同的 AI（最多 7：deepseek/doubao/glm/qwen/kimi/minimax/mimo），纯分发、零协作。
 
 ```
 题目 → 按主题分组 → JSON Plan → node index.js 并行派发 → 校验 → 合成 → md2pdf.sh → PDF
@@ -40,7 +40,7 @@ N 道独立任务，M 个能力等同的 AI（最多 7：gemini/chatgpt/qwen/kim
 
 5. **合成前强制通过内容校验门（机器执行）。** 派发后必须跑 `validate_answers.js`（校验锚行逐字出现、外来锚检测、噪声剥离）。退出码非 0 → L1。合成材料用 `clean/` 目录，不用原始 stdout。
 
-6. **用户 provider 约束写进 `exclude`，覆盖 fallback 链与 L1。** 只不设 primary 不够——fallback 链会自动路由到被禁 provider。必须 plan 顶层 `"exclude": ["claude"]` 并在 L1 补发时同样跳过。
+6. **用户 provider 约束写进 `exclude`，覆盖 fallback 链与 L1。** 只不设 primary 不够——fallback 链会自动路由到被禁 provider。必须 plan 顶层 `"exclude": ["deepseek"]` 并在 L1 补发时同样跳过。
 
 7. **每次 validation `--out` 目录必须唯一（带时间戳）。** 旧目录残留历史 clean 文件会导致误取错误回答。
 
@@ -120,14 +120,14 @@ using [METHOD]. [ONE-SENTENCE KEY FINDING].
 
 ```json
 {
-  "exclude": ["claude"],
+  "exclude": ["deepseek"],
   "shared": {
     "background": "This theoretical study investigates...",
     "template": "dual_en"
   },
   "subtasks": [
     {
-      "id": "STE-size", "primary": "gemini", "depends_on": [],
+      "id": "STE-size", "primary": "deepseek", "depends_on": [],
       "questions": ["R1Q1", "R2Q1"]
     }
   ],
@@ -181,10 +181,10 @@ Step 2:   lint + dispatch（0 Claude Code tokens）
 **传统格式**（每组自带完整 prompt）：
 ```json
 {
-  "exclude": ["claude"],
+  "exclude": ["deepseek"],
   "subtasks": [
     {
-      "id": "group_x", "primary": "gemini", "depends_on": [],
+      "id": "group_x", "primary": "deepseek", "depends_on": [],
       "questions": ["P01", "P02"], "prompt": "…[ANSWER P01]…[ANSWER P02]…"
     }
   ]

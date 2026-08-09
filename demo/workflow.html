@@ -19,7 +19,7 @@ input:focus{border-color:var(--accent)}
 <body>
 <nav class="topbar"><a href="index.html" class="brand">AgentChat</a><a href="architecture.html">架构</a><a href="webextended.html">降级链</a><a href="freesubagent.html">并行编排</a><a href="workflow.html" class="active">串行管道</a><a href="mcp.html">MCP Server</a><a href="python.html">Python SDK</a><a href="locales.html">多语言</a></nav>
 <div class="container">
-<div class="hero" style="padding:40px 0 20px"><h1>🔄 <span>串行管道</span></h1><p class="sub">Kimi 搜索 → Gemini 推理 → ChatGPT 审查 → 结果呈现</p></div>
+<div class="hero" style="padding:40px 0 20px"><h1>🔄 <span>串行管道</span></h1><p class="sub">Kimi 搜索 → DeepSeek 推理 → Qwen 审查 → 结果呈现</p></div>
 
 <div class="section"><h2>🎛️ 运行工作流</h2>
 <div style="display:flex;gap:8px;margin:12px 0"><input id="topic" placeholder="输入你的研究主题，比如：量子计算的商业应用前景" onkeydown="if(event.key==='Enter')run()"><button class="btn" id="runBtn" onclick="run()">▶ 开始</button></div>
@@ -30,13 +30,13 @@ input:focus{border-color:var(--accent)}
 <div class="section"><h2>处理流程说明</h2>
 <div class="flow" style="margin:16px 0">
 <div class="step" style="cursor:default"><div class="idx">1</div><div class="info"><h4>Kimi 联网搜索</h4><div class="role">用要点列出关键事实</div></div></div><div class="arrow">→</div>
-<div class="step" style="cursor:default"><div class="idx">2</div><div class="info"><h4>Gemini 深度推理</h4><div class="role">基于搜索结果做深度分析</div></div></div><div class="arrow">→</div>
-<div class="step" style="cursor:default"><div class="idx">3</div><div class="info"><h4>ChatGPT 交叉审查</h4><div class="role">列出所有问题点和修改建议</div></div></div>
+<div class="step" style="cursor:default"><div class="idx">2</div><div class="info"><h4>DeepSeek 深度推理</h4><div class="role">基于搜索结果做深度分析</div></div></div><div class="arrow">→</div>
+<div class="step" style="cursor:default"><div class="idx">3</div><div class="info"><h4>Qwen 交叉审查</h4><div class="role">列出所有问题点和修改建议</div></div></div>
 </div></div>
 </div>
 
 <script>
-const STEPS=[{id:'search',label:'Kimi 联网搜索',provider:'kimi',role:'Researcher'},{id:'reason',label:'Gemini 深度推理',provider:'gemini',role:'Deep Reasoner'},{id:'review',label:'ChatGPT 交叉审查',provider:'chatgpt',role:'Reviewer'}];
+const STEPS=[{id:'search',label:'Kimi 联网搜索',provider:'kimi',role:'Researcher'},{id:'reason',label:'DeepSeek 深度推理',provider:'deepseek',role:'Deep Reasoner'},{id:'review',label:'Qwen 交叉审查',provider:'qwen',role:'Reviewer'}];
 const PROMPTS=[p=>`请进行联网搜索，用要点列出关键事实和数据。不要运行任何代码。\n\n搜索主题：${p}`,(p,ctx)=>`基于以下搜索材料进行深度分析。直接给出完整分析，不需要搜索新资料。\n\n搜索材料：\n${ctx}\n\n分析主题：${p}`,p=>`请逐一审查以下分析内容，列出所有问题点并给出具体修改建议。不要重写整个方案。\n\n${p}`];
 
 function init(){

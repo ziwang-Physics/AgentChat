@@ -308,7 +308,13 @@ function buildChromeArgs(port, profileDir) {
     if (/^(1|true|yes)$/i.test(process.env.HEADLESS || '')) {
         args.push('--headless=new', '--disable-gpu', '--window-size=1920,1080');
     }
-    args.push(process.env.GEMINI_URL || 'https://gemini.google.com/u/0/app');
+    // 2026-08-10 国内化: 默认打开链头 provider（DeepSeek），不再是 Gemini
+    let defaultHomeUrl = 'https://chat.deepseek.com/';
+    try {
+        const { PROVIDER_CHAIN } = require('./providers/chain');
+        if (PROVIDER_CHAIN[0] && PROVIDER_CHAIN[0].url) defaultHomeUrl = PROVIDER_CHAIN[0].url;
+    } catch (_) { /* fall back to hardcoded head */ }
+    args.push(process.env.AGENTCHAT_HOME_URL || defaultHomeUrl);
     return args;
 }
 

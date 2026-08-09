@@ -290,8 +290,8 @@ await ok('wiring: tryAllProviders returns page; main() forwards it to downloadAl
     const src = fs.readFileSync(path.join(AGENTCHAT_ROOT, 'skills/AgentChat-OneWeb/index.js'), 'utf8');
     assert(/provider:\s*provider\.name,\s*page\s*}/.test(src), 'success result carries page');
     assert(/downloadAllImages\(result\.response,\s*process\.cwd\(\),\s*\{\s*page:\s*result\.page\s*\}\)/.test(src), 'main passes result.page');
-    const cg = fs.readFileSync(path.join(AGENTCHAT_ROOT, 'skills/lib/providers/adapters/chatgpt.js'), 'utf8');
-    assert(/imageScopeSelector:\s*'\[data-message-author-role="assistant"\]'/.test(cg), 'chatgpt adapter widens image scope');
+    const qwen = fs.readFileSync(path.join(AGENTCHAT_ROOT, 'skills/lib/providers/adapters/qwen.js'), 'utf8');
+    assert(/postResponseHook/.test(qwen), 'qwen adapter retains postResponseHook');
 });
 
 console.log(`\n${passed}/${total} assertion groups passed`);

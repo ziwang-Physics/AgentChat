@@ -187,7 +187,7 @@ function closeOldProviderTabs() {
                     let closed = 0;
                     pages.forEach((p) => {
                         // 只关 AI 网站 tab（包含已知域名），保留 about:blank
-                        const isAI = /gemini|chatgpt|claude|qianwen|kimi|minimax|mimo|deepseek/i.test(p.url);
+                        const isAI = /deepseek|doubao|chatglm|qianwen|kimi|minimax|mimo|qwen/i.test(p.url);
                         if (isAI && p.type === 'page') {
                             http.get(`${CDP_URL}/json/close/${p.id}`, () => {}).end();
                             closed++;
@@ -350,7 +350,7 @@ const server = http.createServer(async (req, res) => {
                 }
 
                 const result = await callWebext(fullPrompt, {
-                    from: provider || 'gemini',
+                    from: provider || 'deepseek',
                     timeout: 600000,
                     provTimeout: 180000,
                 });
@@ -433,7 +433,7 @@ const server = http.createServer(async (req, res) => {
             for (const task of tasks) {
                 try {
                     const r = await callWebext(task.prompt, {
-                        from: task.provider || 'gemini',
+                        from: task.provider || 'deepseek',
                         timeout: 300000,
                         provTimeout: 120000,
                     });
@@ -477,7 +477,7 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
-    // API: POST /api/deep-reason — Gemini Pro Extended 深度推理
+    // API: POST /api/deep-reason — DeepSeek 深度推理
     if (req.method === 'POST' && url.pathname === '/api/deep-reason') {
         const body = await readBody(req);
         try {
@@ -485,7 +485,7 @@ const server = http.createServer(async (req, res) => {
             const full = context
                 ? `${prompt}\n\n基于以下资料进行推理分析，不需要搜索新资料：\n${context}`
                 : prompt;
-            const r = await callWebext(full, { from: 'gemini', timeout: 600000, provTimeout: 300000 });
+            const r = await callWebext(full, { from: 'deepseek', timeout: 600000, provTimeout: 300000 });
             res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
             res.end(JSON.stringify(r));
         } catch (e) {
@@ -495,7 +495,7 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
-    // API: POST /api/review — ChatGPT 交叉审查
+    // API: POST /api/review — Qwen/Kimi 交叉审查
     if (req.method === 'POST' && url.pathname === '/api/review') {
         const body = await readBody(req);
         try {
@@ -503,7 +503,7 @@ const server = http.createServer(async (req, res) => {
             if (!content) throw new Error('Need content to review');
             const r = await callWebext(
                 `请逐一审查以下内容，列出所有问题点并给出具体修改建议。不要重写整个方案。\n\n${content}`,
-                { from: 'chatgpt', timeout: 300000, provTimeout: 180000 }
+                { from: 'qwen', timeout: 300000, provTimeout: 180000 }
             );
             res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
             res.end(JSON.stringify(r));
@@ -642,8 +642,8 @@ const server = http.createServer(async (req, res) => {
         console.log('║    POST /api/ask         单 Provider 问答      ║');
         console.log('║    POST /api/parallel    4 Worker 并行编排    ║');
         console.log('║    POST /api/search-web  联网检索 (Kimi)      ║');
-        console.log('║    POST /api/deep-reason 深度推理 (Gemini)    ║');
-        console.log('║    POST /api/review      交叉审查 (ChatGPT)   ║');
+        console.log('║    POST /api/deep-reason 深度推理 (DeepSeek)   ║');
+        console.log('║    POST /api/review      交叉审查 (Qwen)       ║');
         console.log('║    POST /api/verify      事实核查 (Qwen)      ║');
         console.log('║    GET  /api/smoke       Provider 可达性      ║');
         console.log('║    GET  /api/health      CDP 健康检查          ║');

@@ -28,14 +28,14 @@
     │
     │  child_process.spawn('node', ['../AgentChat-WebExtended/index.js', '--from=X', prompt])
     ▼
-AgentChat-WebExtended (8 Providers 唯一实现)</pre>
+AgentChat-WebExtended (7 Providers 唯一实现)</pre>
 <div class="two-col"><div class="card" style="cursor:default"><h3>🔒 角色互补</h3><p>4 个角色做 4 个<strong>不同角度</strong>。同一个问题绝不发给两个 AI——资源的完全利用而非冗余。</p></div><div class="card" style="cursor:default"><h3>📋 质量门</h3><p>≥ 2 个有效响应才输出结果。单 worker 失败不影响其他 worker 的结果收集。</p></div></div>
 </div></div>
 
 <script>
 const TEMPLATES = [
-  {name:'AI行业分析',tasks:[{id:'research',role:'Researcher',desc:'收集数据和事实',provider:'kimi',prompt:'请用联网搜索收集关于2026年AI行业发展趋势的关键数据和事实。用要点列出。不要运行任何代码。'},{id:'reasoning',role:'Deep Reasoner',desc:'深度推理分析',provider:'gemini',prompt:'基于以下信息进行深度推理分析AI行业发展趋势。直接给出完整分析。'},{id:'verify',role:'Fact Checker',desc:'事实核查验证',provider:'qwen',prompt:'请对AI行业发展趋势的相关事实进行核查。每个结论标注信息来源。'},{id:'synthesis',role:'Synthesizer',desc:'综合报告输出',provider:'chatgpt',prompt:'基于以上分析，直接输出一份AI行业发展趋势的综合评估报告。不要解释方法论。'}]},
-  {name:'代码审查',tasks:[{id:'review',role:'Reviewer',desc:'代码逻辑审查',provider:'gemini',prompt:'请审查以下代码的逻辑正确性和潜在缺陷。直接给出完整分析。'},{id:'verify',role:'Verifier',desc:'安全/边界检查',provider:'chatgpt',prompt:'检查代码中的安全检查、边界处理和潜在注入风险。直接输出完整报告。'},{id:'docs',role:'Documenter',desc:'文档补充',provider:'kimi',prompt:'为这段代码补充中文注释和使用文档。用要点列出关键说明。'},{id:'quality',role:'QA',desc:'综合质量评估',provider:'qwen',prompt:'给出这段代码的综合质量评分和改进建议。每个结论标注依据。'}]},
+  {name:'AI行业分析',tasks:[{id:'research',role:'Researcher',desc:'收集数据和事实',provider:'kimi',prompt:'请用联网搜索收集关于2026年AI行业发展趋势的关键数据和事实。用要点列出。不要运行任何代码。'},{id:'reasoning',role:'Deep Reasoner',desc:'深度推理分析',provider:'deepseek',prompt:'基于以下信息进行深度推理分析AI行业发展趋势。直接给出完整分析。'},{id:'verify',role:'Fact Checker',desc:'事实核查验证',provider:'qwen',prompt:'请对AI行业发展趋势的相关事实进行核查。每个结论标注信息来源。'},{id:'synthesis',role:'Synthesizer',desc:'综合报告输出',provider:'qwen',prompt:'基于以上分析，直接输出一份AI行业发展趋势的综合评估报告。不要解释方法论。'}]},
+  {name:'代码审查',tasks:[{id:'review',role:'Reviewer',desc:'代码逻辑审查',provider:'deepseek',prompt:'请审查以下代码的逻辑正确性和潜在缺陷。直接给出完整分析。'},{id:'verify',role:'Verifier',desc:'安全/边界检查',provider:'qwen',prompt:'检查代码中的安全检查、边界处理和潜在注入风险。直接输出完整报告。'},{id:'docs',role:'Documenter',desc:'文档补充',provider:'kimi',prompt:'为这段代码补充中文注释和使用文档。用要点列出关键说明。'},{id:'quality',role:'QA',desc:'综合质量评估',provider:'qwen',prompt:'给出这段代码的综合质量评分和改进建议。每个结论标注依据。'}]},
 ];
 let selectedTpl=0;
 

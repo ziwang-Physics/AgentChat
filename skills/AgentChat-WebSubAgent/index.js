@@ -7,8 +7,8 @@
  *
  * Usage:
  *   node index.js --search "query"          # Step 2: Kimi → Qwen
- *   node index.js --reason "prompt"         # Step 3: Gemini → ChatGPT → Claude
- *   node index.js --review "content"        # Step 5: ChatGPT → Claude → Qwen
+ *   node index.js --reason "prompt"         # Step 3: DeepSeek → Doubao → GLM
+ *   node index.js --review "content"        # Step 5: Qwen → Kimi → DeepSeek
  *   node index.js --provider=kimi "prompt"  # Custom single provider
  *   cat large.txt | node index.js --review  # stdin for large payloads (>32KB)
  *   node index.js --smoke | --doctor
@@ -52,8 +52,8 @@ const ALL_KEYS = PROVIDER_CHAIN.map(p => p.key);
 
 const STEP_CHAINS = {
     search: ["kimi", "qwen"],
-    reason: ["gemini", "chatgpt", "claude"],
-    review: ["chatgpt", "claude", "qwen"],
+    reason: ["deepseek", "doubao", "glm"],
+    review: ["qwen", "kimi", "deepseek"],
 };
 
 function log(msg) { process.stderr.write(`[workflow] ${msg}\n`); }

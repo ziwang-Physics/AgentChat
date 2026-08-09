@@ -1,11 +1,11 @@
 # ============================================================
 # AgentChat — Chrome CDP 启动器 (Windows PowerShell)
 #
-# Idempotent — 安全多次运行。首次使用 -FirstLogin 登录 Gemini。
+# Idempotent — 安全多次运行。首次使用 -FirstLogin 登录链头 provider。
 #
 # 用法:
 #   .\scripts\start-chrome.ps1                  # 启动 (默认: 可见窗口)
-#   .\scripts\start-chrome.ps1 -FirstLogin      # 打开 Gemini 登录页并等待登录
+#   .\scripts\start-chrome.ps1 -FirstLogin      # 打开链头 provider 登录页并等待登录
 #   .\scripts\start-chrome.ps1 -Headless        # headless 模式 (profile 必须已登录)
 #   .\scripts\start-chrome.ps1 -Stop            # 停止本脚本管理的 Chrome
 #
@@ -14,7 +14,7 @@
 #   CHROMIUM_PATH   自定义 Chrome 路径 (默认: 自动检测)
 #   CHROME_PROFILE  Profile 目录 (默认: %USERPROFILE%\.chrome-debug-profile)
 #   PROXY_SERVER    HTTP/SOCKS5 代理 (如 http://127.0.0.1:7897)
-#   GEMINI_URL      Gemini 目标 URL
+#   AGENTCHAT_HOME_URL  链头 provider 首页 URL（默认 DeepSeek）
 #   HEADLESS        1/true/yes = headless (等价于 -Headless)
 #
 # v15 变更 (Windows/workbuddy 修复):
@@ -28,7 +28,7 @@
 #   [P1] Start-Process 参数改为显式引号拼接 —
 #        旧写法用 $OFS 隐式 join 数组再内插，含空格路径下参数被拆散
 #   [P1] 默认模式 headless → headful，与 .env.example 的 HEADLESS=false
-#        默认值及 Linux daemon 行为一致；headless 下 Gemini 未登录 profile
+#        默认值及 Linux daemon 行为一致；headless 下未登录 profile
 #        无法交互登录，且更易触发风控
 #   [P1] 启动后检测 Chrome 进程是否立即退出 (flag 错误/profile 被占用)，
 #        失败时输出 netstat 端口占用诊断
@@ -61,7 +61,8 @@ if (Test-Path $EnvFile) {
 # ── 配置（env vars 覆盖默认值）──────────────────────────────────────────
 $CDP_PORT      = if ($env:CDP_PORT) { [int]$env:CDP_PORT } else { 9222 }
 $PROFILE_DIR   = if ($env:CHROME_PROFILE) { $env:CHROME_PROFILE } else { "$env:USERPROFILE\.chrome-debug-profile" }
-$GEMINI_URL    = if ($env:GEMINI_URL) { $env:GEMINI_URL } else { "https://gemini.google.com/u/0/app" }
+# 2026-08-10 国内化: 默认首页 = 链头 provider DeepSeek（原 GEMINI_URL）
+$HOME_URL      = if ($env:AGENTCHAT_HOME_URL) { $env:AGENTCHAT_HOME_URL } else { "https://chat.deepseek.com/" }
 $PROXY_SERVER  = if ($env:PROXY_SERVER) { $env:PROXY_SERVER } else { "" }
 
 # v15 [P0]: 展开 `~` — .env.example 的默认值是 ~/.chrome-debug-profile，
@@ -220,7 +221,7 @@ function Quote-Arg([string]$a) {
     }
     return $a
 }
-$ArgString = (($ChromeArgs | ForEach-Object { Quote-Arg $_ }) + (Quote-Arg $GEMINI_URL)) -join ' '
+$ArgString = (($ChromeArgs | ForEach-Object { Quote-Arg $_ }) + (Quote-Arg $HOME_URL)) -join ' '
 
 # ── 启动 Chrome ──────────────────────────────────────────────────────────
 if ($FirstLogin) {
@@ -230,9 +231,9 @@ if ($FirstLogin) {
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  In the Chrome window that opens:" -ForegroundColor Yellow
-    Write-Host "    1. Google will prompt you to sign in"
-    Write-Host "    2. Log in with your Google account"
-    Write-Host "    3. Confirm you can see the Gemini chat interface"
+    Write-Host "    1. The provider will prompt you to sign in (DeepSeek by default)"
+    Write-Host "    2. Log in with your account"
+    Write-Host "    3. Confirm you can see the chat interface"
     Write-Host "    4. LEAVE the window open — AgentChat drives this browser" -ForegroundColor Yellow
     Write-Host ""
 }
@@ -293,21 +294,21 @@ if (-not $ready) {
 }
 Write-Host " READY"
 
-# ── Gemini 页面确认（尽力而为，不阻塞成功退出）───────────────────────────
-Write-Host -NoNewline "[WAIT] Waiting for Gemini page"
+# ── 链头 provider 页面确认（尽力而为，不阻塞成功退出）────────────────────
+Write-Host -NoNewline "[WAIT] Waiting for provider page"
 $loginNeeded = $false
 for ($i = 1; $i -le 20; $i++) {
     Start-Sleep -Seconds 1
     try {
         $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$CDP_PORT/json/list" -TimeoutSec 2 -UseBasicParsing
         $pages = $resp.Content | ConvertFrom-Json
-        $hit = $pages | Where-Object { $_.url -match "gemini" -and $_.title -and $_.title -ne "about:blank" }
+        $hit = $pages | Where-Object { $_.url -match "deepseek|doubao|chatglm|qianwen|kimi|minimaxi|mimo" -and $_.title -and $_.title -ne "about:blank" }
         if ($hit) {
             Write-Host " DONE"
             $t = ($hit | Select-Object -First 1).title
             $u = ($hit | Select-Object -First 1).url
-            Write-Host "[OK] Gemini page: $t"
-            if ($u -match "accounts\.google\.com|signin|ServiceLogin") { $loginNeeded = $true }
+            Write-Host "[OK] Provider page: $t"
+            if ($u -match "login|signin|passport|oauth") { $loginNeeded = $true }
             break
         }
         Write-Host -NoNewline "."
@@ -318,7 +319,7 @@ Write-Host ""
 Write-Host "================================================"
 Write-Host "  Chrome CDP: http://127.0.0.1:$CDP_PORT"
 if ($loginNeeded) {
-    Write-Host "  ⚠ Gemini is showing a LOGIN page — sign in before using AgentChat" -ForegroundColor Yellow
+    Write-Host "  ⚠ Provider is showing a LOGIN page — sign in before using AgentChat" -ForegroundColor Yellow
     Write-Host "    (re-run with -FirstLogin for guided login)"
 } else {
     Write-Host "  Ready for AgentChat!"

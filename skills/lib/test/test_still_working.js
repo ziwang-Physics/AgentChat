@@ -204,7 +204,7 @@ await0(async () => {
     const kimi = require(AGENTCHAT_ROOT + '/skills/lib/providers/adapters/kimi');
     assert('kimi check is the shared detector',
         typeof kimi.stillGeneratingCheck === 'function');
-    assert('kimi hold cap = 180s', kimi.stillGeneratingMaxHoldMs === 180_000);
+    assert('kimi hold cap = 90s (上游 7658ab9 后实际值)', kimi.stillGeneratingMaxHoldMs === 90_000);
     const { page } = makePage([''], { domProbe: 'reject' });
     assert('kimi check catches field tail #1',
         await kimi.stillGeneratingCheck(page, { text: '…\n正在获取网页...' }) === true);
@@ -216,15 +216,11 @@ await0(async () => {
         assert(`${k}: shared check wired`, typeof a.stillGeneratingCheck === 'function'
             && Number.isFinite(a.stillGeneratingMaxHoldMs));
     }
-    const gemini = require(AGENTCHAT_ROOT + '/skills/lib/providers/adapters/gemini');
-    assert('gemini hold cap raised to 300s (Pro Extended preserved)',
-        gemini.stillGeneratingMaxHoldMs === 300_000);
-    const claude = require(AGENTCHAT_ROOT + '/skills/lib/providers/adapters/claude');
-    assert('claude editor order: specific first',
-        claude.editorSelectors[0] === '.ProseMirror'
-        && claude.editorSelectors[claude.editorSelectors.length - 1] === '[contenteditable="true"]');
-    const chatgpt = require(AGENTCHAT_ROOT + '/skills/lib/providers/adapters/chatgpt');
-    assert('chatgpt untouched (stop-button pipeline)', !chatgpt.stillGeneratingCheck);
+    for (const k of ['doubao', 'glm']) {
+        const a = require(AGENTCHAT_ROOT + `/skills/lib/providers/adapters/${k}`);
+        assert(`${k} (2026-08-10 新增): shared check wired`, typeof a.stillGeneratingCheck === 'function'
+            && Number.isFinite(a.stillGeneratingMaxHoldMs));
+    }
 
     // Source-level: the overlay login regex must NOT hard-block 退出登录/免登录
     const src = fs.readFileSync(

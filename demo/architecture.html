@@ -9,8 +9,8 @@
 <div class="section"><h2>四层架构</h2>
 <div class="layers">
 <div class="layer" style="background:#1a2332"><div class="lvl"><div class="num">L4</div>编排层</div><div><h4>FreeSubAgent / Web-SubAgent-Workflow / MCP Server</h4><p>薄编排器，零 Provider 代码。通过 subprocess / MCP Protocol 调用 WebExtended。</p><div style="margin-top:8px"><span class="tag green">并行编排</span><span class="tag orange">串行管道</span><span class="tag cyan">MCP Protocol</span><span class="tag pink">Python SDK</span></div></div></div>
-<div class="layer" style="background:#16202d"><div class="lvl"><div class="num">L3</div>Provider 层</div><div><h4>AgentChat-WebExtended · providerFactory.js · 8 Adapters</h4><p>多 Provider 降级链。策略模式 + 模板方法：10 步标准 Pipeline，8 个 Adapter 差异表达为配置。</p><div style="margin-top:8px"><span class="tag green">gemini</span><span class="tag">chatgpt</span><span class="tag">claude</span><span class="tag">qwen</span><span class="tag">kimi</span><span class="tag">minimax</span><span class="tag">mimo</span><span class="tag">deepseek</span></div></div></div>
-<div class="layer"><div class="lvl"><div class="num">L2</div>桥接层</div><div><h4>geminiModelSwitch.js · Locales Module · Provider Chain</h4><p>模型切换（Pro Extended / Flash / Standard）+ 多语言文本集中管理 + Provider 优先级定义。</p><div style="margin-top:8px"><span class="tag purple">4 languages</span><span class="tag orange">3-tier fallback</span><span class="tag">auto-detect</span></div></div></div>
+<div class="layer" style="background:#16202d"><div class="lvl"><div class="num">L3</div>Provider 层</div><div><h4>AgentChat-WebExtended · providerFactory.js · 7 Adapters</h4><p>多 Provider 降级链。策略模式 + 模板方法：10 步标准 Pipeline，8 个 Adapter 差异表达为配置。</p><div style="margin-top:8px"><span class="tag green">deepseek</span><span class="tag">qwen</span><span class="tag">glm</span><span class="tag">qwen</span><span class="tag">kimi</span><span class="tag">minimax</span><span class="tag">mimo</span><span class="tag">deepseek</span></div></div></div>
+<div class="layer"><div class="lvl"><div class="num">L2</div>桥接层</div><div><h4>providerFactory.js · Locales Module · Provider Chain</h4><p>模型切换（Pro Extended / Flash / Standard）+ 多语言文本集中管理 + Provider 优先级定义。</p><div style="margin-top:8px"><span class="tag purple">4 languages</span><span class="tag orange">3-tier fallback</span><span class="tag">auto-detect</span></div></div></div>
 <div class="layer"><div class="lvl"><div class="num">L1</div>传输层</div><div><h4>Chrome DevTools Protocol + Playwright</h4><p>CDP 端口 9222。Playwright <code>connect_over_cdp()</code> 连接已有 Chrome 实例（登录态持久化）。</p><div style="margin-top:8px"><span class="tag">CDP port 9222</span><span class="tag">playwright-core</span><span class="tag">--user-data-dir</span><span class="tag red">GFW bypass flags</span></div></div></div>
 </div></div>
 <div class="section"><h2>数据流全景</h2><pre>┌──────────────────────────────────────────────────────────┐
@@ -23,24 +23,24 @@
 │  AgentChat-WebExtended (skills/AgentChat-WebExtended/)   │
 │    │                                                     │
 │    ├── providerFactory.js  (10 步标准 Pipeline)           │
-│    ├── geminiModelSwitch.js (三语言自选 + Pro/Flash 降级) │
-│    ├── 8 adapters (gemini/chatgpt/claude/qwen/...)       │
+│    ├── providerFactory.js (三语言自选 + Pro/Flash 降级) │
+│    ├── 8 adapters (deepseek/qwen/glm/qwen/...)       │
 │    └── cdp.js (Chrome 连接 + 重试)                       │
 │    │                                                     │
 │    │ playwright-core → connectOverCDP(9222)              │
 │    ▼                                                     │
 │  Chrome (--user-data-dir + China GFW flags)              │
 │    │                                                     │
-│    ├── Tab 1: Gemini Pro Extended                        │
-│    ├── Tab 2: ChatGPT                                    │
-│    └── Tab N: Qwen / Claude / ...                        │
+│    ├── Tab 1: DeepSeek                        │
+│    ├── Tab 2: Qwen                                    │
+│    └── Tab N: Qwen / GLM / ...                        │
 └──────────────────────────────────────────────────────────┘</pre></div>
 <div class="section"><h2>技术栈一览</h2>
 <div class="table-wrap"><table><thead><tr><th>层级</th><th>技术</th><th>作用</th></tr></thead>
 <tbody><tr><td>CLI / 编排</td><td>Node.js · child_process · MCP SDK</td><td>子进程调度、协议通信</td></tr>
 <tr><td>Python SDK</td><td>Python asyncio · subprocess · Pydantic</td><td>异步会话管理、结构化输出</td></tr>
 <tr><td>浏览器自动化</td><td>Playwright (Node.js) · Chrome CDP</td><td>DOM 操作、模型切换、响应提取</td></tr>
-<tr><td>多语言</td><td>纯 JS 配置模块 (locales/gemini.js)</td><td>4 语言 profile + fuzzy fallback</td></tr>
+<tr><td>多语言</td><td>纯 JS 配置模块 (locales/deepseek.js)</td><td>4 语言 profile + fuzzy fallback</td></tr>
 <tr><td>前端演示</td><td>HTML/CSS/JS · Node.js http server</td><td>无框架可视化演示</td></tr>
 </tbody></table></div></div>
 <div class="section"><h2>贡献时间线</h2>
