@@ -1,10 +1,10 @@
 /**
  * Doubao (豆包) provider adapter config — 2026-08-10 国内化新增.
  *
- * 豆包网页版 (www.doubao.com/chat/) 为 React SPA，无真实 DOM 选择器依据，
- * 采用通用模式：编辑器优先 contenteditable/textarea + ARIA tier/启发式兜底，
- * 发送走 Enter，响应取 markdown 容器族。首次实跑后按
- * data/selector_drift.jsonl 诊断精修（工厂自愈机制见 providerFactory.js）。
+ * 豆包网页版 (www.doubao.com/chat/) 为 React SPA。
+ * 2026-08-10 实测精修: AI 回复渲染于 `.md-box-root`（markdown 容器，中央区），
+ * 侧边栏历史列表含大量 avatar/UI 图——图片扫描必须限定在 md-box-root 内。
+ * 发送走 Enter（按钮为 Tailwind 通用类，不可靠）。
  */
 
 const { COMMON_CN_QUOTA_PATTERNS, COMMON_DISMISS_PATTERNS } = require('../../providerFactory');
@@ -13,8 +13,9 @@ const { makeStillWorkingCheck } = require('../../stillWorking');
 // Hoisted so the still-working probe judges the same container family the
 // factory polls (see kimi.js v11 note).
 const RESPONSE_SELECTORS = [
-    '[class*="answer"]',
+    '[class*="md-box-root"]',     // 实测: AI markdown 回复容器（2026-08-10 实测确认）
     '[class*="markdown"]',
+    '[class*="answer"]',
     '[class*="message"]',
     '[class*="chat-item"]',
     '[data-testid*="assistant"]',
@@ -50,7 +51,10 @@ module.exports = {
     responseSelectors: RESPONSE_SELECTORS,
     responseSelectorTimeout: 60_000,
     stabilityWindow: 10_000,
-    minResponseLength: 5,
+    // 实测: 豆包对"只回复X字"指令会如实返回极短回复（如 2 字符），默认 5 会误判空
+    minResponseLength: 2,
+    // 实测: 侧边栏历史列表含大量 avatar/UI 图 — 图片扫描限定在回复容器内
+    imageScopeSelector: '[class*="md-box-root"]',
     stillGeneratingCheck: makeStillWorkingCheck({ responseSelectors: RESPONSE_SELECTORS }),
     stillGeneratingMaxHoldMs: 120_000,
 };

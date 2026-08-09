@@ -1,5 +1,12 @@
 # AgentChat-OneWeb Changelog
 
+## 2026-08-10 (国内化) — 纯国内 7 家链 + 豆包/GLM 适配器实测精修
+- **[breaking] 链重组**: Gemini/ChatGPT/Claude 移除（`lib/providers/chain.js`），新链 `DeepSeek → Doubao → GLM → Qwen → Kimi → MiniMax → MiMo`；适配器删除 gemini/chatgpt/claude，新增 `doubao.js`/`glm.js`；`--locale` 分支与 `lib/locales/gemini.js`、`geminiModelSwitch.js` 删除；`PROVIDER_ASSET_HOSTS` 去 Google/OpenAI CDN
+- **[P1] 图片扫描 scope bug 修复 (`lib/providerFactory.js` collectResponseImages)**: 原实现无论 `imageScopeSelector` 如何设置都从 `document` 全页扫 `<img>`（与 schema 注释 "Default: the response element itself" 不符）——豆包侧边栏 63 个 avatar 缩略图被当生成图抓取（一次调用 images_ok:14）。现 roots 以 scope（responseEl 或 imageScopeSelector 祖先）为根，shadowRoot 发现仍从 scope 子树收集
+- **[P1] 豆包短回复误判空**: 实测豆包对"只回复 X 字"如实返回 2 字符 → `minResponseLength` 5 判空失败 (exit 9)。doubao/glm 适配器降至 2
+- **[实测] 豆包适配器精修**: 实测确认 AI 回复渲染于 `.md-box-root`（markdown 容器），`imageScopeSelector: '[class*="md-box-root"]'` 限定图片扫描；`sendFallback: 'Enter'`（Tailwind 通用类按钮不可靠）
+- **[实测] GLM 适配器**: `chatglm.cn/main/all` 通用选择器 + Enter 发送，真实调用 20s 完成（smoke 的 20s navTimeout 偏紧，实际默认 45s 无碍）
+
 ## 2026-07-19 (v18) — Windows CDP 端口不可达四联修
 - **[P0] Job Object 陪葬 (`lib/cdp.js` + `scripts/start-chrome.ps1`)**: agent 宿主的工具调用跑在 kill-on-close Job 里，Node `detached: true` 不设置 `CREATE_BREAKAWAY_FROM_JOB`，autostart/Start-Process 出来的 Chrome 在 skill 进程退出瞬间被连带杀掉——"回答完问题，下一轮 ERR_NO_CDP" 的直接成因。现: 内嵌启动器与 ps1 均经 WMI `Win32_Process.Create` 创建进程（父进程 WmiPrvSE.exe，位于任何调用方 Job 之外），同时拿到真实 PID 写入 PID 文件保持 `-Stop` 互操作；WMI 不可用时降级为 plain spawn 并显式告警
 - **[P0] Windows 单例吸收 (`launchChromeDirect`)**: Windows Chrome 单例是命名 mutex/消息窗口而非 `Singleton*` 文件——v16 的删文件解锁在 Windows 上是 no-op，同 profile 已有存活实例时新 chrome.exe 被吸收秒退、端口永不绑定、傻等 45s 后报泛化失败。现: 启动前经 CIM 扫描持有 `--user-data-dir=<profile>` 的 chrome/msedge/chromium 进程；命中且为 PID 文件记录的受管实例 → `taskkill /T /F` 回收后重启，他人实例 → 快速 loud-fail 并给出 PID 与三条处置指引（POLICY 不变: 绝不动用户自己的 Chrome）。`Singleton*` 文件清理收窄至 POSIX

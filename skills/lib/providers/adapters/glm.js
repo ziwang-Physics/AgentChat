@@ -52,7 +52,8 @@ module.exports = {
     responseSelectors: RESPONSE_SELECTORS,
     responseSelectorTimeout: 60_000,
     stabilityWindow: 10_000,
-    minResponseLength: 5,
+    // 与豆包同理: 短回复指令场景（GLM 如实返回 2 字）
+    minResponseLength: 2,
     stillGeneratingCheck: makeStillWorkingCheck({ responseSelectors: RESPONSE_SELECTORS }),
     stillGeneratingMaxHoldMs: 120_000,
 };
