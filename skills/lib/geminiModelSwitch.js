@@ -593,7 +593,10 @@ function inferLocaleFromAria(aria) {
     if (!aria || aria === 'UNKNOWN') return null;
     if (/開啟|挑選|延長|延伸/.test(aria)) return 'zh_TW';
     if (/打开|选择|扩展/.test(aria)) return 'zh_CN';
-    if (/Model selector|Extended/i.test(aria)) return 'en';
+    // 2026-08: 新英文写法 "Open mode picker, currently Flash" —— 旧的
+    // "Model selector" / "Extended" 都不出现，纠错会失效并把英文 UI 留在
+    // 错误的 locale 上（见 locales/gemini.js 同期注释）。
+    if (/Model selector|Extended|mode picker|currently/i.test(aria)) return 'en';
     if (/モデル|拡張/.test(aria)) return 'ja';
     return null;
 }
@@ -728,7 +731,16 @@ async function ensureProExtended(page, maxRetries = MAX_RETRIES, onLog) {
             const thinkRe = new RegExp(thinkSrc, thinkFlags);
             for (let i = 0; i < items.length; i++) {
                 const t = items[i].innerText || '';
-                if (extRe.test(t) && !thinkRe.test(t) && items[i].offsetParent !== null) return i;
+                if (!extRe.test(t) || items[i].offsetParent === null) continue;
+                // 2026-08 FIX: 原判据是 extRe && !thinkRe。`thinking` 排除项本意是
+                // 区分旧嵌套菜单里的父项「思考等级」，但在英文 profile 下
+                // extended='Extended thinking'、thinking='Thinking'，asRe() 生成的是
+                // 不区分大小写的正则 —— 'Extended thinking' 必然命中 /Thinking/i，
+                // 于是扁平菜单里的正确项被自己的排除条件永久过滤掉，英文界面
+                // 100% 走不到 Extended。已经匹配 extRe 的项不可能是父项，
+                // 只在「像 thinking 但不像 extended」时才需要排除。
+                if (thinkRe.test(t) && !/extend|扩展|延伸|延長|拡張/i.test(t)) continue;
+                return i;
             }
             return -1;
         }, { itemSel: L.STATIC.menuItem, extSrc: _extRe.source, extFlags: _extRe.flags, thinkSrc: _thinkRe.source, thinkFlags: _thinkRe.flags });

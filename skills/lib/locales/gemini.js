@@ -146,8 +146,15 @@ async function detectLocale(page) {
         // 不一致（如浏览器设置为 zh-CN 但 Gemini 页面是 zh-TW），此时以按钮文本为准
         // ——否则所有菜单项匹配（thinking/extended/proDesc）都会因 locale 错配而失败。
         const btnText = await page.evaluate(() => {
+            // 2026-08: Google 把英文 aria-label 从 "Model selector" 改成
+            // "Open mode picker, currently Flash"（小写 mode）。CSS 属性选择器
+            // 默认区分大小写，旧的 *="Model" 匹配不到 → 检测静默失败 →
+            // 回退到 navigator.language → 中文浏览器 + 英文 UI 被判成 zh_CN →
+            // 后续 proDesc('高等数学') 匹配不上 "Advanced math & code" →
+            // "Failed to switch to Pro model"。加 i 标志并补上 mode-picker 写法。
             const el = document.querySelector(
-                'button[aria-label*="模式"], button[aria-label*="Model"], button[aria-label*="モデル"]'
+                'button[aria-label*="模式"], button[aria-label*="model" i], '
+                + 'button[aria-label*="mode picker" i], button[aria-label*="モデル"]'
             );
             if (!el) return '';
             return (el.getAttribute('aria-label') || '') + ' ' + (el.textContent || '');
@@ -158,7 +165,7 @@ async function detectLocale(page) {
             // aria-label 最可靠：'開啟模式挑選器' = zh_TW, '打开模式选择器' = zh_CN
             if (/開啟|挑選|延長/.test(btnText)) return 'zh_TW';
             if (/打开|选择|扩展/.test(btnText)) return 'zh_CN';
-            if (/Model selector|Extended/.test(btnText)) return 'en';
+            if (/Model selector|Extended|mode picker|currently/i.test(btnText)) return 'en';
             if (/モデル|拡張/.test(btnText)) return 'ja';
             return null;
         })();
