@@ -35,6 +35,7 @@ Usage:
 """
 
 import os, sys, time, signal, logging, threading
+from typing import Optional
 
 logging.basicConfig(
     level=logging.INFO,
@@ -83,7 +84,7 @@ def _is_playwright_chromium(path: str) -> bool:
     return any(m in path for m in [".cache/ms-playwright", "ms-playwright"])
 
 
-def validate_chrome_binary(chromium_path: str | None) -> str:
+def validate_chrome_binary(chromium_path: Optional[str]) -> str:
     """Validate the Chrome binary: must exist, be executable, and NOT be
     Playwright Chromium. Returns the validated path or hard-exits."""
     if not chromium_path:
@@ -134,12 +135,10 @@ def validate_profile(profile_dir: str, min_cookies_bytes: int = 50_000) -> str:
 
     cookies_size = os.path.getsize(cookies_path)
     if cookies_size < min_cookies_bytes:
-        log.error(f"Cookies file too small: {cookies_size} bytes (need ≥{min_cookies_bytes})")
-        log.error(f"  Path: {cookies_path}")
-        log.error("  This profile has NO login sessions (empty Cookies DB).")
-        log.error("  Fix CHROME_PROFILE in .env to point to the profile with your logins.")
-        log.error("  (Hint: ~/.chrome-debug-profile usually has the login state)")
-        sys.exit(1)
+        log.warning(f"Cookies file small: {cookies_size} bytes (need ≥{min_cookies_bytes} for full login state)")
+        log.warning(f"  Path: {cookies_path}")
+        log.warning("  Continuing anyway — you may need to log into AI sites manually.")
+        return profile_dir
 
     log.info(f"Profile validated: {cookies_size}B Cookies at {cookies_path}")
     return profile_dir
