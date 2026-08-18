@@ -1,0 +1,20 @@
+{
+  "prompt": "A 7-second vertical fashion product film. An adult model wears the exact floral wrap knit top from the reference image. Preserve the overlapping wrap front, left-side waist tie, cropped fitted waist, fuzzy knit texture, floral pattern placement, sleeve shape, cuffs, and colors. Begin with a tactile macro of the knit, transition through the waist tie being pulled and secured, then reveal the complete outfit in warm natural window light. Controlled handheld camera, natural confident movement, realistic garment physics, no product redesign, no random text or logos.",
+  "mediaType": "video",
+  "providers": [
+    "jimeng",
+    "xiaoyunque",
+    "doubao"
+  ],
+  "referenceImages": [
+    "C:/replace-with-absolute-path/product.png"
+  ],
+  "aspectRatio": "9:16",
+  "durationSeconds": 7,
+  "count": 1,
+  "outputDir": "C:/replace-with-absolute-path/outputs/media",
+  "metadata": {
+    "sourceSkill": "fashion-video-creative-director",
+    "mode": "AUTO"
+  }
+}
