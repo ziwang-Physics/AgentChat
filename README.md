@@ -1,245 +1,203 @@
-# AgentChat — Free WebSubAgent Workflow
+# AgentChat — گردش‌کار Free WebSubAgent
 
-> Claude Code 接低价/免费API做决策分工，
-> Gemini/ChatGPT/Claude 等免费网页 AI 执行子任务。
+> مجموعه‌ای از مهارت‌های Claude Code برای تقسیم وظایف میان هوش مصنوعی‌ها و استفاده از AIهای رایگان وب از طریق مرورگر Chrome محلی.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
-[![Providers](https://img.shields.io/badge/Providers-8-orange.svg)](#-为什么用这个)
-[![Zero API Cost](https://img.shields.io/badge/Cost-$0-success.svg)](#-为什么用这个)
-[![Claude Code Ready](https://img.shields.io/badge/Claude_Code-Skill_Ready-8A2BE2.svg)](#-claude-code-integration)
+[![Providers](https://img.shields.io/badge/Providers-8-orange.svg)](#-چرا-از-agentchat-استفاده-کنیم)
+[![Zero API Cost](https://img.shields.io/badge/Cost-$0-success.svg)](#-چرا-از-agentchat-استفاده-کنیم)
+[![Claude Code Ready](https://img.shields.io/badge/Claude_Code-Skill_Ready-8A2BE2.svg)](#-یکپارچهسازی-با-claude-code)
 
+## Free WebSubAgent چیست؟
 
-## 什么是 Free WebSubAgent ？
+- یک مجموعه مهارت بدون هزینه برای Claude Code که با کنترل Chrome محلی، به ۸ هوش مصنوعی رایگان وب متصل می‌شود.
+- از زنجیره جایگزینی ترتیبی و ارکستراسیون موازی با تقسیم نقش و داوری شواهد پشتیبانی می‌کند.
+- پس از تمام شدن سهمیه رایگان یک مدل، به‌صورت خودکار به مدل رایگان بعدی سوئیچ می‌کند.
 
-- 🎭一套零成本的 Claude Code 技能套件，通过接管本地 Chrome 浏览器桥接 8 个免费网页 AI
-- 🛡支持串行降级（单模型自动切换）与并行编排（角色分工+证据仲裁)
-- 💸免费额度用尽后自动切换到下一个免费模型
+## چرا از AgentChat استفاده کنیم؟
 
-## 📂 Skills 概览
-
-| Skill | 类型 | 职责 | 何时用 |
-|-------|------|------|--------|
-| **AgentChat-OneWeb** | 串行降级链 | 1个ai，7个替补。只使用一个你最喜欢的ai，免费额度耗尽自动切换，8-Provider 自动 fallback |代码 + 多模态 |
-| **AgentChat-IndependentTasks** | 并行编排 | 一次性触发8个ai。默认触发4个，可根据任务数量指定，如16个独立任务让8个Web 端分别执行两个任务 |大量高独立性任务|
-| **AgentChat-WebSubAgent** | 串行管道 | 核心Skill（架构图如下），6 步 AI 管道：你的Agent规划→Kimi 搜索→Gemini 推理→Agent 合成→ChatGPT或Claude 审查 | 深度推理 + 质量审查 |
+| Skill | نوع | وظیفه | چه زمانی استفاده کنیم؟ |
+|---|---|---|---|
+| **AgentChat-OneWeb** | زنجیره جایگزینی ترتیبی | یک AI اصلی و ۷ جایگزین؛ با تمام شدن سهمیه، به‌صورت خودکار بین ۸ Provider جابه‌جا می‌شود. | کدنویسی و کارهای چندرسانه‌ای |
+| **AgentChat-IndependentTasks** | ارکستراسیون موازی | اجرای هم‌زمان چند AI برای وظایف مستقل و تقسیم‌شدنی. | تعداد زیادی وظیفه مستقل |
+| **AgentChat-WebSubAgent** | پایپ‌لاین ترتیبی | پایپ‌لاین ۶ مرحله‌ای: برنامه‌ریزی → جست‌وجو → استدلال → ترکیب → بررسی → اصلاح. | استدلال عمیق و کنترل کیفیت |
 
 ---
 
-## 🏗️ Architecture
+## معماری
 
 ![AgentChat Architecture](1.png)
 
-## 🚀 Quick Start（5 分钟）
+## شروع سریع — ۵ دقیقه
 
-### 1. 安装
+### ۱. نصب
 
 ```bash
 git clone https://github.com/ziwang-Physics/AgentChat.git && cd AgentChat
 
-# Python 依赖（Chrome daemon — 使用系统 Chrome，不需要 Playwright Chromium）
+# وابستگی‌های Python — daemon از Chrome نصب‌شده سیستم استفاده می‌کند
 pip3 install playwright websocket-client
 
-# Node.js 依赖（AI bridge — 根目录统一管理 + OneWeb skill）
+# وابستگی‌های Node.js
 npm install
 (cd skills/AgentChat-OneWeb && npm install)
 ```
 
-### 2. 配置 & 启动
+### ۲. پیکربندی و اجرا
 
 ```bash
-cp .env.example .env           # 按需修改代理地址
-bash scripts/setup.sh          # 环境检查
-bash scripts/start-chrome-debug.sh  # 启动 Chrome daemon
+cp .env.example .env           # در صورت نیاز آدرس Proxy را تغییر دهید
+bash scripts/setup.sh          # بررسی محیط
+bash scripts/start-chrome-debug.sh  # اجرای Chrome daemon
 ```
 
-### 3. 使用场景
+### ۳. نمونه استفاده
 
 ```bash
-# 单 prompt 高可用 — 自动 fallback
-/AgentChat-OneWeb 帮我写Python脚本/根据文字生成视频
+# یک prompt با دسترس‌پذیری بالا و fallback خودکار
+/AgentChat-OneWeb برای من یک اسکریپت Python بنویس
 
-# 8 路并发 — 大量高独立性任务
-/AgentChat-IndependentTasks 高独立性的多个任务：根据我的任务调用8个ai生成8个脚本/8个视频
+# اجرای موازی وظایف مستقل
+/AgentChat-IndependentTasks این وظایف مستقل را میان AIها تقسیم کن
 
-# 串行深度管道 — 规划→搜索→推理→合成→审查→修复
-/AgentChat-WebSubAgent 帮我设计一个高并发消息队列的架构方案
+# پایپ‌لاین عمیق ترتیبی
+/AgentChat-WebSubAgent برای من معماری یک صف پیام با همزمانی بالا طراحی کن
 ```
 
-## 🧠 Claude Code Integration
+## یکپارچه‌سازی با Claude Code
 
-本项目是 Claude Code 原生 skill 集合。每个 skill 目录包含：
+این پروژه یک مجموعه Skill بومی برای Claude Code است. هر Skill شامل این فایل‌هاست:
 
-| 文件 | 面向 | 职责 |
-|------|------|------|
-| `SKILL.md` | 🤖 **AI（Claude Code）** | 操作指南、触发条件、执行步骤 |
-| `index.js` | ⚙️ **Runtime** | Playwright/CDP 实现 |
-| `README.md`（本文件） | 👤 **人类开发者** | 项目介绍、安装、使用 |
+| فایل | مخاطب | وظیفه |
+|---|---|---|
+| `SKILL.md` | Claude Code | دستورالعمل، شرایط فعال‌سازی و مراحل اجرا |
+| `index.js` | Runtime | پیاده‌سازی Playwright/CDP |
+| `README.md` | توسعه‌دهنده | معرفی، نصب و نحوه استفاده |
 
-> 通过 symlink 将 `skills/` 目录链接到 `~/.claude/skills/`，Claude Code 即可自主调度这些免费资源。
+> با ایجاد symlink از `skills/` به `~/.claude/skills/`، Claude Code می‌تواند این منابع رایگان را به‌صورت خودکار فراخوانی کند.
 
----
-
-### 环境诊断
+## تشخیص محیط
 
 ```bash
-node skills/AgentChat-OneWeb/index.js --smoke     # 遍历 8 个 provider
-node skills/AgentChat-OneWeb/index.js --doctor    # CDP 端口连通性检查
-node skills/AgentChat-IndependentTasks/index.js --smoke    # 并行编排环境检查
-node skills/AgentChat-WebSubAgent/index.js --doctor    # 串行管道环境检查
+node skills/AgentChat-OneWeb/index.js --smoke
+node skills/AgentChat-OneWeb/index.js --doctor
+node skills/AgentChat-IndependentTasks/index.js --smoke
+node skills/AgentChat-WebSubAgent/index.js --doctor
 ```
 
----
+## ساختار پروژه
 
-## 📁 目录结构
-
-```
+```text
 AgentChat/
-├── .env.example                         # 配置模板
+├── .env.example                         # قالب تنظیمات
 ├── .gitignore
 ├── LICENSE                              # MIT
-├── package.json                         # 根依赖（playwright-core，共享 lib 使用）
-├── README.md                            # 👤 人类文档
-├── 1.png                                # 架构图
+├── package.json                         # وابستگی‌های ریشه
+├── README.md                            # مستندات اصلی
+├── 1.png                                # نمودار معماری
 ├── scripts/
-│   ├── setup.sh / setup.bat             # 环境一键检查
-│   ├── start-chrome-debug.sh            # Chrome CDP daemon（idempotent, Linux）
-│   ├── start-chrome-debug.py            # Python daemon v3 — 事件驱动 Chrome 生命周期管理
-│   ├── start-chrome.ps1                 # Windows PowerShell 启动
-│   └── connect-gemini.sh / .ps1         # 一键连接 Gemini
+│   ├── setup.sh / setup.bat             # بررسی یک‌مرحله‌ای محیط
+│   ├── start-chrome-debug.sh            # Chrome CDP daemon برای Linux
+│   ├── start-chrome-debug.py            # مدیریت چرخه عمر Chrome
+│   ├── start-chrome.ps1                 # اجرای Chrome در Windows PowerShell
+│   └── connect-gemini.sh / .ps1         # اتصال سریع به Gemini
 └── skills/
-    ├── lib/                               # 🔗 共享库（零代码重复的核心）
-    │   ├── execute.js                     #   统一子进程执行器（callProvider / runChain）
-    │   ├── providerFactory.js             #   10-step config-driven pipeline
-    │   ├── errors.js                      #   ProviderError + 管道阶段追踪
-    │   ├── cdp.js                         #   CDP 连接 + 重试 + doctor
-    │   ├── terminal.js                    #   终端 spinner + 计时器
-    │   ├── telemetry.js                   #   遥测日志轮转
-    │   ├── locks.js                       #   文件锁（mkdir 原子性，provider 互斥）
-    │   ├── geminiModelSwitch.js           #   Gemini Pro Extended / Flash 模型切换
-    │   ├── prompts.js                     #   DAG 拆解 prompt 模板
+    ├── lib/                             # کتابخانه مشترک
+    │   ├── execute.js                   # اجرای یکنواخت subprocessها
+    │   ├── providerFactory.js           # پایپ‌لاین مبتنی بر پیکربندی
+    │   ├── errors.js                    # ProviderError و رهگیری مراحل
+    │   ├── cdp.js                       # اتصال CDP و retry و doctor
+    │   ├── terminal.js                  # spinner و زمان‌سنج ترمینال
+    │   ├── telemetry.js                 # چرخش لاگ‌های telemetry
+    │   ├── locks.js                     # قفل فایل و جلوگیری از تداخل Providerها
+    │   ├── geminiModelSwitch.js         # تعویض مدل Gemini
+    │   ├── prompts.js                   # قالب prompt برای DAG
     │   └── providers/
-    │       ├── chain.js                   #   Provider 优先级链（单一真相源）
-    │       └── adapters/                  #   8 个 provider config（"单源真相"）
-    │           ├── gemini.js              #     Pro Extended + bursty 检测 + safety 过滤
-    │           ├── chatgpt.js             #     3-tier 输入 + React send-btn 验证
-    │           ├── claude.js              #     ProseMirror + Thinking 占位符过滤
-    │           ├── qwen.js                #     React SPA + stop-btn detached
-    │           ├── kimi.js                #     新建会话 + 自适应稳定性窗口
-    │           ├── minimax.js             #     TipTap 异步挂载
-    │           ├── mimo.js                #     DOM 遍历 send button
-    │           └── deepseek.js            #     标准管线
-    ├── AgentChat-OneWeb/           # 8-Provider Fallback Chain
-    │   ├── SKILL.md                     # 🤖 AI 操作指南
-    │   ├── index.js                     # 编排入口（~530 行，零 provider 代码）
-    │   ├── CHANGELOG.md                 # 变更日志
+    │       ├── chain.js                 # زنجیره اولویت Providerها
+    │       └── adapters/                # تنظیمات ۸ Provider
+    ├── AgentChat-OneWeb/                # زنجیره Fallback هشت‌گانه
+    │   ├── SKILL.md
+    │   ├── index.js
+    │   ├── CHANGELOG.md
     │   ├── package.json
-    │   └── data/                        # 遥测数据
-    ├── AgentChat-IndependentTasks/          # 并行编排器（DAG + 波次调度 + 证据仲裁）
-    │   ├── SKILL.md                     # 🤖 AI 操作指南 + 角色分工
-    │   └── index.js                     # 薄编排器（~710 行，零 provider 代码）
-    └── AgentChat-WebSubAgent/           # 串行 6 步管道
-        ├── SKILL.md                     # 🤖 AI 操作指南
-        └── index.js                     # 管道 helper（~160 行，零 provider 代码）
+    │   └── data/
+    ├── AgentChat-IndependentTasks/     # ارکستراسیون موازی
+    │   ├── SKILL.md
+    │   └── index.js
+    └── AgentChat-WebSubAgent/           # پایپ‌لاین ۶ مرحله‌ای
+        ├── SKILL.md
+        └── index.js
 ```
 
----
+## نیازمندی‌های محیط
 
-<details>
-<summary>🔧 环境要求 & 配置详解</summary>
+| وابستگی | حداقل/روش نصب |
+|---|---|
+| **Node.js** | 18+ |
+| **Python** | 3.8+ |
+| **Playwright Python** | `pip3 install playwright` |
+| **websocket-client** | `pip3 install websocket-client` |
+| **playwright-core** | با `npm install` در ریشه پروژه |
 
-### 依赖
+### متغیرهای `.env`
 
-| 依赖 | 安装 |
-|------|------|
-| **Node.js 18+** | [nodejs.org](https://nodejs.org/) |
-| Python 3.8+ | 系统自带 |
-| Playwright (Python) | `pip3 install playwright`（daemon 用其 API 启动系统 Chrome） |
-| websocket-client | `pip3 install websocket-client` |
-| playwright-core (npm) | 根目录 `npm install`（共享 lib 依赖） |
+| متغیر | مقدار پیش‌فرض | توضیح |
+|---|---|---|
+| `CDP_PORT` | `9222` | پورت Chrome DevTools Protocol |
+| `PROXY_SERVER` | `http://127.0.0.1:7897` | آدرس Proxy |
+| `CHROME_PROFILE` | `~/.chrome-debug-profile` | پروفایل پایدار Chrome |
+| `CHROMIUM_PATH` | بدون مقدار | مسیر اجرایی Chrome سیستم |
+| `LOG_FILE` | `/tmp/chrome-debug.log` | فایل لاگ تشخیصی |
 
-### 配置变量（`.env`）
+## ورود به سرویس‌های AI
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `CDP_PORT` | `9222` | Chrome DevTools Protocol 端口 |
-| `PROXY_SERVER` | `http://127.0.0.1:7897` | 代理地址（中国大陆**必须**） |
-| `CHROME_PROFILE` | `~/.chrome-debug-profile` | Chrome 持久化 Profile |
-| `CHROMIUM_PATH` | 无（必须手动设置） | 系统 Chrome 可执行文件路径 |
-| `LOG_FILE` | `/tmp/chrome-debug.log` | 诊断日志 |
+پیش از اولین استفاده، در Chrome به سرویس‌های زیر وارد شوید. وضعیت ورود در `CHROME_PROFILE` ذخیره می‌شود و معمولاً فقط یک‌بار لازم است:
 
-### 🔐 AI 网页登录
+| AI | آدرس ورود |
+|---|---|
+| Gemini | `gemini.google.com/u/0/app` |
+| ChatGPT | `chatgpt.com` |
+| Claude | `claude.ai` |
+| Qwen | `www.qianwen.com` |
+| Kimi | `kimi.moonshot.cn` |
+| MiniMax | `agent.minimaxi.com` |
+| MiMo | `aistudio.xiaomimimo.com` |
+| DeepSeek | `chat.deepseek.com` |
 
-首次使用前，在 Chrome 中手动登录以下 AI 网页（登录态保存在 `CHROME_PROFILE`，只需一次）：
+## شبکه و Proxy
 
-| AI | 登录地址 | 账号类型 |
-|----|---------|---------|
-| Gemini | gemini.google.com/u/0/app | Google 账号（免登录仅 Flash 模型） |
-| ChatGPT | chatgpt.com | OpenAI 账号 |
-| Claude | claude.ai | Anthropic 账号 |
-| Qwen | www.qianwen.com | 阿里云/淘宝 |
-| Kimi | kimi.moonshot.cn | 微信/手机号 |
-| MiniMax | agent.minimaxi.com | 手机号 |
-| MiMo | aistudio.xiaomimimo.com | 小米账号 |
-| DeepSeek | chat.deepseek.com | 微信/手机号 |
+در محیط‌هایی که دسترسی مستقیم به سرویس‌های خارجی محدود است، مقدار `PROXY_SERVER` را با یک HTTP یا SOCKS5 Proxy معتبر تنظیم کنید.
 
-也可以将账号密码写入环境变量交给 Agent 自动登录（`.env.example`提供示例）。
-</details>
+از قرار دادن رمز عبور، API key یا Secret واقعی در Repository خودداری کنید. فایل `.env` باید خصوصی بماند.
 
-<details>
-<summary>🇨🇳 中国网络环境特别说明</summary>
+## عیب‌یابی
 
-GFW 会阻断 Chrome 启动时向 Google 云端发起的 SSL 请求，导致 Chrome 进入 **fail-safe 模式**（Gemini tab 显示 `about:blank`）。
+| مشکل | علت احتمالی | راه‌حل |
+|---|---|---|
+| Gemini روی `about:blank` می‌ماند | مشکل Chrome یا شبکه | Chrome daemon را دوباره راه‌اندازی و Proxy را بررسی کنید |
+| `ERR_BLOCKED_BY_CLIENT` | Safe Browsing یا تنظیمات Chrome | flags و تنظیمات Chrome را بررسی کنید |
+| خطای SSL `net_error -100` | Proxy یا TLS | HTTP/SOCKS5 Proxy را بررسی کنید |
+| `MODULE_NOT_FOUND: playwright-core` | وابستگی Node.js نصب نشده | `npm install` در ریشه پروژه |
 
-**必须做的**：
-- `.env` 中 `PROXY_SERVER` 配置正确的 HTTP/SOCKS5 代理
-- **严禁使用 VLESS Reality** — TLS spoofing 与 Chrome BoringSSL 冲突
-
-**如果仍然 `about:blank`**：
-```bash
-pkill -9 chrome && bash scripts/start-chrome-debug.sh
-```
-
-详见 `skills/AgentChat-OneWeb/SKILL.md` → 各 Provider 实现说明。
-</details>
-
-<details>
-<summary>🛠️ 故障排查</summary>
-
-| 症状 | 原因 | 修复 |
-|------|------|------|
-| Gemini tab `about:blank` | Chrome 3-layer fail-safe | `pkill -9 chrome && bash scripts/start-chrome-debug.sh` |
-| `ERR_BLOCKED_BY_CLIENT` | Safe Browsing | 检查 flags 含 `--disable-features=OptimizationHints` |
-| SSL `net_error -100` | GFW RST 或 Reality TLS 冲突 | 用 HTTP/SOCKS5 代理，不用 VLESS Reality |
-| `MODULE_NOT_FOUND: playwright-core` | npm 依赖未安装 | 根目录 `npm install` |
-
-### 手动管理
+### مدیریت دستی
 
 ```bash
-# 查看 daemon 状态
-curl -s http://127.0.0.1:9222/json/list | python3 -c "
-import json,sys
-[print(f'{p[\"title\"]} | {p[\"url\"]}') for p in json.load(sys.stdin) if p.get('type')=='page']
-"
+# وضعیت daemon
+curl -s http://127.0.0.1:9222/json/list
 
-# 查看日志
+# مشاهده لاگ
 cat /tmp/chrome-debug.log
 
-# 完全重启
+# راه‌اندازی مجدد کامل
 pkill -9 -f "start-chrome-debug.py" && pkill -9 chrome
 sleep 2 && bash scripts/start-chrome-debug.sh
 ```
-</details>
 
----
+## مشارکت در پروژه
 
-## 🤝 Contributing
+برای گزارش مشکل یا پیشنهاد تغییر، Issue یا Pull Request ایجاد کنید. برای افزودن Provider جدید، تنظیمات adapter را در `lib/providers/adapters/` اضافه کنید و اصل «بدون کد اختصاصی Provider در لایه ارکستراسیون» را حفظ کنید.
 
-欢迎提 Issue 和 PR。新增 provider 请在 `lib/providers/adapters/` 中添加 adapter config（参考现有 8 个），编排层改动请保持 `IndependentTasks` 的零 provider 代码原则。
-
----
-
-## 📜 License
+## مجوز
 
 MIT © [ziwang-Physics](https://github.com/ziwang-Physics)
