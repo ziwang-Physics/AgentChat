@@ -92,6 +92,17 @@ const AUTOSTART_POLL_MS = 1_000;
 // stop a Chrome the embedded launcher started (and vice versa).
 const CHROME_PID_FILE = path.join(os.tmpdir(), 'chrome-debug.chrome.pid');
 
+// 2026-11-04: spawn PowerShell by absolute path. A bare 'powershell.exe'
+// failed with `spawnSync powershell.exe EFTYPE` on this host, which disabled
+// the WMI launcher, the start script and the profile-holder check.
+const POWERSHELL_EXE = (() => {
+    if (process.platform !== 'win32') return 'powershell.exe';
+    const p = path.join(process.env.SystemRoot || process.env.windir || 'C:\\Windows',
+                        'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    try { if (fs.existsSync(p)) return p; } catch (_) {}
+    return 'powershell.exe';
+})();
+
 /** `~` / `~/x` → homedir. Anything else passes through untouched. */
 function expandHome(p) {
     if (!p) return p;
@@ -213,7 +224,7 @@ function buildWmiCreatePsCommand(exe, args) {
 /** Launch via WMI. @returns {{ok:boolean, pid?:number, reason?:string}} */
 function wmiCreateProcess(exe, args) {
     try {
-        const out = execFileSync('powershell.exe',
+        const out = execFileSync(POWERSHELL_EXE,
             ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
              '-Command', buildWmiCreatePsCommand(exe, args)],
             { timeout: 20_000, encoding: 'utf8', windowsHide: true });
@@ -251,7 +262,7 @@ function findWindowsChromesUsingProfile(profileDir) {
     try {
         const ps = 'Get-CimInstance Win32_Process -Filter "Name=\'chrome.exe\' OR Name=\'msedge.exe\' OR Name=\'chromium.exe\'" | ' +
                    'ForEach-Object { "$($_.ProcessId)`t$($_.CommandLine)" }';
-        const out = execFileSync('powershell.exe',
+        const out = execFileSync(POWERSHELL_EXE,
             ['-NoProfile', '-NonInteractive', '-Command', ps],
             { timeout: 10_000, encoding: 'utf8', windowsHide: true });
         return parseProfileHolders(out, profileDir);
@@ -421,6 +432,24 @@ function probeCdp(cdpUrl, timeoutMs = 2000) {
     });
 }
 
+/** Like waitForPort, but gives up early once the start script has exited and
+ *  the port is still closed: start-chrome.ps1 waits for the port itself, so an
+ *  exited script + closed port means it failed (e.g. PowerShell blocked) and the
+ *  rest of the 45s budget would be wasted. 2026-11-04. */
+async function waitForPortOrScriptExit(url, child, log, budgetMs = AUTOSTART_WAIT_MS) {
+    let exitedAt = 0;
+    const mark = () => { if (!exitedAt) exitedAt = Date.now(); };
+    child.once('exit', mark);
+    child.once('error', mark);
+    const deadline = Date.now() + budgetMs;
+    while (Date.now() < deadline) {
+        if (await probeCdp(url)) return { up: true, exited: false };
+        if (exitedAt && Date.now() - exitedAt > 5000) return { up: false, exited: true };
+        await new Promise(r => setTimeout(r, AUTOSTART_POLL_MS));
+    }
+    return { up: false, exited: false };
+}
+
 async function waitForPort(url, log, budgetMs = AUTOSTART_WAIT_MS) {
     const deadline = Date.now() + budgetMs;
     while (Date.now() < deadline) {
@@ -478,7 +507,7 @@ async function ensureChromeCdp(cdpUrl, onLog) {
     const script = findStartScript();
     if (script) {
         const isPs1 = script.endsWith('.ps1');
-        const cmd = isPs1 ? 'powershell.exe' : 'bash';
+        const cmd = isPs1 ? POWERSHELL_EXE : 'bash';
         const argv = isPs1
             ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script]
             : [script];
@@ -487,11 +516,16 @@ async function ensureChromeCdp(cdpUrl, onLog) {
             const child = spawn(cmd, argv, { detached: true, stdio: 'ignore', cwd: path.dirname(path.dirname(script)) });
             child.on('error', () => {});
             child.unref();
-            if (await waitForPort(url, log)) {
+            const t0 = Date.now();
+            const w = await waitForPortOrScriptExit(url, child, log);
+            if (w.up) {
                 log('Chrome CDP is up (auto-started via script).');
                 return { up: true, autostarted: true, method: 'script' };
             }
-            reasons.push('start script ran but port stayed down 45s');
+            const secs = Math.round((Date.now() - t0) / 1000);
+            log(`  start script did not open the port (${w.exited ? 'script exited' : 'timed out'} after ${secs}s)`);
+            reasons.push(w.exited ? `start script exited after ${secs}s without opening the port`
+                                  : `start script ran but port stayed down ${secs}s`);
         } catch (e) {
             reasons.push(`script spawn failed: ${e.message}`);
         }
@@ -533,22 +567,74 @@ async function ensureChromeCdp(cdpUrl, onLog) {
  * Connect to Chrome CDP with retries.
  * @param {object} chromium — playwright-core chromium object (from caller's require)
  */
+/**
+ * 2026-11-04: the CDP port can stay open while the browser itself is hung
+ * (connectOverCDP reaches <ws connected> then times out). ensureChromeCdp()
+ * only probes the HTTP port, so it never restarted such a Chrome. Kill the
+ * Chrome holding our dedicated profile and relaunch it. Windows, local only.
+ */
+async function recoverHungChrome(url, log) {
+    if (process.platform !== 'win32') return false;
+    const host = new URL(url).hostname;
+    if (host !== '127.0.0.1' && host !== 'localhost') return false;
+    if (!(await probeCdp(url))) return false; // port down: not a hang
+    const profileDir = path.resolve(expandHome(process.env.CHROME_PROFILE || path.join(os.homedir(), '.chrome-debug-profile')));
+    if (looksLikeDefaultUserDataDir(profileDir)) return false; // never kill the user's main Chrome
+    // Only processes whose command line proves they run OUR dedicated profile.
+    // The PID file is deliberately NOT trusted here: after Chrome exits Windows
+    // reuses PIDs, so a stale file could point at an unrelated program.
+    const pids = new Set(findWindowsChromesUsingProfile(profileDir).map(h => h.pid));
+    if (!pids.size) return false;
+    log(`CDP port answers but Chrome is unresponsive — restarting AgentChat Chrome (PID ${[...pids].join(', ')})...`);
+    for (const pid of pids) {
+        try { execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { timeout: 10_000, stdio: 'ignore', windowsHide: true }); } catch (_) {}
+    }
+    await sleep(3000);
+    const r = await ensureChromeCdp(url, log);
+    if (r.up) log('AgentChat Chrome restarted.');
+    else log('Restart after hang failed: ' + (r.reason || 'unknown'));
+    return !!r.up;
+}
+
+function isTimeoutError(err) {
+    return !!err && (err.name === 'TimeoutError' || /Timeout \d+ms exceeded/i.test(String(err.message || '')));
+}
+
 async function connectWithRetry(chromium, cdpUrl, retries = 3, onLog) {
     const url = cdpUrl || CDP_URL;
     const log = onLog || (() => {});
-    for (let i = 1; i <= retries; i++) {
+    // A merely BUSY Chrome (another AgentChat client using it) can miss one
+    // 30s handshake, so only two consecutive timeouts count as a hang.
+    let recovered = false;
+    let timeouts = 0;
+    let lastErr;
+    let budget = retries;
+    for (let i = 1; i <= budget; i++) {
         try {
-            log(`Connecting to Chrome CDP (attempt ${i}/${retries})...`);
+            log(`Connecting to Chrome CDP (attempt ${i}/${budget})...`);
             const browser = await chromium.connectOverCDP(url);
             browser.on('disconnected', () => {
                 log('CRITICAL: CDP connection to Chrome dropped.');
             });
             return browser;
         } catch (err) {
-            if (i === retries) throw err;
+            lastErr = err;
+            timeouts = isTimeoutError(err) ? timeouts + 1 : 0;
+            if (!recovered && timeouts >= 2) {
+                recovered = true;
+                let ok = false;
+                try { ok = await recoverHungChrome(url, log); } catch (_) {}
+                if (ok) {
+                    timeouts = 0;
+                    if (i === budget) budget++; // always try once more on the fresh Chrome
+                    continue;
+                }
+            }
+            if (i === budget) break;
             await new Promise(r => setTimeout(r, 2000));
         }
     }
+    throw lastErr;
 }
 
 /** Check CDP connectivity. Exit on failure (CLI mode), or return boolean. */
@@ -572,4 +658,5 @@ module.exports = {
     // v18 (exported for the regression suite + operator tooling)
     winArgQuote, buildWmiCreatePsCommand, parseProfileHolders, looksLikeDefaultUserDataDir,
     isProcessAlive, waitForPortOrDeath, netstatPortDiag, findWindowsChromesUsingProfile,
+    recoverHungChrome, POWERSHELL_EXE, isTimeoutError, waitForPortOrScriptExit,
 };
