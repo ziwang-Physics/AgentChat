@@ -27,14 +27,14 @@
 
 ## 🌐 赞助商 · IPWO 住宅代理
 
-<a href="https://www.ipwo.net"><img src="ipwo.png" alt="IPWO 住宅代理" width="100%"></a>
+<a href="https://www.ipwo.net/?ref=githubAgentChat"><img src="ipwo.png" alt="IPWO 住宅代理" width="100%"></a>
 
 网页 AI 对 IP 质量很敏感，机房 IP 容易触发风控或验证码。**IPWO 住宅代理**提供 195+ 个国家和地区的 9000 万+ 住宅 IP 资源，支持 HTTP(S) / SOCKS5 协议、国家及城市级定位和灵活会话配置，适用于海外 AI 服务访问、浏览器自动化、跨境开发及数据采集等场景。
 
 - 🔄 动态住宅 / 静态住宅 / 不限量住宅代理，动态 IP 支持**免费测试**
 - 💰 静态 IP 低至 **9.9 元/月/条**，9 折优惠码：**`0202`**
 
-👉 <a href="https://www.ipwo.net"><ins>前往 IPWO 官网免费测试</ins></a>
+👉 <a href="https://www.ipwo.net/?ref=githubAgentChat"><ins>前往 IPWO 官网免费测试</ins></a>
 
 ---
 
