@@ -25,6 +25,17 @@
 | **AgentChat-IndependentTasks** | 并行编排 | 一次性触发8个ai。默认触发4个，可根据任务数量指定，如16个独立任务让8个Web 端分别执行两个任务 |大量高独立性任务|
 | **AgentChat-WebSubAgent** | 串行管道 | 核心Skill（架构图如下），6 步 AI 管道：你的Agent规划→Kimi 搜索→Gemini 推理→Agent 合成→ChatGPT或Claude 审查 | 深度推理 + 质量审查 |
 
+## 🌐 赞助商 · IPWO 住宅代理
+
+<a href="https://www.ipwo.net"><img src="ipwo.png" alt="IPWO 住宅代理" width="100%"></a>
+
+网页 AI 对 IP 质量很敏感，机房 IP 容易触发风控或验证码。**IPWO 住宅代理**提供 195+ 个国家和地区的 9000 万+ 住宅 IP 资源，支持 HTTP(S) / SOCKS5 协议、国家及城市级定位和灵活会话配置，适用于海外 AI 服务访问、浏览器自动化、跨境开发及数据采集等场景。
+
+- 🔄 动态住宅 / 静态住宅 / 不限量住宅代理，动态 IP 支持**免费测试**
+- 💰 静态 IP 低至 **9.9 元/月/条**，9 折优惠码：**`0202`**
+
+👉 <a href="https://www.ipwo.net"><ins>前往 IPWO 官网免费测试</ins></a>
+
 ---
 
 ## 🏗️ Architecture
